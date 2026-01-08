@@ -1,7 +1,7 @@
 extends Node3D
 class_name Worker
 
-enum WorkerState { IDLE, MOVING, WORKING }
+enum WorkerState { IDLE, MOVING, WORKING, WAITING }
 
 const WORK_DURATION := 0.5
 const IDLE_PAUSE := 0.5
@@ -55,6 +55,8 @@ func set_state(new_state: WorkerState) -> void:
             mesh_instance.material_override = mat_moving
         WorkerState.WORKING:
             mesh_instance.material_override = mat_working
+        WorkerState.WAITING:
+            mesh_instance.material_override = mat_idle
 
 func get_block_coord() -> Vector3i:
     return Vector3i(int(round(position.x)), int(floor(position.y)), int(round(position.z)))
@@ -68,43 +70,83 @@ func update_worker(dt: float, world, task_queue, pathfinder) -> void:
         WorkerState.IDLE:
             update_idle(dt, world, task_queue, pathfinder)
         WorkerState.MOVING:
-            update_moving(dt)
+            update_moving(dt, task_queue)
         WorkerState.WORKING:
             update_working(dt, world, task_queue)
+        WorkerState.WAITING:
+            update_waiting(dt, world, task_queue, pathfinder)
 
 func update_idle(dt: float, world, task_queue, pathfinder) -> void:
-    var worker_y := int(floor(position.y))
-    var task = task_queue.find_nearest(TaskQueue.TaskType.DIG, position)
-    if task == null:
-        task = task_queue.find_nearest_stairs_at_level(position, worker_y)
-    if task == null:
-        task = task_queue.find_nearest(TaskQueue.TaskType.PLACE, position)
+    var result: Dictionary = find_pathable_task(TaskQueue.TaskType.DIG, world, task_queue, pathfinder)
+    if result.is_empty():
+        result = find_pathable_task(TaskQueue.TaskType.STAIRS, world, task_queue, pathfinder)
+    if result.is_empty():
+        result = find_pathable_task(TaskQueue.TaskType.PLACE, world, task_queue, pathfinder)
 
-    if task != null:
-        var start := get_block_coord()
+    if not result.is_empty():
+        var task = result["task"]
+        var maybe_path: Array = result["path"]
+        task.status = TaskQueue.TaskStatus.IN_PROGRESS
+        task.assigned_worker = self
+        current_task_id = task.id
+        path = maybe_path
+        path_index = 0
+        set_target_from_path()
+        set_state(WorkerState.MOVING)
+        return
+
+    update_wander(dt, world, pathfinder)
+
+func find_pathable_task(task_type: int, world, task_queue, pathfinder) -> Dictionary:
+    var candidates: Array = []
+    for task in task_queue.tasks:
+        if task.status != TaskQueue.TaskStatus.PENDING:
+            continue
+        if task.type != task_type:
+            continue
+        var dx: float = float(task.pos.x) - position.x
+        var dy: float = float(task.pos.y) - position.y
+        var dz: float = float(task.pos.z) - position.z
+        var dist_sq: float = dx * dx + dy * dy + dz * dz
+        candidates.append({"task": task, "dist": dist_sq})
+
+    candidates.sort_custom(func(a, b):
+        return a["dist"] < b["dist"]
+    )
+
+    var start: Vector3i = get_block_coord()
+    for entry in candidates:
+        var task = entry["task"]
         var maybe_path: Array = []
         if task.type == TaskQueue.TaskType.STAIRS:
             maybe_path = find_path_to_stairs(world, start, task.pos, pathfinder)
+        elif task.type == TaskQueue.TaskType.DIG:
+            maybe_path = pathfinder.find_path_to_adjacent_on_level(world, start, task.pos, task.pos.y)
+            if maybe_path.is_empty() and task.pos.y == start.y:
+                maybe_path = pathfinder.find_path(world, start, task.pos, false, true)
         else:
-            maybe_path = pathfinder.find_path(world, start, task.pos)
-
+            maybe_path = pathfinder.find_path_to_adjacent_on_level(world, start, task.pos, task.pos.y)
         if maybe_path.size() > 0:
-            task.status = TaskQueue.TaskStatus.IN_PROGRESS
-            task.assigned_worker = self
-            current_task_id = task.id
-            path = maybe_path
-            path_index = 0
-            set_target_from_path()
-            set_state(WorkerState.MOVING)
-    else:
-        update_wander(dt, world, pathfinder)
+            return {"task": task, "path": maybe_path}
+
+    return {}
+
+func can_work_task(task) -> bool:
+    if task.type == TaskQueue.TaskType.DIG or task.type == TaskQueue.TaskType.PLACE:
+        var worker_pos := get_block_coord()
+        if worker_pos.y != task.pos.y:
+            return false
+        var dx: int = abs(worker_pos.x - task.pos.x)
+        var dz: int = abs(worker_pos.z - task.pos.z)
+        return dx + dz == 1
+    return true
 
 func set_target_from_path() -> void:
     if path_index < path.size():
         var node: Vector3i = path[path_index]
         target_pos = Vector3(node.x, node.y, node.z)
 
-func update_moving(dt: float) -> void:
+func update_moving(dt: float, task_queue) -> void:
     var delta := target_pos - position
     var dist := delta.length()
     if dist < 0.15:
@@ -113,8 +155,13 @@ func update_moving(dt: float) -> void:
         if path_index >= path.size():
             path.clear()
             if current_task_id >= 0:
-                set_state(WorkerState.WORKING)
-                work_timer = WORK_DURATION
+                var task = task_queue.get_task(current_task_id)
+                if task != null and can_work_task(task):
+                    set_state(WorkerState.WORKING)
+                    work_timer = WORK_DURATION
+                else:
+                    set_state(WorkerState.WAITING)
+                    idle_timer = IDLE_PAUSE
             else:
                 set_state(WorkerState.IDLE)
                 wander_wait = rng.randf_range(WANDER_WAIT_MIN, WANDER_WAIT_MAX)
@@ -144,10 +191,43 @@ func update_working(dt: float, world, task_queue) -> void:
                 TaskQueue.TaskType.STAIRS:
                     world.set_block(task.pos.x, task.pos.y, task.pos.z, task.material)
             task.status = TaskQueue.TaskStatus.COMPLETED
+            if task.type == TaskQueue.TaskType.DIG:
+                world.reassess_waiting_tasks()
 
     current_task_id = -1
     idle_timer = IDLE_PAUSE
     set_state(WorkerState.IDLE)
+
+func update_waiting(dt: float, world, task_queue, pathfinder) -> void:
+    if current_task_id < 0:
+        set_state(WorkerState.IDLE)
+        return
+
+    var task = task_queue.get_task(current_task_id)
+    if task == null or task.status == TaskQueue.TaskStatus.COMPLETED:
+        current_task_id = -1
+        set_state(WorkerState.IDLE)
+        return
+
+    var start: Vector3i = get_block_coord()
+    var maybe_path: Array = []
+    if task.type == TaskQueue.TaskType.STAIRS:
+        maybe_path = find_path_to_stairs(world, start, task.pos, pathfinder)
+    elif task.type == TaskQueue.TaskType.DIG:
+        maybe_path = pathfinder.find_path_to_adjacent_on_level(world, start, task.pos, task.pos.y)
+        if maybe_path.is_empty() and task.pos.y == start.y:
+            maybe_path = pathfinder.find_path(world, start, task.pos, false, true)
+    else:
+        maybe_path = pathfinder.find_path_to_adjacent_on_level(world, start, task.pos, task.pos.y)
+
+    if maybe_path.size() > 0:
+        path = maybe_path
+        path_index = 0
+        set_target_from_path()
+        set_state(WorkerState.MOVING)
+        return
+
+    idle_timer = IDLE_PAUSE
 
 func update_wander(dt: float, world, pathfinder) -> void:
     if wander_wait > 0.0:

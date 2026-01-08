@@ -107,6 +107,13 @@ func handle_mouse() -> void:
 		var drag_rect: Dictionary = get_drag_rect(drag_start, drag_end, drag_plane_y)
 		commit_selection(drag_start, drag_end, drag_rect)
 		is_dragging = false
+		world.clear_drag_preview()
+		return
+
+	if is_dragging:
+		var drag_now: Vector2 = get_viewport().get_mouse_position()
+		var drag_rect: Dictionary = get_drag_rect(drag_start, drag_now, drag_plane_y)
+		world.set_drag_preview(drag_rect, world.player_mode)
 
 func get_drag_plane_y(screen_pos: Vector2) -> float:
 	var ray_origin := camera.project_ray_origin(screen_pos)
@@ -189,13 +196,13 @@ func enqueue_task_at(x: int, y: int, z: int) -> void:
 	match world.player_mode:
 		World.PlayerMode.DIG:
 			if world.is_solid(x, y, z):
-				world.task_queue.add_dig_task(Vector3i(x, y, z))
+				world.queue_task_request(TaskQueue.TaskType.DIG, Vector3i(x, y, z), 0)
 		World.PlayerMode.PLACE:
 			if not world.is_solid(x, y, z):
-				world.task_queue.add_place_task(Vector3i(x, y, z), 8)
+				world.queue_task_request(TaskQueue.TaskType.PLACE, Vector3i(x, y, z), 8)
 		World.PlayerMode.STAIRS:
 			if world.is_solid(x, y, z) and world.get_block(x, y, z) != World.STAIR_BLOCK_ID:
-				world.task_queue.add_stairs_task(Vector3i(x, y, z), World.STAIR_BLOCK_ID)
+				world.queue_task_request(TaskQueue.TaskType.STAIRS, Vector3i(x, y, z), World.STAIR_BLOCK_ID)
 		_:
 			pass
 
