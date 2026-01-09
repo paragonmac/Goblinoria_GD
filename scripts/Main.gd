@@ -3,6 +3,7 @@ extends Node3D
 @onready var world: World = $World
 @onready var camera: Camera3D = $Camera3D
 @onready var hud_label: Label = $HUD/ModeLabel
+@onready var hud_layer: CanvasLayer = $HUD
 
 var drag_start: Vector2
 var is_dragging := false
@@ -16,6 +17,10 @@ var cam_pitch: float = -30.0
 var cam_yaw: float = 45.0
 var right_mouse_down: bool = false
 var prev_mouse_pos: Vector2 = Vector2.ZERO
+var show_profiler: bool = false
+var profiler_label: Label
+var profiler_samples: Array = []
+var profiler_window_sec: float = 3.0
 
 func _ready() -> void:
 	var center := Vector3(world.world_size_x / 2.0, world.top_render_y, world.world_size_z / 2.0)
@@ -24,6 +29,7 @@ func _ready() -> void:
 	var rot := camera.rotation
 	cam_pitch = rad_to_deg(rot.x)
 	cam_yaw = rad_to_deg(rot.y)
+	setup_profiler_label()
 
 func _process(dt: float) -> void:
 	if is_key_just_pressed(KEY_1):
@@ -35,6 +41,13 @@ func _process(dt: float) -> void:
 	if is_key_just_pressed(KEY_4):
 		world.player_mode = World.PlayerMode.STAIRS
 
+	if is_key_just_pressed(KEY_F2):
+		show_profiler = not show_profiler
+		if profiler_label != null:
+			profiler_label.visible = show_profiler
+		if show_profiler:
+			profiler_samples.clear()
+
 	if is_key_just_pressed(KEY_BRACKETLEFT):
 		world.set_top_render_y(world.top_render_y - 1)
 	if is_key_just_pressed(KEY_BRACKETRIGHT):
@@ -43,6 +56,7 @@ func _process(dt: float) -> void:
 	update_camera(dt)
 	handle_mouse()
 	update_hud()
+	update_profiler(dt)
 	world.update_world(dt)
 
 func update_camera(dt: float) -> void:
@@ -224,3 +238,45 @@ func is_key_just_pressed(keycode: int) -> bool:
 	var was_down: bool = bool(key_state.get(keycode, false))
 	key_state[keycode] = down
 	return down and not was_down
+
+func setup_profiler_label() -> void:
+	profiler_label = Label.new()
+	profiler_label.name = "ProfilerLabel"
+	profiler_label.offset_left = 10.0
+	profiler_label.offset_top = 34.0
+	profiler_label.offset_right = 700.0
+	profiler_label.offset_bottom = 58.0
+	profiler_label.text = ""
+	profiler_label.visible = show_profiler
+	hud_layer.add_child(profiler_label)
+
+func update_profiler(dt: float) -> void:
+	if profiler_label == null:
+		return
+	if not show_profiler:
+		return
+
+	var now: float = Time.get_ticks_msec() / 1000.0
+	var process_ms: float = Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
+	var physics_ms: float = Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0
+	var current_ms: float = process_ms + physics_ms
+
+	profiler_samples.append({"t": now, "total": current_ms, "process": process_ms, "physics": physics_ms})
+	var cutoff: float = now - profiler_window_sec
+	var pruned: Array = []
+	for sample in profiler_samples:
+		if float(sample["t"]) >= cutoff:
+			pruned.append(sample)
+	profiler_samples = pruned
+
+	var peak_ms: float = current_ms
+	for sample in profiler_samples:
+		var sample_ms: float = float(sample["total"])
+		if sample_ms > peak_ms:
+			peak_ms = sample_ms
+
+	profiler_label.text = "CPU Frame (Main Thread)\nProcess+Physics: %.1f ms | Peak %.0fs: %.1f ms" % [
+		current_ms,
+		profiler_window_sec,
+		peak_ms
+	]

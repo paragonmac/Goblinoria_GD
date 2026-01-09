@@ -475,8 +475,20 @@ func create_blocked_task_overlay(task_type: int) -> MeshInstance3D:
 	return mesh_instance
 
 func set_top_render_y(new_y: int) -> void:
+	var old_y: int = top_render_y
 	top_render_y = clamp(new_y, 0, world_size_y - 1)
-	build_all_chunks()
+	if top_render_y == old_y:
+		return
+
+	var min_y: int = min(old_y, top_render_y)
+	var max_y: int = max(old_y, top_render_y)
+	var min_cy: int = clampi(int(floor(float(min_y) / CHUNK_SIZE)), 0, WORLD_CHUNKS_Y - 1)
+	var max_cy: int = clampi(int(floor(float(max_y) / CHUNK_SIZE)), 0, WORLD_CHUNKS_Y - 1)
+
+	for cx in range(WORLD_CHUNKS_X):
+		for cy in range(min_cy, max_cy + 1):
+			for cz in range(WORLD_CHUNKS_Z):
+				regenerate_chunk(cx, cy, cz)
 
 func is_visible_at_level(y_value: float) -> bool:
 	return y_value <= top_render_y + 1
