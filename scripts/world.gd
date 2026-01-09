@@ -22,12 +22,15 @@ var task_overlays: Dictionary = {}
 var block_material: StandardMaterial3D
 var drag_previews: Dictionary = {}
 var drag_materials: Dictionary = {}
+var chunk_face_stats: Dictionary = {}
+var total_visible_faces: int = 0
+var total_occluded_faces: int = 0
 
 var task_queue := TaskQueue.new()
 var pathfinder := Pathfinder.new()
 var workers: Array = []
 var blocked_tasks: Array = []
-var blocked_recheck_timer := 0.0
+var blocked_recheck_timer := 1.0
 
 enum PlayerMode { INFORMATION, DIG, PLACE, STAIRS }
 var player_mode := PlayerMode.DIG
@@ -42,6 +45,9 @@ func init_world() -> void:
 	blocks.fill(0)
 	sea_level = max(world_size_y - 30, 8)
 	top_render_y = sea_level
+	chunk_face_stats.clear()
+	total_visible_faces = 0
+	total_occluded_faces = 0
 
 	seed_world()
 	build_all_chunks()
@@ -96,6 +102,8 @@ func regenerate_chunk(cx: int, cy: int, cz: int) -> void:
 	var vertices := PackedVector3Array()
 	var normals := PackedVector3Array()
 	var colors := PackedColorArray()
+	var visible_faces := 0
+	var occluded_faces := 0
 
 	for lx in range(CHUNK_SIZE):
 		var wx := cx * CHUNK_SIZE + lx
@@ -114,18 +122,40 @@ func regenerate_chunk(cx: int, cy: int, cz: int) -> void:
 
 				if not is_solid(wx, wy + 1, wz) or wy + 1 > top_render_y:
 					add_face(vertices, normals, colors, base, Vector3.UP, color)
+					visible_faces += 1
+				else:
+					occluded_faces += 1
 				if not is_solid(wx, wy - 1, wz):
 					add_face(vertices, normals, colors, base, Vector3.DOWN, color)
+					visible_faces += 1
+				else:
+					occluded_faces += 1
 				if not is_solid(wx, wy, wz + 1):
 					add_face(vertices, normals, colors, base, Vector3.FORWARD, color)
+					visible_faces += 1
+				else:
+					occluded_faces += 1
 				if not is_solid(wx, wy, wz - 1):
 					add_face(vertices, normals, colors, base, Vector3.BACK, color)
+					visible_faces += 1
+				else:
+					occluded_faces += 1
 				if not is_solid(wx + 1, wy, wz):
 					add_face(vertices, normals, colors, base, Vector3.RIGHT, color)
+					visible_faces += 1
+				else:
+					occluded_faces += 1
 				if not is_solid(wx - 1, wy, wz):
 					add_face(vertices, normals, colors, base, Vector3.LEFT, color)
+					visible_faces += 1
+				else:
+					occluded_faces += 1
 
 	var mesh := ArrayMesh.new()
+	var prev_counts: Vector2i = chunk_face_stats.get(key, Vector2i(0, 0))
+	total_visible_faces += visible_faces - prev_counts.x
+	total_occluded_faces += occluded_faces - prev_counts.y
+	chunk_face_stats[key] = Vector2i(visible_faces, occluded_faces)
 	if vertices.size() == 0:
 		mesh_instance.mesh = mesh
 		return
@@ -241,12 +271,87 @@ func face_shade(normal: Vector3) -> float:
 		return 0.75
 	return 0.82
 
+func get_draw_burden_stats() -> Dictionary:
+	var drawn_tris: int = total_visible_faces * 2
+	var culled_tris: int = total_occluded_faces * 2
+	var total_tris: int = drawn_tris + culled_tris
+	var percent: float = 0.0
+	if total_tris > 0:
+		percent = float(drawn_tris) / float(total_tris) * 100.0
+	return {"drawn": drawn_tris, "culled": culled_tris, "percent": percent}
+
+func get_camera_tris_rendered(camera: Camera3D) -> Dictionary:
+	if camera == null:
+		return {"rendered": 0, "total": 0, "percent": 0.0}
+	var frustum: Array = camera.get_frustum()
+	var near_sample: float = max(camera.near + 0.1, 0.1)
+	var inside_point: Vector3 = camera.global_transform.origin + (-camera.global_transform.basis.z) * near_sample
+	var planes: Array = []
+	for plane in frustum:
+		var p: Plane = plane
+		var inside_positive: bool = p.distance_to(inside_point) >= 0.0
+		planes.append({"plane": p, "inside_positive": inside_positive})
+	var rendered_faces := 0
+	for key in chunk_face_stats.keys():
+		var counts: Vector2i = chunk_face_stats[key]
+		if counts.x == 0:
+			continue
+		if is_chunk_in_view(planes, key):
+			rendered_faces += counts.x
+	var rendered_tris: int = rendered_faces * 2
+	var total_tris: int = total_visible_faces * 2
+	var percent := 0.0
+	if total_tris > 0:
+		percent = float(rendered_tris) / float(total_tris) * 100.0
+	return {"rendered": rendered_tris, "total": total_tris, "percent": percent}
+
+func is_chunk_in_view(planes: Array, key: Vector3i) -> bool:
+	var min_corner := Vector3(
+		key.x * CHUNK_SIZE,
+		key.y * CHUNK_SIZE,
+		key.z * CHUNK_SIZE
+	)
+	var max_corner := min_corner + Vector3(CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE)
+	for entry in planes:
+		var p: Plane = entry["plane"]
+		var inside_positive: bool = entry["inside_positive"]
+		var v: Vector3
+		if inside_positive:
+			v = Vector3(
+				max_corner.x if p.normal.x >= 0.0 else min_corner.x,
+				max_corner.y if p.normal.y >= 0.0 else min_corner.y,
+				max_corner.z if p.normal.z >= 0.0 else min_corner.z
+			)
+			if p.distance_to(v) < 0.0:
+				return false
+		else:
+			v = Vector3(
+				min_corner.x if p.normal.x >= 0.0 else max_corner.x,
+				min_corner.y if p.normal.y >= 0.0 else max_corner.y,
+				min_corner.z if p.normal.z >= 0.0 else max_corner.z
+			)
+			if p.distance_to(v) > 0.0:
+				return false
+	return true
+
 func update_world(dt: float) -> void:
+	update_workers(dt)
+	update_task_queue()
+	update_task_overlays_phase()
+	update_blocked_tasks(dt)
+
+func update_workers(dt: float) -> void:
 	for worker in workers:
 		worker.update_worker(dt, self, task_queue, pathfinder)
 		worker.visible = is_visible_at_level(worker.position.y)
+
+func update_task_queue() -> void:
 	task_queue.cleanup_completed()
+
+func update_task_overlays_phase() -> void:
 	update_task_overlays()
+
+func update_blocked_tasks(dt: float) -> void:
 	blocked_recheck_timer -= dt
 	if blocked_recheck_timer <= 0.0:
 		recheck_blocked_tasks()

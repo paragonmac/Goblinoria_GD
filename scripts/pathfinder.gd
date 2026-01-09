@@ -2,6 +2,7 @@ extends RefCounted
 class_name Pathfinder
 
 const STAIR_BLOCK_ID := 100
+var debug_profiler: DebugProfiler
 
 func is_blocking(block_id: int) -> bool:
     return block_id != 0 and block_id != STAIR_BLOCK_ID
@@ -66,6 +67,9 @@ func heuristic(a: Vector3i, b: Vector3i) -> int:
     return abs(a.x - b.x) + abs(a.y - b.y) + abs(a.z - b.z)
 
 func find_path(world, start: Vector3i, goal: Vector3i, allow_near_goal: bool = true, return_best_effort: bool = false) -> Array:
+    var profiler: DebugProfiler = debug_profiler
+    if profiler != null and profiler.enabled:
+        profiler.begin("pathfinder/find_path")
     var open_set: Array[Vector3i] = []
     var came_from: Dictionary = {}
     var g_score: Dictionary = {}
@@ -80,6 +84,7 @@ func find_path(world, start: Vector3i, goal: Vector3i, allow_near_goal: bool = t
     var best_node: Vector3i = start
     var best_h: float = float(heuristic(start, goal))
 
+    var result: Array = []
     while open_set.size() > 0 and iterations < max_iterations:
         iterations += 1
         var current: Vector3i = open_set[0]
@@ -91,9 +96,11 @@ func find_path(world, start: Vector3i, goal: Vector3i, allow_near_goal: bool = t
                 current_f = cand_f
 
         if current == goal:
-            return reconstruct_path(came_from, current)
+            result = reconstruct_path(came_from, current)
+            break
         if allow_near_goal and abs(current.x - goal.x) <= 1 and abs(current.y - goal.y) <= 1 and abs(current.z - goal.z) <= 1:
-            return reconstruct_path(came_from, current)
+            result = reconstruct_path(came_from, current)
+            break
 
         var current_h: float = float(heuristic(current, goal))
         if current_h < best_h:
@@ -110,10 +117,12 @@ func find_path(world, start: Vector3i, goal: Vector3i, allow_near_goal: bool = t
                 if not open_set.has(neighbor):
                     open_set.append(neighbor)
 
-    if return_best_effort and best_node != start:
-        return reconstruct_path(came_from, best_node)
+    if result.is_empty() and return_best_effort and best_node != start:
+        result = reconstruct_path(came_from, best_node)
 
-    return []
+    if profiler != null and profiler.enabled:
+        profiler.end("pathfinder/find_path")
+    return result
 
 func find_path_to_adjacent_on_level(world, start: Vector3i, target: Vector3i, level: int) -> Array:
     if level < 0 or level >= world.world_size_y:

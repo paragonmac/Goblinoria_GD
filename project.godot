@@ -14,3 +14,7 @@ config/name="Goblinoria"
 run/main_scene="res://scenes/Main.tscn"
 config/features=PackedStringArray("4.5", "Forward Plus")
 config/icon="res://icon.svg"
+
+[display]
+
+window/vsync/vsync_mode=0

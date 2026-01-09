@@ -13,17 +13,28 @@ var lbl_average_fps: Label
 var lbl_frame_time: Label
 var lbl_peak_frame: Label
 var lbl_memory: Label
+var lbl_peak_title: Label
 
 
 func _ready() -> void:
     add_theme_constant_override("separation", 24)
     custom_minimum_size = Vector2(0, 48)
 
-    lbl_fps = _create_stat_item("FPS", "0", ProfilerConstants.COLOR_TEXT)
-    lbl_average_fps = _create_stat_item("AVG", "0", ProfilerConstants.COLOR_TEXT_DIM)
-    lbl_frame_time = _create_stat_item("FRAME", "0.00 ms", ProfilerConstants.COLOR_GOOD)
-    lbl_peak_frame = _create_stat_item("PEAK", "0.00 ms", ProfilerConstants.COLOR_BAD)
-    lbl_memory = _create_stat_item("MEM", "0 MB", Color(0.5, 0.8, 1.0))
+    var fps_item: Dictionary = _create_stat_item("FPS", "0", ProfilerConstants.COLOR_TEXT)
+    lbl_fps = fps_item["value"]
+
+    var avg_item: Dictionary = _create_stat_item("AVG", "0", ProfilerConstants.COLOR_TEXT_DIM)
+    lbl_average_fps = avg_item["value"]
+
+    var frame_item: Dictionary = _create_stat_item("FRAME", "0.00 ms", ProfilerConstants.COLOR_GOOD)
+    lbl_frame_time = frame_item["value"]
+
+    var peak_item: Dictionary = _create_stat_item("PEAK", "0.00 ms", ProfilerConstants.COLOR_BAD)
+    lbl_peak_title = peak_item["title"]
+    lbl_peak_frame = peak_item["value"]
+
+    var mem_item: Dictionary = _create_stat_item("MEM", "0 MB", Color(0.5, 0.8, 1.0))
+    lbl_memory = mem_item["value"]
 
 
 ## Update all stats
@@ -40,7 +51,7 @@ func update_stats(current_fps: int, avg_fps: int, frame_time: float, peak_time: 
 
 
 ## Create a stat item (label pair)
-func _create_stat_item(title: String, value: String, color: Color) -> Label:
+func _create_stat_item(title: String, value: String, color: Color) -> Dictionary:
     var vbox = VBoxContainer.new()
     vbox.custom_minimum_size = Vector2(70, 0)
 
@@ -59,7 +70,12 @@ func _create_stat_item(title: String, value: String, color: Color) -> Label:
     vbox.add_child(lbl_value)
 
     add_child(vbox)
-    return lbl_value
+    return {"title": lbl_title, "value": lbl_value}
+
+
+func set_peak_label(text: String) -> void:
+    if lbl_peak_title != null:
+        lbl_peak_title.text = text
 
 
 ## Get FPS color

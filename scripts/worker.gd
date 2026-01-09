@@ -198,7 +198,7 @@ func update_working(dt: float, world, task_queue) -> void:
     idle_timer = IDLE_PAUSE
     set_state(WorkerState.IDLE)
 
-func update_waiting(dt: float, world, task_queue, pathfinder) -> void:
+func update_waiting(_dt: float, world, task_queue, pathfinder) -> void:
     if current_task_id < 0:
         set_state(WorkerState.IDLE)
         return

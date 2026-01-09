@@ -25,10 +25,16 @@ var graph_scroll: ScrollContainer  # For auto-scroll
 var update_rate: int = 2
 var frame_counter: int = 0
 var follow_latest: bool = true  # Auto-scroll to newest data
+var window_sec: float = 3.0
+var pipeline_label: Label
 
+
+func _init() -> void:
+    profiler = CPUProfiler.new()
 
 func _ready() -> void:
-    profiler = CPUProfiler.new()
+    if profiler == null:
+        profiler = CPUProfiler.new()
 
     size_flags_horizontal = Control.SIZE_EXPAND_FILL
     size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -39,9 +45,16 @@ func _ready() -> void:
 
 ## Build entire UI structure
 func _build_ui() -> void:
+    pipeline_label = Label.new()
+    pipeline_label.text = "CPU Frame Time = Process + Physics (Main Thread)"
+    pipeline_label.add_theme_font_size_override("font_size", 14)
+    pipeline_label.add_theme_color_override("font_color", ProfilerConstants.COLOR_TEXT_DIM)
+    add_child(pipeline_label)
+
     # Stats display
     var stats_panel = PanelContainer.new()
     stats_display = ProfilerStats.new()
+    stats_display.set_peak_label("PEAK %.0fs" % window_sec)
     stats_panel.add_child(stats_display)
     add_child(stats_panel)
 
@@ -126,34 +139,24 @@ func _connect_controls() -> void:
 
 
 func _process(delta: float) -> void:
-    # CPU Profiler disabled by default (Godot asset blocking prevents full functionality)
-    return
-    # Original auto-activation code commented out below:
-    # var tree = get_tree()
-    # var is_game_running = not tree.paused and tree.root.get_child_count() > 1  # More than just editor root
-    # 
-    # # Activate profiler only when game is running
-    # if is_game_running != profiler.is_active:
-    #     profiler.set_active(is_game_running)
-    # 
-    # if not is_game_running:
-    #     return
-    #
-    # profiler.sample_frame(delta)
-    # frame_counter += 1
-    #
-    # if frame_counter >= update_rate:
-    #     frame_counter = 0
-    #     _update_display()
-    #     _expand_graph_if_needed()
+    if not profiler.is_active:
+        return
+
+    profiler.sample_frame(delta)
+    frame_counter += 1
+
+    if frame_counter >= update_rate:
+        frame_counter = 0
+        _update_display()
+        _expand_graph_if_needed()
 
 
 ## Update all displays
 func _update_display() -> void:
     var fps = profiler.get_current_fps()
     var avg = profiler.get_average_fps()
-    var frame_time = profiler.average_frame_time
-    var peak = profiler.peak_frame_time
+    var frame_time = profiler.get_current_frame_time()
+    var peak = profiler.get_peak_frame_time_window(window_sec)
     var mem = profiler.get_current_memory()
 
     stats_display.update_stats(fps, avg, frame_time, peak, mem)
@@ -282,4 +285,3 @@ func _on_copy_frame() -> void:
         controls.lbl_pause_status.text = "● Paused" if profiler.is_paused else "● Recording"
     else:
         push_error("[CPUProfiler] Failed to copy frame")
-

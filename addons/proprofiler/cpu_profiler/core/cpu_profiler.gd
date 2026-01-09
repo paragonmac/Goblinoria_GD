@@ -76,6 +76,29 @@ func get_current_memory() -> int:
     return frame_history[frame_history.size() - 1].memory_mb
 
 
+## Get current frame time (ms)
+func get_current_frame_time() -> float:
+    if frame_count == 0:
+        return 0.0
+    return frame_history[frame_history.size() - 1].frame_time_ms
+
+
+## Get peak frame time within a recent window
+func get_peak_frame_time_window(window_sec: float) -> float:
+    if frame_history.size() == 0:
+        return 0.0
+    var now: float = (Time.get_ticks_msec() / 1000.0) - start_time
+    var cutoff: float = now - window_sec
+    var peak: float = 0.0
+    for i in range(frame_history.size() - 1, -1, -1):
+        var frame = frame_history[i]
+        if frame.timestamp < cutoff:
+            break
+        if frame.frame_time_ms > peak:
+            peak = frame.frame_time_ms
+    return peak
+
+
 ## Get frame times for graphing
 func get_frame_times() -> Array:
     var times: Array = []
