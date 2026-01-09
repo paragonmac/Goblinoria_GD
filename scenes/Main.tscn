@@ -10,12 +10,14 @@ script = ExtResource("1")
 script = ExtResource("2")
 
 [node name="Camera3D" type="Camera3D" parent="."]
+projection = 1
 current = true
 fov = 60.0
-far = 800.0
+near = 0.1
+far = 2000.0
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
-transform = Transform3D(0.8253356, -0.4050497, 0.3933902, 0, 0.6967067, 0.7173561, -0.5646425, -0.59205955, 0.57501686, 0, 0, 0)
+transform = Transform3D(0.8253356, -0.40504974, 0.3933902, 0, 0.6967067, 0.7173561, -0.5646425, -0.59205955, 0.57501686, 0.561563, 0.65790856, 0.18913758)
 light_color = Color(1, 1, 0.8509804, 1)
 light_energy = 0.889
 light_angular_distance = 7.86

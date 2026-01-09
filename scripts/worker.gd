@@ -25,6 +25,8 @@ var mesh_instance: MeshInstance3D
 var mat_idle: StandardMaterial3D
 var mat_moving: StandardMaterial3D
 var mat_working: StandardMaterial3D
+var shadow_instance: MeshInstance3D
+var shadow_material: StandardMaterial3D
 
 func _ready() -> void:
     rng.seed = hash(Vector3(position.x, position.y, position.z))
@@ -36,6 +38,20 @@ func _ready() -> void:
     mesh_instance.mesh = box
     mesh_instance.position.y = -0.1
     add_child(mesh_instance)
+
+    shadow_instance = MeshInstance3D.new()
+    var shadow_mesh := PlaneMesh.new()
+    shadow_mesh.size = Vector2(0.9, 0.9)
+    shadow_instance.mesh = shadow_mesh
+    shadow_instance.position = Vector3(0.0, -0.48, 0.0)
+    shadow_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+    shadow_material = StandardMaterial3D.new()
+    shadow_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+    shadow_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+    shadow_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+    shadow_material.albedo_color = Color(0.0, 0.0, 0.0, 0.35)
+    shadow_instance.material_override = shadow_material
+    add_child(shadow_instance)
 
     mat_idle = StandardMaterial3D.new()
     mat_idle.albedo_color = Color(0.2, 0.8, 0.2)
