@@ -106,15 +106,15 @@ func _parse_row(cells: Array, column_index: Dictionary) -> void:
 	if block_id < 0 or block_id >= TABLE_SIZE:
 		return
 
-	var solid_text := _get_cell(cells, column_index, "solid", "0")
-	var hardness_text := _get_cell(cells, column_index, "hardness", "0")
-	var replace_text := _get_cell(cells, column_index, "replaceable", "0")
-	var drop_text := _get_cell(cells, column_index, "drop", "0")
-	var name_text := _get_cell(cells, column_index, "name", "")
-	var r_text := _get_cell(cells, column_index, "color_r", "")
-	var g_text := _get_cell(cells, column_index, "color_g", "")
-	var b_text := _get_cell(cells, column_index, "color_b", "")
-	var a_text := _get_cell(cells, column_index, "color_a", "1")
+	var solid_text: String = _get_cell(cells, column_index, "solid", "0")
+	var hardness_text: String = _get_cell(cells, column_index, "hardness", "0")
+	var replace_text: String = _get_cell(cells, column_index, "replaceable", "0")
+	var drop_text: String = _get_cell(cells, column_index, "drop", "0")
+	var name_text: String = _get_cell(cells, column_index, "name", "")
+	var r_text: String = _get_cell(cells, column_index, "color_r", "")
+	var g_text: String = _get_cell(cells, column_index, "color_g", "")
+	var b_text: String = _get_cell(cells, column_index, "color_b", "")
+	var a_text: String = _get_cell(cells, column_index, "color_a", "1")
 
 	solid[block_id] = 1 if _parse_bool(solid_text) else 0
 	replaceable[block_id] = 1 if _parse_bool(replace_text) else 0

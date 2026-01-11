@@ -38,39 +38,39 @@ func build_chunk_mesh(world: World, cx: int, cy: int, cz: int) -> Dictionary:
 				continue
 			for lz in range(chunk_size):
 				var wz := cz * chunk_size + lz
-				var block_id := world.get_block(wx, wy, wz)
+				var block_id := world.get_block_no_generate(wx, wy, wz)
 				if world.is_block_empty_id(block_id):
 					continue
 
 				var base := Vector3(lx, ly, lz)
 				var color := block_color(world, block_id, wx, wy, wz)
 
-				if not world.is_solid(wx, wy + 1, wz) or wy + 1 > world.top_render_y:
+				if not world.is_solid_no_generate(wx, wy + 1, wz) or wy + 1 > world.top_render_y:
 					add_face(vertices, normals, colors, base, Vector3.UP, color)
 					visible_faces += 1
 				else:
 					occluded_faces += 1
-				if not world.is_solid(wx, wy - 1, wz):
+				if not world.is_solid_no_generate(wx, wy - 1, wz):
 					add_face(vertices, normals, colors, base, Vector3.DOWN, color)
 					visible_faces += 1
 				else:
 					occluded_faces += 1
-				if not world.is_solid(wx, wy, wz + 1):
+				if not world.is_solid_no_generate(wx, wy, wz + 1):
 					add_face(vertices, normals, colors, base, Vector3.FORWARD, color)
 					visible_faces += 1
 				else:
 					occluded_faces += 1
-				if not world.is_solid(wx, wy, wz - 1):
+				if not world.is_solid_no_generate(wx, wy, wz - 1):
 					add_face(vertices, normals, colors, base, Vector3.BACK, color)
 					visible_faces += 1
 				else:
 					occluded_faces += 1
-				if not world.is_solid(wx + 1, wy, wz):
+				if not world.is_solid_no_generate(wx + 1, wy, wz):
 					add_face(vertices, normals, colors, base, Vector3.RIGHT, color)
 					visible_faces += 1
 				else:
 					occluded_faces += 1
-				if not world.is_solid(wx - 1, wy, wz):
+				if not world.is_solid_no_generate(wx - 1, wy, wz):
 					add_face(vertices, normals, colors, base, Vector3.LEFT, color)
 					visible_faces += 1
 				else:

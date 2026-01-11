@@ -185,5 +185,26 @@ func update_render_height(old_y: int, new_y: int) -> void:
 			continue
 		regenerate_chunk(coord.x, coord.y, coord.z)
 
+func update_render_height_in_range(old_y: int, new_y: int, min_x: int, max_x: int, min_z: int, max_z: int) -> void:
+	if world == null:
+		return
+	if min_x > max_x or min_z > max_z:
+		return
+	var chunk_size: int = World.CHUNK_SIZE
+	var min_y: int = min(old_y, new_y)
+	var max_y: int = max(old_y, new_y)
+	var max_cy: int = int(floor(float(world.world_size_y) / float(chunk_size))) - 1
+	var min_cy: int = clampi(int(floor(float(min_y) / float(chunk_size))), 0, max_cy)
+	var max_cy_clamped: int = clampi(int(floor(float(max_y) / float(chunk_size))), 0, max_cy)
+	for key in chunk_cache.get_keys():
+		var coord: Vector3i = key
+		if coord.y < min_cy or coord.y > max_cy_clamped:
+			continue
+		if coord.x < min_x or coord.x > max_x:
+			continue
+		if coord.z < min_z or coord.z > max_z:
+			continue
+		regenerate_chunk(coord.x, coord.y, coord.z)
+
 func is_chunk_built(coord: Vector3i) -> bool:
 	return chunk_cache.is_chunk_built(coord)

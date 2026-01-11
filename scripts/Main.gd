@@ -54,6 +54,7 @@ var debug_overlay: DebugOverlay
 var info_block_id: int = -1
 var info_block_pos := Vector3i(-1, -1, -1)
 var menu_open := false
+var world_started := false
 
 func _ready() -> void:
 	Engine.max_fps = ENGINE_MAX_FPS
@@ -106,7 +107,7 @@ func _process(dt: float) -> void:
 
 	if debug_overlay != null:
 		debug_overlay.run_timed("Main.update_camera", Callable(self, "update_camera").bind(dt))
-		debug_overlay.run_timed("World.update_streaming", Callable(world, "update_streaming").bind(get_stream_target()))
+		debug_overlay.run_timed("World.update_streaming", Callable(world, "update_streaming").bind(get_stream_target(), dt))
 		debug_overlay.run_timed("Main.handle_mouse", Callable(self, "handle_mouse"))
 		debug_overlay.run_timed("Main.update_hover_preview", Callable(self, "update_hover_preview"))
 		debug_overlay.run_timed("Main.update_info_hover", Callable(self, "update_info_hover"))
@@ -115,7 +116,7 @@ func _process(dt: float) -> void:
 		debug_overlay.step_world(dt)
 	else:
 		update_camera(dt)
-		world.update_streaming(get_stream_target())
+		world.update_streaming(get_stream_target(), dt)
 		handle_mouse()
 		update_hover_preview()
 		update_info_hover()
@@ -163,6 +164,11 @@ func close_menu() -> void:
 		menu_layer.visible = false
 
 func _on_resume_pressed() -> void:
+	if not world_started:
+		if menu_status_label != null:
+			menu_status_label.text = "Loading..."
+		world.start_new_world()
+		world_started = true
 	close_menu()
 
 func _on_save_pressed() -> void:
@@ -171,15 +177,16 @@ func _on_save_pressed() -> void:
 		if menu_status_label != null:
 			menu_status_label.text = "Save folder error."
 		return
-	var ok := world.save_world(SAVE_PATH)
+	var ok: bool = world.save_world(SAVE_PATH)
 	if menu_status_label != null:
 		menu_status_label.text = "Saved." if ok else "Save failed."
 
 func _on_load_pressed() -> void:
-	var ok := world.load_world(SAVE_PATH)
+	var ok: bool = world.load_world(SAVE_PATH)
 	if menu_status_label != null:
 		menu_status_label.text = "Loaded." if ok else "Load failed."
 	if ok:
+		world_started = true
 		close_menu()
 
 func _on_quit_pressed() -> void:
