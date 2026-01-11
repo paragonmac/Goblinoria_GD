@@ -9,6 +9,19 @@ const DEFAULT_SPEED := 4.0
 const WANDER_WAIT_MIN := 3.0
 const WANDER_WAIT_MAX := 5.0
 const STAIR_BLOCK_ID := 100
+const WORKER_BOX_SIZE := Vector3(0.5, 0.8, 0.5)
+const WORKER_BOX_Y_OFFSET := -0.1
+const SHADOW_SIZE := Vector2(0.9, 0.9)
+const SHADOW_Y_OFFSET := -0.48
+const SHADOW_COLOR := Color(0.0, 0.0, 0.0, 0.35)
+const IDLE_COLOR := Color(0.2, 0.8, 0.2)
+const MOVING_COLOR := Color(1.0, 0.8, 0.2)
+const WORKING_COLOR := Color(1.0, 0.5, 0.0)
+const MOVE_TARGET_EPSILON := 0.15
+const ADJACENT_MANHATTAN_DISTANCE := 1
+const WANDER_ATTEMPTS := 8
+const WANDER_DIST_MIN := 1
+const WANDER_DIST_MAX := 10
 
 var state: WorkerState = WorkerState.IDLE
 var current_task_id := -1
@@ -34,31 +47,31 @@ func _ready() -> void:
 
     mesh_instance = MeshInstance3D.new()
     var box := BoxMesh.new()
-    box.size = Vector3(0.5, 0.8, 0.5)
+    box.size = WORKER_BOX_SIZE
     mesh_instance.mesh = box
-    mesh_instance.position.y = -0.1
+    mesh_instance.position.y = WORKER_BOX_Y_OFFSET
     add_child(mesh_instance)
 
     shadow_instance = MeshInstance3D.new()
     var shadow_mesh := PlaneMesh.new()
-    shadow_mesh.size = Vector2(0.9, 0.9)
+    shadow_mesh.size = SHADOW_SIZE
     shadow_instance.mesh = shadow_mesh
-    shadow_instance.position = Vector3(0.0, -0.48, 0.0)
+    shadow_instance.position = Vector3(0.0, SHADOW_Y_OFFSET, 0.0)
     shadow_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
     shadow_material = StandardMaterial3D.new()
     shadow_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
     shadow_material.cull_mode = BaseMaterial3D.CULL_DISABLED
     shadow_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-    shadow_material.albedo_color = Color(0.0, 0.0, 0.0, 0.35)
+    shadow_material.albedo_color = SHADOW_COLOR
     shadow_instance.material_override = shadow_material
     add_child(shadow_instance)
 
     mat_idle = StandardMaterial3D.new()
-    mat_idle.albedo_color = Color(0.2, 0.8, 0.2)
+    mat_idle.albedo_color = IDLE_COLOR
     mat_moving = StandardMaterial3D.new()
-    mat_moving.albedo_color = Color(1.0, 0.8, 0.2)
+    mat_moving.albedo_color = MOVING_COLOR
     mat_working = StandardMaterial3D.new()
-    mat_working.albedo_color = Color(1.0, 0.5, 0.0)
+    mat_working.albedo_color = WORKING_COLOR
 
     mesh_instance.material_override = mat_idle
 
@@ -154,7 +167,7 @@ func can_work_task(task) -> bool:
             return false
         var dx: int = abs(worker_pos.x - task.pos.x)
         var dz: int = abs(worker_pos.z - task.pos.z)
-        return dx + dz == 1
+        return dx + dz == ADJACENT_MANHATTAN_DISTANCE
     return true
 
 func set_target_from_path() -> void:
@@ -165,7 +178,7 @@ func set_target_from_path() -> void:
 func update_moving(dt: float, task_queue) -> void:
     var delta := target_pos - position
     var dist := delta.length()
-    if dist < 0.15:
+    if dist < MOVE_TARGET_EPSILON:
         position = target_pos
         path_index += 1
         if path_index >= path.size():
@@ -251,8 +264,8 @@ func update_wander(dt: float, world, pathfinder) -> void:
         return
 
     var start: Vector3i = get_block_coord()
-    for _i in range(8):
-        var dist: int = rng.randi_range(1, 10)
+    for _i in range(WANDER_ATTEMPTS):
+        var dist: int = rng.randi_range(WANDER_DIST_MIN, WANDER_DIST_MAX)
         var dx: int = rng.randi_range(-dist, dist)
         var dz: int = rng.randi_range(-dist, dist)
         if dx == 0 and dz == 0:

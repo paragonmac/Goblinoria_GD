@@ -1,6 +1,57 @@
 extends Node3D
 class_name WorldRenderer
 
+const COLOR_MIN := 0.0
+const COLOR_MAX := 1.0
+const FACE_HALF_SIZE := 0.5
+const SHADE_TOP := 1.0
+const SHADE_BOTTOM := 0.6
+const SHADE_SIDE := 0.75
+const SHADE_FRONT_BACK := 0.82
+const SHADE_THRESHOLD := 0.5
+const TRIS_PER_FACE := 2
+const PERCENT_FACTOR := 100.0
+const NEAR_SAMPLE_OFFSET := 0.1
+const NEAR_SAMPLE_MIN := 0.1
+const BLOCK_COLOR_DEFAULT := Color(0.5, 0.5, 0.5)
+const BLOCK_COLOR_MAP := {
+	1: Color(0.82, 0.71, 0.55),
+	2: Color(0.78, 0.67, 0.5),
+	3: Color(0.72, 0.6, 0.42),
+	4: Color(0.66, 0.52, 0.33),
+	5: Color(0.6, 0.42, 0.28),
+	6: Color(0.55, 0.35, 0.17),
+	7: Color(0.44, 0.29, 0.15),
+	8: Color(0.49, 0.49, 0.49),
+	9: Color(0.33, 0.33, 0.33),
+}
+const STAIR_COLOR := Color(0.7, 0.6, 0.35)
+const BLOCK_NOISE_OFFSET_2 := Vector3i(17, 31, 47)
+const BLOCK_NOISE_OFFSET_3 := Vector3i(59, 73, 101)
+const BLOCK_JITTER := 0.08
+const NOISE_CENTER := 0.5
+const HASH_X := 73856093
+const HASH_Y := 19349663
+const HASH_Z := 83492791
+const HASH_SHIFT := 13
+const HASH_MASK := 0x7fffffff
+const BLOCK_NOISE_MOD := 1024
+const BLOCK_NOISE_DIV := 1023.0
+const TASK_OVERLAY_SIZE := Vector3(1.05, 1.05, 1.05)
+const DRAG_PREVIEW_SIZE := Vector3(1.02, 1.02, 1.02)
+const TASK_OVERLAY_ALPHA := 0.7
+const BLOCKED_OVERLAY_ALPHA := 0.35
+const DRAG_OVERLAY_ALPHA := 0.45
+const DRAG_DEFAULT_ALPHA := 0.35
+const DIG_TASK_COLOR := Color(1.0, 0.2, 0.2)
+const PLACE_TASK_COLOR := Color(0.2, 0.2, 1.0)
+const STAIRS_TASK_COLOR := Color(0.7, 0.5, 0.2)
+const DRAG_DIG_COLOR := Color(0.2, 1.0, 0.2)
+const DRAG_PLACE_COLOR := Color(0.2, 0.6, 1.0)
+const DRAG_STAIRS_COLOR := Color(1.0, 0.7, 0.2)
+const DRAG_DEFAULT_COLOR := Color(0.8, 0.8, 0.8)
+const ROUND_HALF := 0.5
+
 var world: World
 var block_material: StandardMaterial3D
 var chunk_nodes: Dictionary = {}
@@ -137,50 +188,34 @@ func get_block_material() -> StandardMaterial3D:
 
 func block_color(block_id: int, wx: int, wy: int, wz: int) -> Color:
 	if block_id == World.STAIR_BLOCK_ID:
-		return Color(0.7, 0.6, 0.35)
+		return STAIR_COLOR
 	var base: Color
 	match block_id:
-		1:
-			base = Color(0.82, 0.71, 0.55)
-		2:
-			base = Color(0.78, 0.67, 0.5)
-		3:
-			base = Color(0.72, 0.6, 0.42)
-		4:
-			base = Color(0.66, 0.52, 0.33)
-		5:
-			base = Color(0.6, 0.42, 0.28)
-		6:
-			base = Color(0.55, 0.35, 0.17)
-		7:
-			base = Color(0.44, 0.29, 0.15)
-		8:
-			base = Color(0.49, 0.49, 0.49)
-		9:
-			base = Color(0.33, 0.33, 0.33)
+		1, 2, 3, 4, 5, 6, 7, 8, 9:
+			base = BLOCK_COLOR_MAP[block_id]
 		_:
-			base = Color(0.5, 0.5, 0.5)
+			base = BLOCK_COLOR_DEFAULT
 
 	var n1 := block_noise(wx, wy, wz)
-	var n2 := block_noise(wx + 17, wy + 31, wz + 47)
-	var n3 := block_noise(wx + 59, wy + 73, wz + 101)
-	var jitter := 0.08
+	var n2 := block_noise(wx + BLOCK_NOISE_OFFSET_2.x, wy + BLOCK_NOISE_OFFSET_2.y, wz + BLOCK_NOISE_OFFSET_2.z)
+	var n3 := block_noise(wx + BLOCK_NOISE_OFFSET_3.x, wy + BLOCK_NOISE_OFFSET_3.y, wz + BLOCK_NOISE_OFFSET_3.z)
+	var jitter := BLOCK_JITTER
 	return Color(
-		clamp(base.r + (n1 - 0.5) * jitter, 0.0, 1.0),
-		clamp(base.g + (n2 - 0.5) * jitter, 0.0, 1.0),
-		clamp(base.b + (n3 - 0.5) * jitter, 0.0, 1.0),
+		clamp(base.r + (n1 - NOISE_CENTER) * jitter, COLOR_MIN, COLOR_MAX),
+		clamp(base.g + (n2 - NOISE_CENTER) * jitter, COLOR_MIN, COLOR_MAX),
+		clamp(base.b + (n3 - NOISE_CENTER) * jitter, COLOR_MIN, COLOR_MAX),
 		base.a
 	)
 
 
 func block_noise(wx: int, wy: int, wz: int) -> float:
-	var h: int = wx * 73856093 ^ wy * 19349663 ^ wz * 83492791
-	h = (h ^ (h >> 13)) & 0x7fffffff
-	return float(h % 1024) / 1023.0
+	var h: int = wx * HASH_X ^ wy * HASH_Y ^ wz * HASH_Z
+	h = (h ^ (h >> HASH_SHIFT)) & HASH_MASK
+	return float(h % BLOCK_NOISE_MOD) / BLOCK_NOISE_DIV
 
 
 func add_face(vertices: PackedVector3Array, normals: PackedVector3Array, colors: PackedColorArray, base: Vector3, normal: Vector3, color: Color) -> void:
-	var h := 0.5
+	var h := FACE_HALF_SIZE
 	var v1: Vector3
 	var v2: Vector3
 	var v3: Vector3
@@ -218,7 +253,7 @@ func add_face(vertices: PackedVector3Array, normals: PackedVector3Array, colors:
 		v4 = base + Vector3(-h, h, -h)
 
 	var shade := face_shade(normal)
-	var shaded := Color(color.r * shade, color.g * shade, color.b * shade, 1.0)
+	var shaded := Color(color.r * shade, color.g * shade, color.b * shade, COLOR_MAX)
 
 	vertices.append_array([v1, v3, v2, v1, v4, v3])
 	normals.append_array([normal, normal, normal, normal, normal, normal])
@@ -226,22 +261,22 @@ func add_face(vertices: PackedVector3Array, normals: PackedVector3Array, colors:
 
 
 func face_shade(normal: Vector3) -> float:
-	if normal.y > 0.5:
-		return 1.0
-	if normal.y < -0.5:
-		return 0.6
-	if abs(normal.x) > 0.5:
-		return 0.75
-	return 0.82
+	if normal.y > SHADE_THRESHOLD:
+		return SHADE_TOP
+	if normal.y < -SHADE_THRESHOLD:
+		return SHADE_BOTTOM
+	if abs(normal.x) > SHADE_THRESHOLD:
+		return SHADE_SIDE
+	return SHADE_FRONT_BACK
 
 
 func get_draw_burden_stats() -> Dictionary:
-	var drawn_tris: int = total_visible_faces * 2
-	var culled_tris: int = total_occluded_faces * 2
+	var drawn_tris: int = total_visible_faces * TRIS_PER_FACE
+	var culled_tris: int = total_occluded_faces * TRIS_PER_FACE
 	var total_tris: int = drawn_tris + culled_tris
 	var percent: float = 0.0
 	if total_tris > 0:
-		percent = float(drawn_tris) / float(total_tris) * 100.0
+		percent = float(drawn_tris) / float(total_tris) * PERCENT_FACTOR
 	return {"drawn": drawn_tris, "culled": culled_tris, "percent": percent}
 
 
@@ -249,7 +284,7 @@ func get_camera_tris_rendered(camera: Camera3D) -> Dictionary:
 	if camera == null:
 		return {"rendered": 0, "total": 0, "percent": 0.0}
 	var frustum: Array = camera.get_frustum()
-	var near_sample: float = max(camera.near + 0.1, 0.1)
+	var near_sample: float = max(camera.near + NEAR_SAMPLE_OFFSET, NEAR_SAMPLE_MIN)
 	var inside_point: Vector3 = camera.global_transform.origin + (-camera.global_transform.basis.z) * near_sample
 	var planes: Array = []
 	for plane in frustum:
@@ -263,11 +298,11 @@ func get_camera_tris_rendered(camera: Camera3D) -> Dictionary:
 			continue
 		if is_chunk_in_view(planes, key):
 			rendered_faces += counts.x
-	var rendered_tris: int = rendered_faces * 2
-	var total_tris: int = total_visible_faces * 2
+	var rendered_tris: int = rendered_faces * TRIS_PER_FACE
+	var total_tris: int = total_visible_faces * TRIS_PER_FACE
 	var percent := 0.0
 	if total_tris > 0:
-		percent = float(rendered_tris) / float(total_tris) * 100.0
+		percent = float(rendered_tris) / float(total_tris) * PERCENT_FACTOR
 	return {"rendered": rendered_tris, "total": total_tris, "percent": percent}
 
 
@@ -340,22 +375,22 @@ func blocked_task_key(task: Dictionary) -> String:
 func task_type_color(task_type: int, alpha: float) -> Color:
 	match task_type:
 		TaskQueue.TaskType.DIG:
-			return Color(1.0, 0.2, 0.2, alpha)
+			return Color(DIG_TASK_COLOR.r, DIG_TASK_COLOR.g, DIG_TASK_COLOR.b, alpha)
 		TaskQueue.TaskType.PLACE:
-			return Color(0.2, 0.2, 1.0, alpha)
+			return Color(PLACE_TASK_COLOR.r, PLACE_TASK_COLOR.g, PLACE_TASK_COLOR.b, alpha)
 		TaskQueue.TaskType.STAIRS:
-			return Color(0.7, 0.5, 0.2, alpha)
-	return Color(1.0, 1.0, 1.0, alpha)
+			return Color(STAIRS_TASK_COLOR.r, STAIRS_TASK_COLOR.g, STAIRS_TASK_COLOR.b, alpha)
+	return Color(COLOR_MAX, COLOR_MAX, COLOR_MAX, alpha)
 
 
 func create_task_overlay(task) -> MeshInstance3D:
 	var mesh_instance := MeshInstance3D.new()
 	var box := BoxMesh.new()
-	box.size = Vector3(1.05, 1.05, 1.05)
+	box.size = TASK_OVERLAY_SIZE
 	mesh_instance.mesh = box
 
 	var material := StandardMaterial3D.new()
-	material.albedo_color = task_type_color(task.type, 0.7)
+	material.albedo_color = task_type_color(task.type, TASK_OVERLAY_ALPHA)
 	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	mesh_instance.material_override = material
 	add_child(mesh_instance)
@@ -365,11 +400,11 @@ func create_task_overlay(task) -> MeshInstance3D:
 func create_blocked_task_overlay(task_type: int) -> MeshInstance3D:
 	var mesh_instance := MeshInstance3D.new()
 	var box := BoxMesh.new()
-	box.size = Vector3(1.05, 1.05, 1.05)
+	box.size = TASK_OVERLAY_SIZE
 	mesh_instance.mesh = box
 
 	var material := StandardMaterial3D.new()
-	material.albedo_color = task_type_color(task_type, 0.35)
+	material.albedo_color = task_type_color(task_type, BLOCKED_OVERLAY_ALPHA)
 	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	mesh_instance.material_override = material
 	add_child(mesh_instance)
@@ -383,12 +418,12 @@ func drag_preview_key(x: int, y: int, z: int) -> String:
 func drag_preview_color(mode: int) -> Color:
 	match mode:
 		World.PlayerMode.DIG:
-			return Color(0.2, 1.0, 0.2, 0.45)
+			return Color(DRAG_DIG_COLOR.r, DRAG_DIG_COLOR.g, DRAG_DIG_COLOR.b, DRAG_OVERLAY_ALPHA)
 		World.PlayerMode.PLACE:
-			return Color(0.2, 0.6, 1.0, 0.45)
+			return Color(DRAG_PLACE_COLOR.r, DRAG_PLACE_COLOR.g, DRAG_PLACE_COLOR.b, DRAG_OVERLAY_ALPHA)
 		World.PlayerMode.STAIRS:
-			return Color(1.0, 0.7, 0.2, 0.45)
-	return Color(0.8, 0.8, 0.8, 0.35)
+			return Color(DRAG_STAIRS_COLOR.r, DRAG_STAIRS_COLOR.g, DRAG_STAIRS_COLOR.b, DRAG_OVERLAY_ALPHA)
+	return Color(DRAG_DEFAULT_COLOR.r, DRAG_DEFAULT_COLOR.g, DRAG_DEFAULT_COLOR.b, DRAG_DEFAULT_ALPHA)
 
 
 func get_drag_material(mode: int) -> StandardMaterial3D:
@@ -404,7 +439,7 @@ func get_drag_material(mode: int) -> StandardMaterial3D:
 func create_drag_preview_overlay(mode: int) -> MeshInstance3D:
 	var mesh_instance := MeshInstance3D.new()
 	var box := BoxMesh.new()
-	box.size = Vector3(1.02, 1.02, 1.02)
+	box.size = DRAG_PREVIEW_SIZE
 	mesh_instance.mesh = box
 	mesh_instance.material_override = get_drag_material(mode)
 	add_child(mesh_instance)
@@ -415,10 +450,10 @@ func set_drag_preview(rect: Dictionary, mode: int) -> void:
 	if rect.is_empty():
 		clear_drag_preview()
 		return
-	var min_x: int = int(floor(float(rect["min_x"]) + 0.5))
-	var max_x: int = int(floor(float(rect["max_x"]) + 0.5))
-	var min_z: int = int(floor(float(rect["min_z"]) + 0.5))
-	var max_z: int = int(floor(float(rect["max_z"]) + 0.5))
+	var min_x: int = int(floor(float(rect["min_x"]) + ROUND_HALF))
+	var max_x: int = int(floor(float(rect["max_x"]) + ROUND_HALF))
+	var min_z: int = int(floor(float(rect["min_z"]) + ROUND_HALF))
+	var max_z: int = int(floor(float(rect["max_z"]) + ROUND_HALF))
 	var y: int = int(rect["y"])
 	var live_ids: Dictionary = {}
 	for x in range(min_x, max_x + 1):
@@ -458,9 +493,11 @@ func update_render_height(old_y: int, new_y: int) -> void:
 	var max_cy: int = int(floor(float(world.world_size_y) / float(chunk_size))) - 1
 	var min_cy: int = clampi(int(floor(float(min_y) / float(chunk_size))), 0, max_cy)
 	var max_cy_clamped: int = clampi(int(floor(float(max_y) / float(chunk_size))), 0, max_cy)
-	var chunks_x: int = int(floor(float(world.world_size_x) / float(chunk_size)))
-	var chunks_z: int = int(floor(float(world.world_size_z) / float(chunk_size)))
-	for cx in range(chunks_x):
-		for cy in range(min_cy, max_cy_clamped + 1):
-			for cz in range(chunks_z):
-				regenerate_chunk(cx, cy, cz)
+	for key in chunk_nodes.keys():
+		var coord: Vector3i = key
+		if coord.y < min_cy or coord.y > max_cy_clamped:
+			continue
+		regenerate_chunk(coord.x, coord.y, coord.z)
+
+func is_chunk_built(coord: Vector3i) -> bool:
+	return chunk_nodes.has(coord)

@@ -2,19 +2,39 @@ extends Node3D
 class_name World
 
 const CHUNK_SIZE := 8
-const WORLD_CHUNKS_X := 8
-const WORLD_CHUNKS_Y := 8
-const WORLD_CHUNKS_Z := 8
+const WORLD_CHUNKS_X := 32
+const WORLD_CHUNKS_Y := 32
+const WORLD_CHUNKS_Z := 32
 const STAIR_BLOCK_ID := 100
 const DEFAULT_MATERIAL := 1
+const DUMMY_INT := 666
+const SEA_LEVEL_DEPTH := 30
+const SEA_LEVEL_MIN := 8
+const SEA_LEVEL_FILL_OFFSET := 1
+const WORKER_SPAWN_HEIGHT_OFFSET := 1.0
+const WORKER_SPAWN_OFFSETS := [
+	Vector2i(-10, -10),
+	Vector2i(10, -10),
+	Vector2i(-10, 10),
+	Vector2i(10, 10),
+]
+const CHUNKS_PER_FRAME_DEFAULT := 6
+const STREAM_QUEUE_BUDGET_DEFAULT := 6000
+const STREAM_RADIUS_DEFAULT := 8
+const STREAM_HEIGHT_DEFAULT := 0
+const STREAM_FULL_WORLD_DEFAULT := false
+const VISIBILITY_Y_OFFSET := 1.0
+const RAYCAST_VOXEL_OFFSET := Vector3(0.5, 0.5, 0.5)
+const RAYCAST_STEP_POSITIVE := 1
+const RAYCAST_STEP_NEGATIVE := -1
 
 var world_size_x := CHUNK_SIZE * WORLD_CHUNKS_X
 var world_size_y := CHUNK_SIZE * WORLD_CHUNKS_Y
 var world_size_z := CHUNK_SIZE * WORLD_CHUNKS_Z
 
-var sea_level := 0
-var top_render_y := 0
-var vertical_scroll := 0
+var sea_level := DUMMY_INT
+var top_render_y := DUMMY_INT
+var vertical_scroll := DUMMY_INT
 
 var blocks := PackedByteArray()
 var renderer: WorldRenderer
@@ -23,10 +43,31 @@ var task_queue := TaskQueue.new()
 var task_manager: TaskManager
 var pathfinder := Pathfinder.new()
 var workers: Array = []
+var chunk_build_queue: Array = []
+var chunk_build_set: Dictionary = {}
+var chunks_per_frame: int = CHUNKS_PER_FRAME_DEFAULT
+var stream_queue_budget: int = STREAM_QUEUE_BUDGET_DEFAULT
+var stream_radius_chunks: int = STREAM_RADIUS_DEFAULT
+var stream_full_world_xz: bool = STREAM_FULL_WORLD_DEFAULT
+var stream_height_chunks: int = STREAM_HEIGHT_DEFAULT
+var last_stream_chunk := Vector2i(-DUMMY_INT, -DUMMY_INT)
+var last_stream_max_cy := -DUMMY_INT
+var stream_min_x: int = DUMMY_INT
+var stream_max_x: int = -DUMMY_INT
+var stream_min_z: int = DUMMY_INT
+var stream_max_z: int = -DUMMY_INT
+var stream_min_y: int = DUMMY_INT
+var stream_max_y: int = -DUMMY_INT
+var stream_pending: bool = false
+var stream_plane_index: int = 0
+var stream_plane_size: int = 0
+var stream_layer_y: int = 0
+var stream_layer_remaining: int = 0
+var stream_x_offsets: Array = []
+var stream_z_offsets: Array = []
 
 enum PlayerMode { INFORMATION, DIG, PLACE, STAIRS }
 var player_mode := PlayerMode.DIG
-
 var selected_blocks: Dictionary = {}
 
 func _ready() -> void:
@@ -39,14 +80,29 @@ func _ready() -> void:
 func init_world() -> void:
 	blocks.resize(world_size_x * world_size_y * world_size_z)
 	blocks.fill(0)
-	sea_level = max(world_size_y - 30, 8)
+	sea_level = max(world_size_y - SEA_LEVEL_DEPTH, SEA_LEVEL_MIN)
 	top_render_y = sea_level
 	if renderer != null:
 		renderer.reset_stats()
+	chunk_build_queue.clear()
+	chunk_build_set.clear()
+	last_stream_chunk = Vector2i(-DUMMY_INT, -DUMMY_INT)
+	last_stream_max_cy = -DUMMY_INT
+	stream_min_x = DUMMY_INT
+	stream_max_x = -DUMMY_INT
+	stream_min_z = DUMMY_INT
+	stream_max_z = -DUMMY_INT
+	stream_min_y = DUMMY_INT
+	stream_max_y = -DUMMY_INT
+	stream_pending = false
+	stream_plane_index = 0
+	stream_plane_size = 0
+	stream_layer_y = 0
+	stream_layer_remaining = 0
+	stream_x_offsets.clear()
+	stream_z_offsets.clear()
 
 	seed_world()
-	if renderer != null:
-		renderer.build_all_chunks()
 	spawn_initial_workers()
 
 func world_index(x: int, y: int, z: int) -> int:
@@ -73,7 +129,7 @@ func is_solid(x: int, y: int, z: int) -> bool:
 
 func seed_world() -> void:
 	blocks.fill(0)
-	var max_y: int = min(sea_level + 1, world_size_y)
+	var max_y: int = min(sea_level + SEA_LEVEL_FILL_OFFSET, world_size_y)
 	for y in range(max_y):
 		for x in range(world_size_x):
 			for z in range(world_size_z):
@@ -124,16 +180,151 @@ func queue_task_request(task_type: int, pos: Vector3i, material: int) -> void:
 	if task_manager != null:
 		task_manager.queue_task_request(task_type, pos, material)
 
+func update_streaming(camera_pos: Vector3) -> void:
+	if renderer == null:
+		return
+	var chunk_size: int = CHUNK_SIZE
+	var max_cx: int = int(floor(float(world_size_x) / float(chunk_size))) - 1
+	var max_cy: int = int(floor(float(top_render_y) / float(chunk_size)))
+	var max_cz: int = int(floor(float(world_size_z) / float(chunk_size))) - 1
+	if max_cx < 0 or max_cy < 0 or max_cz < 0:
+		return
+	var min_cy: int = 0
+	if stream_height_chunks > 0:
+		min_cy = max(0, max_cy - stream_height_chunks + 1)
+
+	var cx: int = clampi(int(floor(camera_pos.x / float(chunk_size))), 0, max_cx)
+	var cz: int = clampi(int(floor(camera_pos.z / float(chunk_size))), 0, max_cz)
+	var anchor_cx: int = 0 if stream_full_world_xz else cx
+	var anchor_cz: int = 0 if stream_full_world_xz else cz
+	if anchor_cx != last_stream_chunk.x or anchor_cz != last_stream_chunk.y or max_cy != last_stream_max_cy:
+		last_stream_chunk = Vector2i(anchor_cx, anchor_cz)
+		last_stream_max_cy = max_cy
+
+		if stream_full_world_xz:
+			stream_min_x = 0
+			stream_max_x = max_cx
+			stream_min_z = 0
+			stream_max_z = max_cz
+		else:
+			stream_min_x = clampi(cx - stream_radius_chunks, 0, max_cx)
+			stream_max_x = clampi(cx + stream_radius_chunks, 0, max_cx)
+			stream_min_z = clampi(cz - stream_radius_chunks, 0, max_cz)
+			stream_max_z = clampi(cz + stream_radius_chunks, 0, max_cz)
+		stream_min_y = min_cy
+		stream_max_y = max_cy
+		chunk_build_queue.clear()
+		chunk_build_set.clear()
+		var x_range: int = stream_max_x - stream_min_x + 1
+		var z_range: int = stream_max_z - stream_min_z + 1
+		var y_range: int = stream_max_y - stream_min_y + 1
+		stream_plane_index = 0
+		if x_range <= 0 or z_range <= 0 or y_range <= 0:
+			stream_plane_size = 0
+			stream_pending = false
+		else:
+			stream_plane_size = x_range * z_range
+			stream_pending = true
+		stream_x_offsets = build_center_spiral_offsets(x_range)
+		stream_z_offsets = build_center_spiral_offsets(z_range)
+		stream_layer_y = stream_max_y
+		stream_layer_remaining = count_unbuilt_in_layer(stream_layer_y)
+	enqueue_stream_chunks()
+	process_chunk_queue()
+
+func process_chunk_queue() -> void:
+	if renderer == null:
+		return
+	var build_count: int = min(chunks_per_frame, chunk_build_queue.size())
+	for _i in range(build_count):
+		var key: Vector3i = chunk_build_queue.pop_front()
+		chunk_build_set.erase(key)
+		renderer.regenerate_chunk(key.x, key.y, key.z)
+		if stream_pending and key.y == stream_layer_y and stream_layer_remaining > 0:
+			stream_layer_remaining -= 1
+
+func enqueue_stream_chunks() -> void:
+	if not stream_pending:
+		return
+	var x_range: int = stream_max_x - stream_min_x + 1
+	var z_range: int = stream_max_z - stream_min_z + 1
+	var y_range: int = stream_max_y - stream_min_y + 1
+	if x_range <= 0 or z_range <= 0 or y_range <= 0:
+		stream_pending = false
+		return
+	while stream_pending and stream_layer_remaining <= 0:
+		if stream_layer_y <= stream_min_y:
+			stream_pending = false
+			return
+		stream_layer_y -= 1
+		stream_plane_index = 0
+		stream_layer_remaining = count_unbuilt_in_layer(stream_layer_y)
+	var plane_size: int = stream_plane_size
+	if plane_size <= 0:
+		stream_pending = false
+		return
+	var remaining_in_plane: int = plane_size - stream_plane_index
+	if remaining_in_plane <= 0:
+		return
+	var budget: int = min(stream_queue_budget, remaining_in_plane)
+	for _i in range(budget):
+		var plane_index: int = stream_plane_index
+		var x_spiral_index: int = int(floor(float(plane_index) / float(z_range)))
+		var z_spiral_index: int = plane_index % z_range
+		var x_offset: int = stream_x_offsets[x_spiral_index]
+		var z_offset: int = stream_z_offsets[z_spiral_index]
+		var key := Vector3i(stream_min_x + x_offset, stream_layer_y, stream_min_z + z_offset)
+		if not renderer.is_chunk_built(key) and not chunk_build_set.has(key):
+			chunk_build_set[key] = true
+			chunk_build_queue.append(key)
+		stream_plane_index += 1
+
+func count_unbuilt_in_layer(layer_y: int) -> int:
+	if renderer == null:
+		return 0
+	var x_range: int = stream_max_x - stream_min_x + 1
+	var z_range: int = stream_max_z - stream_min_z + 1
+	if x_range <= 0 or z_range <= 0:
+		return 0
+	var remaining := 0
+	for x_offset in stream_x_offsets:
+		var x: int = stream_min_x + int(x_offset)
+		for z_offset in stream_z_offsets:
+			var z: int = stream_min_z + int(z_offset)
+			var key := Vector3i(x, layer_y, z)
+			if not renderer.is_chunk_built(key):
+				remaining += 1
+	return remaining
+
+func build_center_spiral_offsets(size: int) -> Array:
+	var offsets: Array = []
+	if size <= 0:
+		return offsets
+	var center: int = int(floor(float(size - 1) / 2.0))
+	offsets.append(center)
+	for radius in range(1, size):
+		var left: int = center - radius
+		var right: int = center + radius
+		var added := false
+		if left >= 0:
+			offsets.append(left)
+			added = true
+		if right < size:
+			offsets.append(right)
+			added = true
+		if not added:
+			break
+	return offsets
+
 func spawn_initial_workers() -> void:
 	var center_x: int = int(world_size_x / 2.0)
 	var center_z: int = int(world_size_z / 2.0)
-	var offsets: Array[Vector2i] = [Vector2i(-10, -10), Vector2i(10, -10), Vector2i(-10, 10), Vector2i(10, 10)]
-	for offset in offsets:
+	for offset in WORKER_SPAWN_OFFSETS:
 		var spawn_x: int = clampi(center_x + offset.x, 0, world_size_x - 1)
 		var spawn_z: int = clampi(center_z + offset.y, 0, world_size_z - 1)
 		var surface_y := find_surface_y(spawn_x, spawn_z)
 		var worker := Worker.new()
-		worker.position = Vector3(spawn_x, surface_y + 1, spawn_z)
+		worker.position = Vector3(spawn_x, surface_y + WORKER_SPAWN_HEIGHT_OFFSET, spawn_z)
 		add_child(worker)
 		workers.append(worker)
 
@@ -160,18 +351,18 @@ func set_top_render_y(new_y: int) -> void:
 		renderer.update_render_height(old_y, top_render_y)
 
 func is_visible_at_level(y_value: float) -> bool:
-	return y_value <= top_render_y + 1
+	return y_value <= top_render_y + VISIBILITY_Y_OFFSET
 
 func raycast_block(ray_origin: Vector3, ray_dir: Vector3, max_distance: float) -> Dictionary:
 	var pos := ray_origin
 	var dir := ray_dir
 
-	pos += Vector3(0.5, 0.5, 0.5)
+	pos += RAYCAST_VOXEL_OFFSET
 
 	var voxel := Vector3i(int(floor(pos.x)), int(floor(pos.y)), int(floor(pos.z)))
-	var step_x: int = 1 if dir.x >= 0.0 else -1
-	var step_y: int = 1 if dir.y >= 0.0 else -1
-	var step_z: int = 1 if dir.z >= 0.0 else -1
+	var step_x: int = RAYCAST_STEP_POSITIVE if dir.x >= 0.0 else RAYCAST_STEP_NEGATIVE
+	var step_y: int = RAYCAST_STEP_POSITIVE if dir.y >= 0.0 else RAYCAST_STEP_NEGATIVE
+	var step_z: int = RAYCAST_STEP_POSITIVE if dir.z >= 0.0 else RAYCAST_STEP_NEGATIVE
 	var step := Vector3i(step_x, step_y, step_z)
 
 	var next_x: float = floor(pos.x) + (1.0 if dir.x >= 0.0 else 0.0)

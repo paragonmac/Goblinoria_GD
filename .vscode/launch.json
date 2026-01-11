@@ -1,0 +1,35 @@
+{
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"name": "GDScript: Launch Project",
+			"type": "godot",
+			"request": "launch",
+			"project": "${workspaceFolder}",
+			"scene": "main",
+			"address": "127.0.0.1",
+			"port": 6008
+		},
+		{
+			"name": "Godot JavaScript: Launch",
+			"type": "godot-quickjs",
+			"request": "launch",
+			"program": "/path/to/godot",
+			"args": [
+				"--path",
+				"${workspaceFolder}"
+			],
+			"cwd": "${workspaceFolder}",
+			"hostname": "localhost",
+			"port": 0,
+			"sourceMaps": true,
+			"sourceRoot": "${workspaceFolder}/scripts",
+			"sourceMapPathOverrides": {
+				"res://": "${workspaceFolder}/",
+				"webpack:///./~/*": "${workspaceFolder}/node_modules/*",
+				"webpack:///./*": "${workspaceFolder}/*",
+				"webpack:///*": "*"
+			}
+		}
+	]
+}

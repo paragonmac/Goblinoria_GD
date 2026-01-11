@@ -78,21 +78,21 @@ func step_world(dt: float) -> void:
 	if world == null:
 		return
 	if show_debug_timings and debug_profiler != null and debug_profiler.enabled:
-		debug_profiler.begin("world/update_workers")
+		debug_profiler.begin("World.update_workers")
 		world.update_workers(dt)
-		debug_profiler.end("world/update_workers")
+		debug_profiler.end("World.update_workers")
 
-		debug_profiler.begin("world/update_task_queue")
+		debug_profiler.begin("World.update_task_queue")
 		world.update_task_queue()
-		debug_profiler.end("world/update_task_queue")
+		debug_profiler.end("World.update_task_queue")
 
-		debug_profiler.begin("world/update_task_overlays")
+		debug_profiler.begin("World.update_task_overlays")
 		world.update_task_overlays_phase()
-		debug_profiler.end("world/update_task_overlays")
+		debug_profiler.end("World.update_task_overlays")
 
-		debug_profiler.begin("world/update_blocked_tasks")
+		debug_profiler.begin("World.update_blocked_tasks")
 		world.update_blocked_tasks(dt)
-		debug_profiler.end("world/update_blocked_tasks")
+		debug_profiler.end("World.update_blocked_tasks")
 
 		debug_profiler.finish_frame()
 		update_debug_timings_label()
