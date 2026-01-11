@@ -2,7 +2,6 @@ extends RefCounted
 class_name Pathfinder
 
 const STAIR_BLOCK_ID := 100
-const EMPTY_BLOCK_ID := 0
 const MIN_WALKABLE_Y := 1
 const LEVEL_STEP := 1
 const MAX_ITERATIONS := 10000
@@ -22,8 +21,10 @@ const CARDINAL_DIRS_3D := [
 ]
 var debug_profiler: DebugProfiler
 
-func is_blocking(block_id: int) -> bool:
-    return block_id != EMPTY_BLOCK_ID and block_id != STAIR_BLOCK_ID
+func is_blocking(world, block_id: int) -> bool:
+    if block_id == STAIR_BLOCK_ID:
+        return false
+    return world.is_block_solid_id(block_id)
 
 func is_walkable(world, x: int, y: int, z: int) -> bool:
     if x < 0 or y < 0 or z < 0:
@@ -33,10 +34,10 @@ func is_walkable(world, x: int, y: int, z: int) -> bool:
     if y < MIN_WALKABLE_Y:
         return false
     var below_block: int = world.get_block(x, y - 1, z)
-    if below_block == EMPTY_BLOCK_ID:
+    if not world.is_block_solid_id(below_block):
         return false
     var current_block: int = world.get_block(x, y, z)
-    if is_blocking(current_block):
+    if is_blocking(world, current_block):
         return false
     return true
 
@@ -66,7 +67,7 @@ func get_neighbors(world, pos: Vector3i) -> Array:
         if ny < world.world_size_y:
             var head_block: int = world.get_block(x, y + 1, z)
             var candidate := Vector3i(nx, ny, nz)
-            if is_walkable(world, nx, ny, nz) and not is_blocking(head_block) and can_change_level(world, pos, candidate):
+            if is_walkable(world, nx, ny, nz) and not is_blocking(world, head_block) and can_change_level(world, pos, candidate):
                 neighbors.append(candidate)
 
     for dir in CARDINAL_DIRS_2D:

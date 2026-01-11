@@ -1,0 +1,17 @@
+[remap]
+
+importer="csv_translation"
+type="Translation"
+uid="uid://ckpv74u71p4ij"
+
+[deps]
+
+files=["res://data/blocks.name.translation", "res://data/blocks.solid.translation", "res://data/blocks.hardness.translation", "res://data/blocks.replaceable.translation", "res://data/blocks.drop.translation", "res://data/blocks.color.translation", "res://data/blocks.color.translation", "res://data/blocks.color.translation"]
+
+source_file="res://data/blocks.csv"
+dest_files=["res://data/blocks.name.translation", "res://data/blocks.solid.translation", "res://data/blocks.hardness.translation", "res://data/blocks.replaceable.translation", "res://data/blocks.drop.translation", "res://data/blocks.color.translation", "res://data/blocks.color.translation", "res://data/blocks.color.translation"]
+
+[params]
+
+compress=true
+delimiter=0

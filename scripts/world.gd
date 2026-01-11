@@ -1,13 +1,17 @@
 extends Node3D
 class_name World
 
+const BlockRegistryScript = preload("res://scripts/block_registry.gd")
+
 const CHUNK_SIZE := 8
 const WORLD_CHUNKS_X := 32
 const WORLD_CHUNKS_Y := 32
 const WORLD_CHUNKS_Z := 32
+const BLOCK_ID_AIR := 0
 const STAIR_BLOCK_ID := 100
 const DEFAULT_MATERIAL := 1
 const DUMMY_INT := 666
+const BLOCK_DATA_PATH := "res://data/blocks.csv"
 const SEA_LEVEL_DEPTH := 30
 const SEA_LEVEL_MIN := 8
 const SEA_LEVEL_FILL_OFFSET := 1
@@ -27,6 +31,8 @@ const VISIBILITY_Y_OFFSET := 1.0
 const RAYCAST_VOXEL_OFFSET := Vector3(0.5, 0.5, 0.5)
 const RAYCAST_STEP_POSITIVE := 1
 const RAYCAST_STEP_NEGATIVE := -1
+const SAVE_MAGIC := 0x474F424C
+const SAVE_VERSION := 1
 
 var world_size_x := CHUNK_SIZE * WORLD_CHUNKS_X
 var world_size_y := CHUNK_SIZE * WORLD_CHUNKS_Y
@@ -38,6 +44,7 @@ var vertical_scroll := DUMMY_INT
 
 var blocks := PackedByteArray()
 var renderer: WorldRenderer
+var block_registry = BlockRegistryScript.new()
 
 var task_queue := TaskQueue.new()
 var task_manager: TaskManager
@@ -71,6 +78,7 @@ var player_mode := PlayerMode.DIG
 var selected_blocks: Dictionary = {}
 
 func _ready() -> void:
+	block_registry.load_from_csv(BLOCK_DATA_PATH)
 	task_manager = TaskManager.new(self, task_queue)
 	renderer = WorldRenderer.new()
 	add_child(renderer)
@@ -79,11 +87,17 @@ func _ready() -> void:
 
 func init_world() -> void:
 	blocks.resize(world_size_x * world_size_y * world_size_z)
-	blocks.fill(0)
+	blocks.fill(BLOCK_ID_AIR)
 	sea_level = max(world_size_y - SEA_LEVEL_DEPTH, SEA_LEVEL_MIN)
 	top_render_y = sea_level
 	if renderer != null:
 		renderer.reset_stats()
+	reset_streaming_state()
+
+	seed_world()
+	spawn_initial_workers()
+
+func reset_streaming_state() -> void:
 	chunk_build_queue.clear()
 	chunk_build_set.clear()
 	last_stream_chunk = Vector2i(-DUMMY_INT, -DUMMY_INT)
@@ -102,17 +116,79 @@ func init_world() -> void:
 	stream_x_offsets.clear()
 	stream_z_offsets.clear()
 
-	seed_world()
+func save_world(path: String) -> bool:
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if file == null:
+		push_error("World save failed: %s" % path)
+		return false
+	file.store_32(SAVE_MAGIC)
+	file.store_32(SAVE_VERSION)
+	file.store_32(world_size_x)
+	file.store_32(world_size_y)
+	file.store_32(world_size_z)
+	file.store_32(CHUNK_SIZE)
+	file.store_32(sea_level)
+	file.store_32(top_render_y)
+	file.store_32(blocks.size())
+	file.store_buffer(blocks)
+	file.flush()
+	return true
+
+func load_world(path: String) -> bool:
+	if not FileAccess.file_exists(path):
+		push_warning("World load failed: missing %s" % path)
+		return false
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		push_warning("World load failed: cannot open %s" % path)
+		return false
+	var magic: int = file.get_32()
+	if magic != SAVE_MAGIC:
+		push_warning("World load failed: bad magic")
+		return false
+	var version: int = file.get_32()
+	if version != SAVE_VERSION:
+		push_warning("World load failed: version %d != %d" % [version, SAVE_VERSION])
+		return false
+	var size_x: int = file.get_32()
+	var size_y: int = file.get_32()
+	var size_z: int = file.get_32()
+	var chunk_size: int = file.get_32()
+	if size_x != world_size_x or size_y != world_size_y or size_z != world_size_z or chunk_size != CHUNK_SIZE:
+		push_warning("World load failed: size mismatch")
+		return false
+	var saved_sea_level: int = file.get_32()
+	var saved_top_render_y: int = file.get_32()
+	var block_count: int = file.get_32()
+	var expected_count: int = world_size_x * world_size_y * world_size_z
+	if block_count != expected_count:
+		push_warning("World load failed: block count mismatch")
+		return false
+	var buffer := file.get_buffer(block_count)
+	if buffer.size() != block_count:
+		push_warning("World load failed: incomplete block data")
+		return false
+	blocks = buffer
+	sea_level = clamp(saved_sea_level, 0, world_size_y - 1)
+	top_render_y = clamp(saved_top_render_y, 0, world_size_y - 1)
+	reset_streaming_state()
+	for worker in workers:
+		worker.queue_free()
+	workers.clear()
 	spawn_initial_workers()
+	if renderer != null:
+		renderer.clear_chunks()
+		renderer.reset_stats()
+	return true
 
 func world_index(x: int, y: int, z: int) -> int:
 	return (z * world_size_y + y) * world_size_x + x
 
 func get_block(x: int, y: int, z: int) -> int:
 	if x < 0 or y < 0 or z < 0:
-		return 0
+		return BLOCK_ID_AIR
 	if x >= world_size_x or y >= world_size_y or z >= world_size_z:
-		return 0
+		return BLOCK_ID_AIR
 	return blocks[world_index(x, y, z)]
 
 func set_block(x: int, y: int, z: int, value: int) -> void:
@@ -120,15 +196,42 @@ func set_block(x: int, y: int, z: int, value: int) -> void:
 		return
 	if x >= world_size_x or y >= world_size_y or z >= world_size_z:
 		return
+	if value < 0 or value >= BlockRegistryScript.TABLE_SIZE:
+		return
 	blocks[world_index(x, y, z)] = value
 	if renderer != null:
 		renderer.regenerate_chunk(int(x / float(CHUNK_SIZE)), int(y / float(CHUNK_SIZE)), int(z / float(CHUNK_SIZE)))
 
 func is_solid(x: int, y: int, z: int) -> bool:
-	return get_block(x, y, z) != 0
+	return is_block_solid_id(get_block(x, y, z))
+
+func is_block_solid_id(block_id: int) -> bool:
+	return block_registry.is_solid(block_id)
+
+func is_block_empty_id(block_id: int) -> bool:
+	return block_id == BLOCK_ID_AIR
+
+func is_empty(x: int, y: int, z: int) -> bool:
+	return is_block_empty_id(get_block(x, y, z))
+
+func is_diggable_at(x: int, y: int, z: int) -> bool:
+	return block_registry.get_hardness(get_block(x, y, z)) > 0.0
+
+func can_place_stairs_at(x: int, y: int, z: int) -> bool:
+	var block_id := get_block(x, y, z)
+	return block_id != STAIR_BLOCK_ID and block_registry.is_replaceable(block_id)
+
+func is_stairs_at(x: int, y: int, z: int) -> bool:
+	return get_block(x, y, z) == STAIR_BLOCK_ID
+
+func get_block_color(block_id: int) -> Color:
+	return block_registry.get_color(block_id)
+
+func get_block_name(block_id: int) -> String:
+	return block_registry.get_name(block_id)
 
 func seed_world() -> void:
-	blocks.fill(0)
+	blocks.fill(BLOCK_ID_AIR)
 	var max_y: int = min(sea_level + SEA_LEVEL_FILL_OFFSET, world_size_y)
 	for y in range(max_y):
 		for x in range(world_size_x):
@@ -330,7 +433,7 @@ func spawn_initial_workers() -> void:
 
 func find_surface_y(x: int, z: int) -> int:
 	for y in range(world_size_y - 1, -1, -1):
-		if get_block(x, y, z) != 0:
+		if not is_block_empty_id(get_block(x, y, z)):
 			return y
 	return 0
 
@@ -381,7 +484,7 @@ func raycast_block(ray_origin: Vector3, ray_dir: Vector3, max_distance: float) -
 
 	while distance < max_distance:
 		if voxel.x >= 0 and voxel.y >= 0 and voxel.z >= 0 and voxel.x < world_size_x and voxel.y < world_size_y and voxel.z < world_size_z:
-			if voxel.y <= top_render_y and get_block(voxel.x, voxel.y, voxel.z) != 0:
+			if voxel.y <= top_render_y and not is_block_empty_id(get_block(voxel.x, voxel.y, voxel.z)):
 				return {"hit": true, "pos": voxel}
 
 		if t_max_x < t_max_y:

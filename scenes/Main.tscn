@@ -1,7 +1,8 @@
-[gd_scene load_steps=3 format=3 uid="uid://bl17wlvftn4tu"]
+[gd_scene load_steps=4 format=3 uid="uid://bl17wlvftn4tu"]
 
 [ext_resource type="Script" uid="uid://4n0n2cx3lpfh" path="res://scripts/Main.gd" id="1"]
 [ext_resource type="Script" uid="uid://cnicb7xtx418y" path="res://scripts/world.gd" id="2"]
+[ext_resource type="Environment" uid="uid://bylv7a3o6l1p0" path="res://scenes/main_environment.tres" id="3"]
 
 [node name="Main" type="Node3D"]
 script = ExtResource("1")
@@ -17,13 +18,12 @@ near = 0.1
 far = 2000.0
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
-transform = Transform3D(0.8253356, -0.40504974, 0.3933902, 0, 0.6967067, 0.7173561, -0.5646425, -0.59205955, 0.57501686, 0.561563, 0.65790856, 0.18913758)
-light_color = Color(1, 1, 0.8509804, 1)
-light_energy = 0.889
-light_angular_distance = 7.86
-directional_shadow_blend_splits = true
-directional_shadow_max_distance = 2353.4
-directional_shadow_pancake_size = 12.0
+transform = Transform3D(-0.422618, -0.694272, 0.582563, 0, 0.642788, 0.766044, -0.906308, 0.323744, -0.271654, 0, 0, 0)
+shadow_enabled = true
+shadow_opacity = 0.75
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = ExtResource("3")
 
 [node name="HUD" type="CanvasLayer" parent="."]
 
@@ -33,3 +33,44 @@ offset_top = 10.0
 offset_right = 500.0
 offset_bottom = 34.0
 text = "Mode"
+
+[node name="Menu" type="CanvasLayer" parent="."]
+
+[node name="Panel" type="PanelContainer" parent="Menu"]
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -180.0
+offset_top = -150.0
+offset_right = 180.0
+offset_bottom = 150.0
+
+[node name="VBox" type="VBoxContainer" parent="Menu/Panel"]
+anchors_preset = 15
+offset_left = 16.0
+offset_top = 16.0
+offset_right = -16.0
+offset_bottom = -16.0
+theme_override_constants/separation = 8
+
+[node name="Title" type="Label" parent="Menu/Panel/VBox"]
+text = "Goblinoria"
+horizontal_alignment = 1
+
+[node name="ResumeButton" type="Button" parent="Menu/Panel/VBox"]
+text = "Resume"
+
+[node name="SaveButton" type="Button" parent="Menu/Panel/VBox"]
+text = "Save"
+
+[node name="LoadButton" type="Button" parent="Menu/Panel/VBox"]
+text = "Load"
+
+[node name="QuitButton" type="Button" parent="Menu/Panel/VBox"]
+text = "Quit"
+
+[node name="StatusLabel" type="Label" parent="Menu/Panel/VBox"]
+text = ""
+horizontal_alignment = 1

@@ -20,11 +20,19 @@ const SCREEN_CENTER_FACTOR := 0.5
 const MOVE_VERTICAL_UNIT := 1.0
 const PLACE_HEIGHT_OFFSET := 1.0
 const ROUND_HALF := 0.5
+const SAVE_DIR := "user://saves"
+const SAVE_PATH := "user://saves/world.save"
 
 @onready var world: World = $World
 @onready var camera: Camera3D = $Camera3D
 @onready var hud_label: Label = $HUD/ModeLabel
 @onready var hud_layer: CanvasLayer = $HUD
+@onready var menu_layer: CanvasLayer = $Menu
+@onready var resume_button: Button = $Menu/Panel/VBox/ResumeButton
+@onready var save_button: Button = $Menu/Panel/VBox/SaveButton
+@onready var load_button: Button = $Menu/Panel/VBox/LoadButton
+@onready var quit_button: Button = $Menu/Panel/VBox/QuitButton
+@onready var menu_status_label: Label = $Menu/Panel/VBox/StatusLabel
 
 var drag_start: Vector2
 var is_dragging := false
@@ -43,6 +51,9 @@ var cam_zoom_step: float = CAM_ZOOM_STEP_DEFAULT
 var right_mouse_down: bool = false
 var prev_mouse_pos: Vector2 = Vector2.ZERO
 var debug_overlay: DebugOverlay
+var info_block_id: int = -1
+var info_block_pos := Vector3i(-1, -1, -1)
+var menu_open := false
 
 func _ready() -> void:
 	Engine.max_fps = ENGINE_MAX_FPS
@@ -61,8 +72,14 @@ func _ready() -> void:
 		debug_overlay.layer = hud_layer.layer + 1
 	add_child(debug_overlay)
 	debug_overlay.initialize(world, camera)
+	initialize_menu()
+	open_menu()
 
 func _process(dt: float) -> void:
+	if is_key_just_pressed(KEY_ESCAPE):
+		toggle_menu()
+	if menu_open:
+		return
 	if is_key_just_pressed(KEY_1):
 		world.player_mode = World.PlayerMode.INFORMATION
 	if is_key_just_pressed(KEY_2):
@@ -92,6 +109,7 @@ func _process(dt: float) -> void:
 		debug_overlay.run_timed("World.update_streaming", Callable(world, "update_streaming").bind(get_stream_target()))
 		debug_overlay.run_timed("Main.handle_mouse", Callable(self, "handle_mouse"))
 		debug_overlay.run_timed("Main.update_hover_preview", Callable(self, "update_hover_preview"))
+		debug_overlay.run_timed("Main.update_info_hover", Callable(self, "update_info_hover"))
 		debug_overlay.run_timed("Main.update_hud", Callable(self, "update_hud"))
 		debug_overlay.update_draw_burden()
 		debug_overlay.step_world(dt)
@@ -100,16 +118,72 @@ func _process(dt: float) -> void:
 		world.update_streaming(get_stream_target())
 		handle_mouse()
 		update_hover_preview()
+		update_info_hover()
 		update_hud()
 		world.update_world(dt)
 
 func _input(event: InputEvent) -> void:
+	if menu_open:
+		return
 	if event is InputEventMouseButton:
 		var mouse_event := event as InputEventMouseButton
 		if mouse_event.button_index == MOUSE_BUTTON_WHEEL_UP:
 			camera.size = clamp(camera.size / cam_zoom_step, cam_zoom_min, cam_zoom_max)
 		elif mouse_event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			camera.size = clamp(camera.size * cam_zoom_step, cam_zoom_min, cam_zoom_max)
+
+func initialize_menu() -> void:
+	if resume_button != null:
+		resume_button.pressed.connect(_on_resume_pressed)
+	if save_button != null:
+		save_button.pressed.connect(_on_save_pressed)
+	if load_button != null:
+		load_button.pressed.connect(_on_load_pressed)
+	if quit_button != null:
+		quit_button.pressed.connect(_on_quit_pressed)
+
+func toggle_menu() -> void:
+	if menu_open:
+		close_menu()
+	else:
+		open_menu()
+
+func open_menu() -> void:
+	menu_open = true
+	if menu_layer != null:
+		menu_layer.visible = true
+	if menu_status_label != null:
+		menu_status_label.text = ""
+	is_dragging = false
+	world.clear_drag_preview()
+
+func close_menu() -> void:
+	menu_open = false
+	if menu_layer != null:
+		menu_layer.visible = false
+
+func _on_resume_pressed() -> void:
+	close_menu()
+
+func _on_save_pressed() -> void:
+	var result: int = DirAccess.make_dir_recursive_absolute(SAVE_DIR)
+	if result != OK:
+		if menu_status_label != null:
+			menu_status_label.text = "Save folder error."
+		return
+	var ok := world.save_world(SAVE_PATH)
+	if menu_status_label != null:
+		menu_status_label.text = "Saved." if ok else "Save failed."
+
+func _on_load_pressed() -> void:
+	var ok := world.load_world(SAVE_PATH)
+	if menu_status_label != null:
+		menu_status_label.text = "Loaded." if ok else "Load failed."
+	if ok:
+		close_menu()
+
+func _on_quit_pressed() -> void:
+	get_tree().quit()
 
 func update_camera(dt: float) -> void:
 	update_camera_rotation()
@@ -224,10 +298,7 @@ func update_hover_preview() -> void:
 		world.clear_drag_preview()
 		return
 	var pos: Vector3i = hit["pos"]
-	if not world.is_solid(pos.x, pos.y, pos.z):
-		world.clear_drag_preview()
-		return
-	if world.get_block(pos.x, pos.y, pos.z) == World.STAIR_BLOCK_ID:
+	if not world.can_place_stairs_at(pos.x, pos.y, pos.z):
 		world.clear_drag_preview()
 		return
 	var rect := {
@@ -238,6 +309,21 @@ func update_hover_preview() -> void:
 		"y": pos.y,
 	}
 	world.set_drag_preview(rect, world.player_mode)
+
+func update_info_hover() -> void:
+	if world.player_mode != World.PlayerMode.INFORMATION:
+		info_block_id = -1
+		return
+	var mouse_pos: Vector2 = get_viewport().get_mouse_position()
+	var ray_origin := camera.project_ray_origin(mouse_pos)
+	var ray_dir := camera.project_ray_normal(mouse_pos)
+	var hit: Dictionary = world.raycast_block(ray_origin, ray_dir, CAMERA_RAYCAST_DISTANCE)
+	if not bool(hit.get("hit", false)):
+		info_block_id = -1
+		return
+	var pos: Vector3i = hit["pos"]
+	info_block_id = world.get_block(pos.x, pos.y, pos.z)
+	info_block_pos = pos
 
 func get_drag_plane_y(screen_pos: Vector2) -> float:
 	var ray_origin := camera.project_ray_origin(screen_pos)
@@ -319,29 +405,39 @@ func enqueue_task_at(x: int, y: int, z: int) -> void:
 
 	match world.player_mode:
 		World.PlayerMode.DIG:
-			if world.is_solid(x, y, z):
+			if world.is_diggable_at(x, y, z):
 				world.queue_task_request(TaskQueue.TaskType.DIG, Vector3i(x, y, z), 0)
 		World.PlayerMode.PLACE:
-			if not world.is_solid(x, y, z):
+			if world.is_empty(x, y, z):
 				world.queue_task_request(TaskQueue.TaskType.PLACE, Vector3i(x, y, z), 8)
 		World.PlayerMode.STAIRS:
-			if world.is_solid(x, y, z) and world.get_block(x, y, z) != World.STAIR_BLOCK_ID:
+			if world.can_place_stairs_at(x, y, z):
 				world.queue_task_request(TaskQueue.TaskType.STAIRS, Vector3i(x, y, z), World.STAIR_BLOCK_ID)
 		_:
 			pass
 
 func update_hud() -> void:
 	var mode_name: String = "?"
+	var info_text := ""
 	match world.player_mode:
 		World.PlayerMode.INFORMATION:
 			mode_name = "Info"
+			if info_block_id >= 0:
+				var block_name := world.get_block_name(info_block_id)
+				info_text = " | %s (%d) @ %d,%d,%d" % [
+					block_name,
+					info_block_id,
+					info_block_pos.x,
+					info_block_pos.y,
+					info_block_pos.z,
+				]
 		World.PlayerMode.DIG:
 			mode_name = "Dig"
 		World.PlayerMode.PLACE:
 			mode_name = "Place"
 		World.PlayerMode.STAIRS:
 			mode_name = "Stairs"
-	hud_label.text = "Mode: %s | Tasks: %d" % [mode_name, world.task_queue.active_count()]
+	hud_label.text = "Mode: %s%s | Tasks: %d" % [mode_name, info_text, world.task_queue.active_count()]
 
 func is_key_just_pressed(keycode: int) -> bool:
 	var down: bool = Input.is_key_pressed(keycode)

@@ -214,7 +214,7 @@ func update_working(dt: float, world, task_queue) -> void:
         if task != null:
             match task.type:
                 TaskQueue.TaskType.DIG:
-                    world.set_block(task.pos.x, task.pos.y, task.pos.z, 0)
+                    world.set_block(task.pos.x, task.pos.y, task.pos.z, World.BLOCK_ID_AIR)
                 TaskQueue.TaskType.PLACE:
                     world.set_block(task.pos.x, task.pos.y, task.pos.z, task.material)
                 TaskQueue.TaskType.STAIRS:
