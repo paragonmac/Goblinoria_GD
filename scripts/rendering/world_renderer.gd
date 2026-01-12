@@ -1,15 +1,21 @@
 extends Node3D
 class_name WorldRenderer
+## Main renderer for voxel world chunks, overlays, and stats tracking.
 
+#region Preloads
 const ChunkMesherScript = preload("res://scripts/rendering/chunk_mesher.gd")
 const ChunkCacheScript = preload("res://scripts/rendering/chunk_cache.gd")
 const OverlayRendererScript = preload("res://scripts/rendering/overlay_renderer.gd")
+#endregion
 
+#region Constants
 const TRIS_PER_FACE := 2
 const PERCENT_FACTOR := 100.0
 const NEAR_SAMPLE_OFFSET := 0.1
 const NEAR_SAMPLE_MIN := 0.1
+#endregion
 
+#region State
 var world: World
 var mesher = ChunkMesherScript.new()
 var chunk_cache = ChunkCacheScript.new()
@@ -18,8 +24,10 @@ var block_material: StandardMaterial3D
 var chunk_face_stats: Dictionary = {}
 var total_visible_faces: int = 0
 var total_occluded_faces: int = 0
+#endregion
 
 
+#region Initialization
 func initialize(world_ref: World) -> void:
 	world = world_ref
 	if chunk_cache.get_parent() == null:
@@ -27,8 +35,10 @@ func initialize(world_ref: World) -> void:
 	if overlay_renderer.get_parent() == null:
 		add_child(overlay_renderer)
 	overlay_renderer.initialize(world_ref)
+#endregion
 
 
+#region Reset and Clear
 func reset_stats() -> void:
 	chunk_face_stats.clear()
 	total_visible_faces = 0
@@ -41,8 +51,10 @@ func clear_chunks() -> void:
 	chunk_face_stats.clear()
 	total_visible_faces = 0
 	total_occluded_faces = 0
+#endregion
 
 
+#region Chunk Building
 func build_all_chunks() -> void:
 	if world == null:
 		return
@@ -76,15 +88,19 @@ func regenerate_chunk(cx: int, cy: int, cz: int) -> void:
 	mesh_instance.mesh = mesh
 	if has_geometry:
 		mesh_instance.material_override = get_block_material()
+#endregion
 
 
+#region Materials
 func get_block_material() -> StandardMaterial3D:
 	if block_material == null:
 		block_material = StandardMaterial3D.new()
 		block_material.vertex_color_use_as_albedo = true
 	return block_material
+#endregion
 
 
+#region Stats
 func get_draw_burden_stats() -> Dictionary:
 	var drawn_tris: int = total_visible_faces * TRIS_PER_FACE
 	var culled_tris: int = total_occluded_faces * TRIS_PER_FACE
@@ -150,8 +166,10 @@ func is_chunk_in_view(planes: Array, key: Vector3i) -> bool:
 			if p.distance_to(v) > 0.0:
 				return false
 	return true
+#endregion
 
 
+#region Overlay Management
 func update_task_overlays(tasks: Array, blocked_tasks: Array) -> void:
 	if overlay_renderer == null:
 		return
@@ -168,8 +186,10 @@ func clear_drag_preview() -> void:
 	if overlay_renderer == null:
 		return
 	overlay_renderer.clear_drag_preview()
+#endregion
 
 
+#region Render Height
 func update_render_height(old_y: int, new_y: int) -> void:
 	if world == null:
 		return
@@ -205,6 +225,10 @@ func update_render_height_in_range(old_y: int, new_y: int, min_x: int, max_x: in
 		if coord.z < min_z or coord.z > max_z:
 			continue
 		regenerate_chunk(coord.x, coord.y, coord.z)
+#endregion
 
+
+#region Chunk Queries
 func is_chunk_built(coord: Vector3i) -> bool:
 	return chunk_cache.is_chunk_built(coord)
+#endregion

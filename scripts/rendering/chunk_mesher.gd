@@ -1,6 +1,8 @@
 extends RefCounted
 class_name ChunkMesher
+## Generates chunk meshes with per-face culling and vertex colors.
 
+#region Constants
 const COLOR_MIN := 0.0
 const COLOR_MAX := 1.0
 const FACE_HALF_SIZE := 0.5
@@ -21,7 +23,10 @@ const HASH_SHIFT := 13
 const HASH_MASK := 0x7fffffff
 const BLOCK_NOISE_MOD := 1024
 const BLOCK_NOISE_DIV := 1023.0
+#endregion
 
+
+#region Mesh Building
 func build_chunk_mesh(world: World, cx: int, cy: int, cz: int) -> Dictionary:
 	var chunk_size: int = World.CHUNK_SIZE
 	var vertices := PackedVector3Array()
@@ -92,8 +97,10 @@ func build_chunk_mesh(world: World, cx: int, cy: int, cz: int) -> Dictionary:
 		"occluded_faces": occluded_faces,
 		"has_geometry": has_geometry,
 	}
+#endregion
 
 
+#region Block Colors
 func block_color(world: World, block_id: int, wx: int, wy: int, wz: int) -> Color:
 	var base: Color = world.get_block_color(block_id)
 	base = Color(base.r * BLOCK_ALBEDO_MULT, base.g * BLOCK_ALBEDO_MULT, base.b * BLOCK_ALBEDO_MULT, base.a)
@@ -114,8 +121,10 @@ func block_noise(wx: int, wy: int, wz: int) -> float:
 	var h: int = wx * HASH_X ^ wy * HASH_Y ^ wz * HASH_Z
 	h = (h ^ (h >> HASH_SHIFT)) & HASH_MASK
 	return float(h % BLOCK_NOISE_MOD) / BLOCK_NOISE_DIV
+#endregion
 
 
+#region Face Generation
 func add_face(vertices: PackedVector3Array, normals: PackedVector3Array, colors: PackedColorArray, base: Vector3, normal: Vector3, color: Color) -> void:
 	var h := FACE_HALF_SIZE
 	var v1: Vector3
@@ -170,3 +179,4 @@ func face_shade(normal: Vector3) -> float:
 	if abs(normal.x) > SHADE_THRESHOLD:
 		return SHADE_SIDE
 	return SHADE_FRONT_BACK
+#endregion

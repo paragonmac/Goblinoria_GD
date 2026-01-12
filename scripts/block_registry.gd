@@ -1,16 +1,23 @@
 extends RefCounted
 class_name BlockRegistry
+## Lookup tables for block properties loaded from CSV.
 
+#region Constants
 const TABLE_SIZE := 256
 const DEFAULT_COLOR := Color(0.5, 0.5, 0.5)
+#endregion
 
+#region Property Tables
 var solid := PackedByteArray()
 var hardness := PackedFloat32Array()
 var replaceable := PackedByteArray()
 var drop := PackedByteArray()
 var color := PackedColorArray()
 var names := PackedStringArray()
+#endregion
 
+
+#region Initialization
 func _init() -> void:
 	_init_tables()
 
@@ -31,8 +38,10 @@ func _init_tables() -> void:
 	names.resize(TABLE_SIZE)
 	for i in range(TABLE_SIZE):
 		names[i] = ""
+#endregion
 
 
+#region CSV Loading
 func load_from_csv(path: String) -> void:
 	_init_tables()
 	if not FileAccess.file_exists(path):
@@ -57,8 +66,10 @@ func load_from_csv(path: String) -> void:
 				column_index[key] = i
 			continue
 		_parse_row(cells, column_index)
+#endregion
 
 
+#region Property Accessors
 func is_solid(block_id: int) -> bool:
 	if block_id < 0 or block_id >= TABLE_SIZE:
 		return false
@@ -96,8 +107,10 @@ func get_name(block_id: int) -> String:
 	if name.is_empty():
 		return "Unknown"
 	return name
+#endregion
 
 
+#region CSV Parsing Helpers
 func _parse_row(cells: Array, column_index: Dictionary) -> void:
 	var id_text := _get_cell(cells, column_index, "id", "")
 	if id_text.is_empty():
@@ -145,3 +158,4 @@ func _parse_bool(value: String) -> bool:
 	if lowered == "1" or lowered == "true" or lowered == "yes":
 		return true
 	return false
+#endregion

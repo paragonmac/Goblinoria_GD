@@ -1,8 +1,13 @@
 extends Node3D
 class_name ChunkCache
+## Caches MeshInstance3D nodes for each chunk coordinate.
 
+#region State
 var chunk_nodes: Dictionary = {}
+#endregion
 
+
+#region Cache Management
 func clear() -> void:
 	for key in chunk_nodes.keys():
 		chunk_nodes[key].queue_free()
@@ -24,11 +29,14 @@ func remove_chunk(coord: Vector3i) -> void:
 		return
 	chunk_nodes[coord].queue_free()
 	chunk_nodes.erase(coord)
+#endregion
 
 
+#region Queries
 func is_chunk_built(coord: Vector3i) -> bool:
 	return chunk_nodes.has(coord)
 
 
 func get_keys() -> Array:
 	return chunk_nodes.keys()
+#endregion

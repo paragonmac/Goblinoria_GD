@@ -1,9 +1,14 @@
 extends RefCounted
 class_name TaskQueue
+## Priority queue for dig, place, and stairs tasks.
 
-enum TaskType { DIG, PLACE, STAIRS }
-enum TaskStatus { PENDING, IN_PROGRESS, COMPLETED }
+#region Enums
+enum TaskType {DIG, PLACE, STAIRS}
+enum TaskStatus {PENDING, IN_PROGRESS, COMPLETED}
+#endregion
 
+
+#region Task Class
 class Task:
 	var id: int
 	var pos: Vector3i
@@ -18,10 +23,16 @@ class Task:
 		type = task_type
 		status = TaskStatus.PENDING
 		material = task_material
+#endregion
 
+
+#region State
 var tasks: Array = []
 var next_id: int = 1
+#endregion
 
+
+#region Task Creation
 func add_task(pos: Vector3i, task_type: int, material: int) -> int:
 	for task in tasks:
 		if task.pos == pos and task.type == task_type and task.status != TaskStatus.COMPLETED:
@@ -31,28 +42,27 @@ func add_task(pos: Vector3i, task_type: int, material: int) -> int:
 	tasks.append(Task.new(task_id, pos, task_type, material))
 	return task_id
 
+
 func add_dig_task(pos: Vector3i) -> int:
 	return add_task(pos, TaskType.DIG, 0)
+
 
 func add_place_task(pos: Vector3i, material: int) -> int:
 	return add_task(pos, TaskType.PLACE, material)
 
+
 func add_stairs_task(pos: Vector3i, stair_material: int) -> int:
 	return add_task(pos, TaskType.STAIRS, stair_material)
+#endregion
 
+
+#region Task Lookup
 func get_task(task_id: int) -> Task:
 	for task in tasks:
 		if task.id == task_id:
 			return task
 	return null
 
-func cleanup_completed() -> void:
-	var i := 0
-	while i < tasks.size():
-		if tasks[i].status == TaskStatus.COMPLETED:
-			tasks.remove_at(i)
-		else:
-			i += 1
 
 func find_nearest(task_type: int, from_pos: Vector3) -> Task:
 	var nearest: Task = null
@@ -70,6 +80,7 @@ func find_nearest(task_type: int, from_pos: Vector3) -> Task:
 			nearest_dist = dist_sq
 			nearest = task
 	return nearest
+
 
 func find_nearest_stairs_at_level(from_pos: Vector3, y_level: int) -> Task:
 	var nearest: Task = null
@@ -93,6 +104,18 @@ func find_nearest_stairs_at_level(from_pos: Vector3, y_level: int) -> Task:
 			nearest_dist = dist_sq
 			nearest = task
 	return nearest
+#endregion
+
+
+#region Task Maintenance
+func cleanup_completed() -> void:
+	var i := 0
+	while i < tasks.size():
+		if tasks[i].status == TaskStatus.COMPLETED:
+			tasks.remove_at(i)
+		else:
+			i += 1
+
 
 func active_count() -> int:
 	var count := 0
@@ -100,3 +123,4 @@ func active_count() -> int:
 		if task.status != TaskStatus.COMPLETED:
 			count += 1
 	return count
+#endregion

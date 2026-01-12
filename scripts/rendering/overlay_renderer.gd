@@ -1,6 +1,8 @@
 extends Node3D
 class_name OverlayRenderer
+## Renders task overlays and drag preview boxes for block operations.
 
+#region Constants
 const TASK_OVERLAY_SIZE := Vector3(1.05, 1.05, 1.05)
 const DRAG_PREVIEW_SIZE := Vector3(1.02, 1.02, 1.02)
 const TASK_OVERLAY_ALPHA := 0.7
@@ -16,16 +18,24 @@ const DRAG_STAIRS_COLOR := Color(1.0, 0.7, 0.2)
 const DRAG_DEFAULT_COLOR := Color(0.8, 0.8, 0.8)
 const ROUND_HALF := 0.5
 const COLOR_MAX := 1.0
+#endregion
 
+#region State
 var world: World
 var task_overlays: Dictionary = {}
 var drag_previews: Dictionary = {}
 var drag_materials: Dictionary = {}
+#endregion
 
+
+#region Initialization
 func initialize(world_ref: World) -> void:
 	world = world_ref
+#endregion
+#endregion
 
 
+#region Task Overlays
 func clear_task_overlays() -> void:
 	for key in task_overlays.keys():
 		task_overlays[key].queue_free()
@@ -60,8 +70,10 @@ func update_task_overlays(tasks: Array, blocked_tasks: Array) -> void:
 		if not live_ids.has(task_id):
 			task_overlays[task_id].queue_free()
 			task_overlays.erase(task_id)
+#endregion
 
 
+#region Overlay Helpers
 func blocked_task_key(task: Dictionary) -> String:
 	var pos: Vector3i = task["pos"]
 	return "blocked:%s:%s:%s:%s" % [task["type"], pos.x, pos.y, pos.z]
@@ -104,8 +116,10 @@ func create_blocked_task_overlay(task_type: int) -> MeshInstance3D:
 	mesh_instance.material_override = material
 	add_child(mesh_instance)
 	return mesh_instance
+#endregion
 
 
+#region Drag Preview
 func drag_preview_key(x: int, y: int, z: int) -> String:
 	return "preview:%s:%s:%s" % [x, y, z]
 
@@ -177,3 +191,4 @@ func clear_drag_preview() -> void:
 	for key in drag_previews.keys():
 		drag_previews[key].queue_free()
 	drag_previews.clear()
+#endregion

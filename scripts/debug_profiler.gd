@@ -1,6 +1,8 @@
 class_name DebugProfiler
 extends RefCounted
+## Frame timing profiler with rolling window statistics.
 
+#region State
 var enabled: bool = false
 var window_sec: float = 3.0
 var frame_data: Dictionary = {}
@@ -8,16 +10,20 @@ var active: Dictionary = {}
 var history: Dictionary = {}
 var stats: Dictionary = {}
 var order: Array = []
+#endregion
 
 
+#region Control
 func reset() -> void:
 	frame_data.clear()
 	active.clear()
 	history.clear()
 	stats.clear()
 	order.clear()
+#endregion
 
 
+#region Timing
 func begin(label: String) -> void:
 	if not enabled:
 		return
@@ -65,8 +71,10 @@ func finish_frame() -> void:
 
 	frame_data.clear()
 	active.clear()
+#endregion
 
 
+#region Reporting
 func get_report_lines(limit: int = 8) -> Array:
 	var lines: Array = []
 	var labels: Array = []
@@ -102,3 +110,4 @@ func _color_hex_for_value(value: float, min_val: float, max_val: float) -> Strin
 		t = clamp((value - min_val) / (max_val - min_val), 0.0, 1.0)
 	var color := Color(0.0, 1.0, 0.0).lerp(Color(1.0, 0.0, 0.0), t)
 	return "%02x%02x%02x" % [int(color.r * 255.0), int(color.g * 255.0), int(color.b * 255.0)]
+#endregion

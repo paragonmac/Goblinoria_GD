@@ -1,8 +1,12 @@
 extends Node3D
 class_name Worker
+## Worker entity that performs tasks (dig, place, stairs) and wanders when idle.
 
-enum WorkerState { IDLE, MOVING, WORKING, WAITING }
+#region Enums
+enum WorkerState {IDLE, MOVING, WORKING, WAITING}
+#endregion
 
+#region Constants
 const WORK_DURATION := 0.5
 const IDLE_PAUSE := 0.5
 const DEFAULT_SPEED := 4.0
@@ -22,7 +26,9 @@ const ADJACENT_MANHATTAN_DISTANCE := 1
 const WANDER_ATTEMPTS := 8
 const WANDER_DIST_MIN := 1
 const WANDER_DIST_MAX := 10
+#endregion
 
+#region State
 var state: WorkerState = WorkerState.IDLE
 var current_task_id := -1
 var target_pos := Vector3.ZERO
@@ -33,14 +39,19 @@ var work_timer := 0.0
 var idle_timer := 0.0
 var wander_wait := 0.0
 var rng := RandomNumberGenerator.new()
+#endregion
 
+#region Visual Components
 var mesh_instance: MeshInstance3D
 var mat_idle: StandardMaterial3D
 var mat_moving: StandardMaterial3D
 var mat_working: StandardMaterial3D
 var shadow_instance: MeshInstance3D
 var shadow_material: StandardMaterial3D
+#endregion
 
+
+#region Lifecycle
 func _ready() -> void:
     rng.seed = hash(Vector3(position.x, position.y, position.z))
     wander_wait = rng.randf_range(WANDER_WAIT_MIN, WANDER_WAIT_MAX)
@@ -74,7 +85,10 @@ func _ready() -> void:
     mat_working.albedo_color = WORKING_COLOR
 
     mesh_instance.material_override = mat_idle
+#endregion
 
+
+#region State Management
 func set_state(new_state: WorkerState) -> void:
     state = new_state
     match state:
@@ -87,9 +101,13 @@ func set_state(new_state: WorkerState) -> void:
         WorkerState.WAITING:
             mesh_instance.material_override = mat_idle
 
+
 func get_block_coord() -> Vector3i:
     return Vector3i(int(round(position.x)), int(floor(position.y)), int(round(position.z)))
+#endregion
 
+
+#region Update Loop
 func update_worker(dt: float, world, task_queue, pathfinder) -> void:
     if idle_timer > 0.0:
         idle_timer -= dt
@@ -104,7 +122,10 @@ func update_worker(dt: float, world, task_queue, pathfinder) -> void:
             update_working(dt, world, task_queue)
         WorkerState.WAITING:
             update_waiting(dt, world, task_queue, pathfinder)
+#endregion
 
+
+#region Idle State
 func update_idle(dt: float, world, task_queue, pathfinder) -> void:
     var result: Dictionary = find_pathable_task(TaskQueue.TaskType.DIG, world, task_queue, pathfinder)
     if result.is_empty():
@@ -125,7 +146,10 @@ func update_idle(dt: float, world, task_queue, pathfinder) -> void:
         return
 
     update_wander(dt, world, pathfinder)
+#endregion
 
+
+#region Task Discovery
 func find_pathable_task(task_type: int, world, task_queue, pathfinder) -> Dictionary:
     var candidates: Array = []
     for task in task_queue.tasks:
@@ -160,6 +184,7 @@ func find_pathable_task(task_type: int, world, task_queue, pathfinder) -> Dictio
 
     return {}
 
+
 func can_work_task(task) -> bool:
     if task.type == TaskQueue.TaskType.DIG or task.type == TaskQueue.TaskType.PLACE:
         var worker_pos := get_block_coord()
@@ -169,11 +194,15 @@ func can_work_task(task) -> bool:
         var dz: int = abs(worker_pos.z - task.pos.z)
         return dx + dz == ADJACENT_MANHATTAN_DISTANCE
     return true
+#endregion
 
+
+#region Movement
 func set_target_from_path() -> void:
     if path_index < path.size():
         var node: Vector3i = path[path_index]
         target_pos = Vector3(node.x, node.y, node.z)
+
 
 func update_moving(dt: float, task_queue) -> void:
     var delta := target_pos - position
@@ -203,7 +232,10 @@ func update_moving(dt: float, task_queue) -> void:
         position = target_pos
     else:
         position += delta.normalized() * move_dist
+#endregion
 
+
+#region Working State
 func update_working(dt: float, world, task_queue) -> void:
     work_timer -= dt
     if work_timer > 0.0:
@@ -226,7 +258,10 @@ func update_working(dt: float, world, task_queue) -> void:
     current_task_id = -1
     idle_timer = IDLE_PAUSE
     set_state(WorkerState.IDLE)
+#endregion
 
+
+#region Waiting State
 func update_waiting(_dt: float, world, task_queue, pathfinder) -> void:
     if current_task_id < 0:
         set_state(WorkerState.IDLE)
@@ -257,7 +292,10 @@ func update_waiting(_dt: float, world, task_queue, pathfinder) -> void:
         return
 
     idle_timer = IDLE_PAUSE
+#endregion
 
+
+#region Wandering
 func update_wander(dt: float, world, pathfinder) -> void:
     if wander_wait > 0.0:
         wander_wait -= dt
@@ -285,7 +323,10 @@ func update_wander(dt: float, world, pathfinder) -> void:
             return
 
     wander_wait = rng.randf_range(WANDER_WAIT_MIN, WANDER_WAIT_MAX)
+#endregion
 
+
+#region Pathfinding Helpers
 func find_path_to_stairs(world, start: Vector3i, target: Vector3i, pathfinder) -> Array:
     var candidates: Array[Vector3i] = []
     for dy in range(0, 3):
@@ -309,3 +350,4 @@ func find_path_to_stairs(world, start: Vector3i, target: Vector3i, pathfinder) -
             return found
 
     return []
+#endregion

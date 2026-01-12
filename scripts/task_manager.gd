@@ -1,17 +1,23 @@
 extends RefCounted
 class_name TaskManager
+## Manages task queuing, accessibility checking, and blocked task handling.
 
+#region State
 var world: World
 var task_queue: TaskQueue
 var blocked_tasks: Array = []
 var blocked_recheck_timer := 1.0
+#endregion
 
 
+#region Initialization
 func _init(world_ref: World, queue_ref: TaskQueue) -> void:
 	world = world_ref
 	task_queue = queue_ref
+#endregion
 
 
+#region Task Queue Updates
 func update_task_queue() -> void:
 	task_queue.cleanup_completed()
 
@@ -37,8 +43,10 @@ func reassess_waiting_tasks() -> void:
 			if worker.current_task_id == task.id:
 				worker.current_task_id = -1
 				worker.set_state(Worker.WorkerState.IDLE)
+#endregion
 
 
+#region Task Queueing
 func queue_task_request(task_type: int, pos: Vector3i, material: int) -> void:
 	if is_task_already_queued(task_type, pos):
 		return
@@ -48,6 +56,18 @@ func queue_task_request(task_type: int, pos: Vector3i, material: int) -> void:
 		blocked_tasks.append({"type": task_type, "pos": pos, "material": material})
 
 
+func add_task_to_queue(task_type: int, pos: Vector3i, material: int) -> void:
+	match task_type:
+		TaskQueue.TaskType.DIG:
+			task_queue.add_dig_task(pos)
+		TaskQueue.TaskType.PLACE:
+			task_queue.add_place_task(pos, material)
+		TaskQueue.TaskType.STAIRS:
+			task_queue.add_stairs_task(pos, material)
+#endregion
+
+
+#region Blocked Task Handling
 func recheck_blocked_tasks() -> void:
 	var i := 0
 	while i < blocked_tasks.size():
@@ -59,8 +79,10 @@ func recheck_blocked_tasks() -> void:
 			blocked_tasks.remove_at(i)
 		else:
 			i += 1
+#endregion
 
 
+#region Accessibility Checking
 func is_task_accessible(task_type: int, pos: Vector3i) -> bool:
 	if world == null or world.workers.is_empty():
 		return false
@@ -76,16 +98,6 @@ func is_task_accessible(task_type: int, pos: Vector3i) -> bool:
 	return false
 
 
-func add_task_to_queue(task_type: int, pos: Vector3i, material: int) -> void:
-	match task_type:
-		TaskQueue.TaskType.DIG:
-			task_queue.add_dig_task(pos)
-		TaskQueue.TaskType.PLACE:
-			task_queue.add_place_task(pos, material)
-		TaskQueue.TaskType.STAIRS:
-			task_queue.add_stairs_task(pos, material)
-
-
 func is_task_already_queued(task_type: int, pos: Vector3i) -> bool:
 	for task in task_queue.tasks:
 		if task.status == TaskQueue.TaskStatus.COMPLETED:
@@ -96,3 +108,4 @@ func is_task_already_queued(task_type: int, pos: Vector3i) -> bool:
 		if task["type"] == task_type and task["pos"] == pos:
 			return true
 	return false
+#endregion

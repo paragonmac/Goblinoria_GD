@@ -1,37 +1,51 @@
 class_name DebugOverlay
 extends CanvasLayer
+## Debug overlay for profiler, draw stats, and timing information.
 
+#region Preloads
 const CPUProfilerUIScript = preload("res://addons/proprofiler/cpu_profiler/ui/cpu_profiler_ui.gd")
+#endregion
 
+#region References
 var world: World
 var camera: Camera3D
 var debug_profiler: DebugProfiler
+#endregion
 
+#region Visibility State
 var show_profiler: bool = false
 var show_draw_burden: bool = false
 var show_debug_timings: bool = false
+#endregion
 
+#region UI Elements
 var profiler_panel: PanelContainer
 var profiler_ui: CPUProfilerUI
 var draw_burden_label: Label
 var draw_rendered_label: Label
 var debug_timings_label: RichTextLabel
+#endregion
 
 
+#region Lifecycle
 func _ready() -> void:
 	setup_profiler_ui()
 	setup_draw_burden_label()
 	setup_debug_timings_label()
+#endregion
 
 
+#region Initialization
 func initialize(world_ref: World, camera_ref: Camera3D) -> void:
 	world = world_ref
 	camera = camera_ref
 	debug_profiler = DebugProfiler.new()
 	if world != null and world.pathfinder != null:
 		world.pathfinder.debug_profiler = debug_profiler
+#endregion
 
 
+#region Toggle Functions
 func toggle_profiler() -> void:
 	show_profiler = not show_profiler
 	if profiler_panel != null:
@@ -63,8 +77,10 @@ func toggle_debug_timings() -> void:
 		debug_profiler.enabled = true
 	else:
 		debug_profiler.enabled = false
+#endregion
 
 
+#region Timed Execution
 func run_timed(label: String, callable: Callable) -> void:
 	if show_debug_timings and debug_profiler != null and debug_profiler.enabled:
 		debug_profiler.begin(label)
@@ -72,8 +88,10 @@ func run_timed(label: String, callable: Callable) -> void:
 		debug_profiler.end(label)
 	else:
 		callable.call()
+#endregion
 
 
+#region World Update
 func step_world(dt: float) -> void:
 	if world == null:
 		return
@@ -98,8 +116,10 @@ func step_world(dt: float) -> void:
 		update_debug_timings_label()
 	else:
 		world.update_world(dt)
+#endregion
 
 
+#region Draw Burden Updates
 func update_draw_burden() -> void:
 	if not show_draw_burden:
 		return
@@ -116,8 +136,10 @@ func update_draw_burden() -> void:
 	var total: int = int(rendered_stats.get("total", 0))
 	var render_percent: float = float(rendered_stats.get("percent", 0.0))
 	draw_rendered_label.text = "Tris Rendered: %d/%d (%.1f%%)" % [rendered, total, render_percent]
+#endregion
 
 
+#region UI Setup
 func setup_profiler_ui() -> void:
 	profiler_panel = PanelContainer.new()
 	profiler_panel.name = "RuntimeProfiler"
@@ -176,8 +198,10 @@ func setup_debug_timings_label() -> void:
 	debug_timings_label.text = ""
 	debug_timings_label.visible = show_debug_timings
 	add_child(debug_timings_label)
+#endregion
 
 
+#region Debug Timings
 func update_debug_timings_label() -> void:
 	if debug_timings_label == null:
 		return
@@ -185,3 +209,4 @@ func update_debug_timings_label() -> void:
 		return
 	var lines: Array = debug_profiler.get_report_lines(8)
 	debug_timings_label.text = "Debug Timings (ms)\n" + "\n".join(lines)
+#endregion
