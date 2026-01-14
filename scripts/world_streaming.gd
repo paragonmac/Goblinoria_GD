@@ -156,6 +156,8 @@ func process_chunk_queue() -> void:
 	for _i in range(build_count):
 		var key: Vector3i = chunk_build_queue.pop_front()
 		chunk_build_set.erase(key)
+		var chunk := world.ensure_chunk(key)
+		chunk.mesh_state = ChunkData.MESH_STATE_PENDING
 		world.ensure_chunk_generated(key)
 		world.renderer.regenerate_chunk(key.x, key.y, key.z)
 		if stream_pending and key.y == stream_layer_y and stream_layer_remaining > 0:
@@ -193,14 +195,20 @@ func enqueue_stream_chunks() -> void:
 		var x_offset: int = stream_x_offsets[x_spiral_index]
 		var z_offset: int = stream_z_offsets[z_spiral_index]
 		var key := Vector3i(stream_min_x + x_offset, stream_layer_y, stream_min_z + z_offset)
-		if not world.renderer.is_chunk_built(key) and not chunk_build_set.has(key):
+		if not is_chunk_mesh_ready(key) and not chunk_build_set.has(key):
 			chunk_build_set[key] = true
 			chunk_build_queue.append(key)
+			var chunk := world.ensure_chunk(key)
+			chunk.mesh_state = ChunkData.MESH_STATE_PENDING
 		stream_plane_index += 1
 #endregion
 
 
 #region Helpers
+func is_chunk_mesh_ready(coord: Vector3i) -> bool:
+	var chunk: ChunkData = world.get_chunk(coord)
+	return chunk != null and chunk.mesh_state == ChunkData.MESH_STATE_READY
+
 func count_unbuilt_in_layer(layer_y: int) -> int:
 	if world.renderer == null:
 		return 0
@@ -214,7 +222,7 @@ func count_unbuilt_in_layer(layer_y: int) -> int:
 		for z_offset in stream_z_offsets:
 			var z: int = stream_min_z + int(z_offset)
 			var key := Vector3i(x, layer_y, z)
-			if not world.renderer.is_chunk_built(key):
+			if not is_chunk_mesh_ready(key):
 				remaining += 1
 	return remaining
 

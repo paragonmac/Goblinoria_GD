@@ -13,6 +13,7 @@ const TRIS_PER_FACE := 2
 const PERCENT_FACTOR := 100.0
 const NEAR_SAMPLE_OFFSET := 0.1
 const NEAR_SAMPLE_MIN := 0.1
+const MESH_BUILD_LOG_THRESHOLD_MS := 5.0
 #endregion
 
 #region State
@@ -24,6 +25,8 @@ var block_material: StandardMaterial3D
 var chunk_face_stats: Dictionary = {}
 var total_visible_faces: int = 0
 var total_occluded_faces: int = 0
+var render_height_queue: Array = []
+var render_height_queue_set: Dictionary = {}
 #endregion
 
 
@@ -51,6 +54,13 @@ func clear_chunks() -> void:
 	chunk_face_stats.clear()
 	total_visible_faces = 0
 	total_occluded_faces = 0
+	render_height_queue.clear()
+	render_height_queue_set.clear()
+	if world == null:
+		return
+	for chunk in world.chunks.values():
+		var entry: ChunkData = chunk
+		entry.mesh_state = ChunkData.MESH_STATE_NONE
 #endregion
 
 
@@ -75,7 +85,18 @@ func regenerate_chunk(cx: int, cy: int, cz: int) -> void:
 	var key := Vector3i(cx, cy, cz)
 	var mesh_instance: MeshInstance3D = chunk_cache.ensure_chunk(key, chunk_size)
 
+	var profiler: DebugProfiler = world.debug_profiler
+	var build_start := 0
+	var log_build_time := profiler != null and profiler.enabled
+	if log_build_time:
+		profiler.begin("Renderer.build_chunk_mesh")
+		build_start = Time.get_ticks_usec()
 	var result: Dictionary = mesher.build_chunk_mesh(world, cx, cy, cz)
+	if log_build_time:
+		profiler.end("Renderer.build_chunk_mesh")
+		var build_ms := float(Time.get_ticks_usec() - build_start) / 1000.0
+		if build_ms >= MESH_BUILD_LOG_THRESHOLD_MS:
+			print("Chunk mesh build %d,%d,%d: %.2f ms" % [cx, cy, cz, build_ms])
 	var mesh: ArrayMesh = result["mesh"]
 	var visible_faces: int = result["visible_faces"]
 	var occluded_faces: int = result["occluded_faces"]
@@ -88,6 +109,80 @@ func regenerate_chunk(cx: int, cy: int, cz: int) -> void:
 	mesh_instance.mesh = mesh
 	if has_geometry:
 		mesh_instance.material_override = get_block_material()
+	var chunk: ChunkData = world.get_chunk(key)
+	if chunk != null:
+		chunk.mesh_state = ChunkData.MESH_STATE_READY
+		chunk.dirty = false
+#endregion
+
+
+#region Render Height Queue
+func queue_render_height_update(old_y: int, new_y: int, anchor: Vector3, min_x: int, max_x: int, min_z: int, max_z: int) -> int:
+	if world == null:
+		return 0
+	var chunk_size: int = World.CHUNK_SIZE
+	var min_y: int = min(old_y, new_y)
+	var max_y: int = max(old_y, new_y)
+	var max_cy: int = int(floor(float(world.world_size_y) / float(chunk_size))) - 1
+	var min_cy: int = clampi(int(floor(float(min_y) / float(chunk_size))), 0, max_cy)
+	var max_cy_clamped: int = clampi(int(floor(float(max_y) / float(chunk_size))), 0, max_cy)
+	_invalidate_render_height_layers(min_cy, max_cy_clamped)
+	return _queue_render_height_rebuild(min_cy, max_cy_clamped, min_x, max_x, min_z, max_z, anchor)
+
+
+func process_render_height_queue(budget: int) -> int:
+	if budget <= 0:
+		return 0
+	var build_count: int = min(budget, render_height_queue.size())
+	for _i in range(build_count):
+		var coord: Vector3i = render_height_queue.pop_front()
+		render_height_queue_set.erase(coord)
+		regenerate_chunk(coord.x, coord.y, coord.z)
+	return build_count
+
+
+func _queue_render_height_rebuild(min_cy: int, max_cy: int, min_x: int, max_x: int, min_z: int, max_z: int, anchor: Vector3) -> int:
+	render_height_queue.clear()
+	render_height_queue_set.clear()
+	var chunk_size: int = World.CHUNK_SIZE
+	var anchor_x: float = anchor.x
+	var anchor_z: float = anchor.z
+	var candidates: Array = []
+	for key in chunk_cache.get_keys():
+		var coord: Vector3i = key
+		if coord.y < min_cy or coord.y > max_cy:
+			continue
+		if coord.x < min_x or coord.x > max_x:
+			continue
+		if coord.z < min_z or coord.z > max_z:
+			continue
+		var center_x := (float(coord.x) + 0.5) * chunk_size
+		var center_z := (float(coord.z) + 0.5) * chunk_size
+		var dx := center_x - anchor_x
+		var dz := center_z - anchor_z
+		var dist := dx * dx + dz * dz
+		candidates.append({"key": coord, "dist": dist})
+	candidates.sort_custom(Callable(self, "_sort_render_height_candidate"))
+	for entry in candidates:
+		var coord: Vector3i = entry["key"]
+		render_height_queue.append(coord)
+		render_height_queue_set[coord] = true
+	return render_height_queue.size()
+
+
+func _sort_render_height_candidate(a: Dictionary, b: Dictionary) -> bool:
+	return float(a["dist"]) < float(b["dist"])
+
+
+func _invalidate_render_height_layers(min_cy: int, max_cy: int) -> void:
+	if world == null:
+		return
+	for coord in world.chunks.keys():
+		var key: Vector3i = coord
+		if key.y < min_cy or key.y > max_cy:
+			continue
+		var chunk: ChunkData = world.chunks[key]
+		chunk.mesh_state = ChunkData.MESH_STATE_NONE
 #endregion
 
 
@@ -190,41 +285,22 @@ func clear_drag_preview() -> void:
 
 
 #region Render Height
-func update_render_height(old_y: int, new_y: int) -> void:
+func update_render_height(old_y: int, new_y: int) -> int:
 	if world == null:
-		return
+		return 0
 	var chunk_size: int = World.CHUNK_SIZE
-	var min_y: int = min(old_y, new_y)
-	var max_y: int = max(old_y, new_y)
-	var max_cy: int = int(floor(float(world.world_size_y) / float(chunk_size))) - 1
-	var min_cy: int = clampi(int(floor(float(min_y) / float(chunk_size))), 0, max_cy)
-	var max_cy_clamped: int = clampi(int(floor(float(max_y) / float(chunk_size))), 0, max_cy)
-	for key in chunk_cache.get_keys():
-		var coord: Vector3i = key
-		if coord.y < min_cy or coord.y > max_cy_clamped:
-			continue
-		regenerate_chunk(coord.x, coord.y, coord.z)
+	var max_cx: int = int(floor(float(world.world_size_x) / float(chunk_size))) - 1
+	var max_cz: int = int(floor(float(world.world_size_z) / float(chunk_size))) - 1
+	var anchor := Vector3(world.world_size_x * 0.5, float(world.top_render_y), world.world_size_z * 0.5)
+	return queue_render_height_update(old_y, new_y, anchor, 0, max_cx, 0, max_cz)
 
-func update_render_height_in_range(old_y: int, new_y: int, min_x: int, max_x: int, min_z: int, max_z: int) -> void:
+func update_render_height_in_range(old_y: int, new_y: int, min_x: int, max_x: int, min_z: int, max_z: int) -> int:
 	if world == null:
-		return
+		return 0
 	if min_x > max_x or min_z > max_z:
-		return
-	var chunk_size: int = World.CHUNK_SIZE
-	var min_y: int = min(old_y, new_y)
-	var max_y: int = max(old_y, new_y)
-	var max_cy: int = int(floor(float(world.world_size_y) / float(chunk_size))) - 1
-	var min_cy: int = clampi(int(floor(float(min_y) / float(chunk_size))), 0, max_cy)
-	var max_cy_clamped: int = clampi(int(floor(float(max_y) / float(chunk_size))), 0, max_cy)
-	for key in chunk_cache.get_keys():
-		var coord: Vector3i = key
-		if coord.y < min_cy or coord.y > max_cy_clamped:
-			continue
-		if coord.x < min_x or coord.x > max_x:
-			continue
-		if coord.z < min_z or coord.z > max_z:
-			continue
-		regenerate_chunk(coord.x, coord.y, coord.z)
+		return 0
+	var anchor := Vector3(world.world_size_x * 0.5, float(world.top_render_y), world.world_size_z * 0.5)
+	return queue_render_height_update(old_y, new_y, anchor, min_x, max_x, min_z, max_z)
 #endregion
 
 

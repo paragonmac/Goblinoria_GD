@@ -77,6 +77,7 @@ var info_block_id: int = -1
 var info_block_pos := Vector3i(-1, -1, -1)
 var menu_open := false
 var world_started := false
+var last_render_height_queued: int = 0
 #endregion
 
 
@@ -244,9 +245,28 @@ func _handle_debug_keys() -> void:
 
 func _handle_render_layer_keys() -> void:
 	if is_key_just_pressed(KEY_BRACKETLEFT):
-		world.set_top_render_y(world.top_render_y - 1)
+		_handle_render_layer_change(-1)
 	elif is_key_just_pressed(KEY_BRACKETRIGHT):
-		world.set_top_render_y(world.top_render_y + 1)
+		_handle_render_layer_change(1)
+
+
+func _handle_render_layer_change(delta: int) -> void:
+	if debug_overlay != null:
+		debug_overlay.run_timed("World.set_top_render_y", Callable(self, "_apply_render_layer").bind(delta))
+	else:
+		_apply_render_layer(delta)
+	_log_render_height_queue(delta)
+
+
+func _apply_render_layer(delta: int) -> void:
+	last_render_height_queued = world.set_top_render_y(world.top_render_y + delta)
+
+
+func _log_render_height_queue(delta: int) -> void:
+	if debug_overlay == null or not debug_overlay.show_debug_timings:
+		return
+	var direction := "down" if delta < 0 else "up"
+	print("Render height %s: y=%d queued_chunks=%d" % [direction, world.top_render_y, last_render_height_queued])
 
 
 func _handle_zoom_input(event: InputEvent) -> void:

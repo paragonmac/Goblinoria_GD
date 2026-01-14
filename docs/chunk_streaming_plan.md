@@ -52,7 +52,7 @@ This is the working plan for chunked storage, streaming, and persistence.
 - [x] Cancel queued loads for chunks that leave range (queue reset on range change).
 
 ## Milestone 6: Render Streaming Tied to Chunk State
-- [ ] Mesh state per chunk: `NONE | PENDING | READY`.
+- [x] Mesh state per chunk: `NONE | PENDING | READY`.
 - [x] Only mesh when chunk is loaded + in render range.
 - [ ] Clear mesh on unload.
 - [ ] Require neighbor data before meshing to avoid seams.

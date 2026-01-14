@@ -47,6 +47,7 @@ const WORKER_SPAWN_OFFSETS := [
 
 #region Constants - Misc
 const VISIBILITY_Y_OFFSET := 1.0
+const RENDER_HEIGHT_CHUNKS_PER_FRAME := 8
 const DUMMY_INT := 666
 #endregion
 
@@ -75,6 +76,7 @@ var generator: WorldGeneratorScript
 var save_load: WorldSaveLoadScript
 var streaming: WorldStreamingScript
 var raycaster: WorldRaycasterScript
+var debug_profiler: DebugProfiler
 #endregion
 
 #region Worker State
@@ -228,6 +230,7 @@ func set_block_raw(x: int, y: int, z: int, value: int, mark_dirty: bool) -> void
 	if mark_dirty:
 		chunk.dirty = true
 		chunk.generated = true
+		chunk.mesh_state = ChunkDataScript.MESH_STATE_NONE
 	touch_chunk(chunk)
 #endregion
 
@@ -328,6 +331,7 @@ func get_camera_tris_rendered(camera: Camera3D) -> Dictionary:
 
 #region World Update Loop
 func update_world(dt: float) -> void:
+	update_render_height_queue()
 	update_workers(dt)
 	update_task_queue()
 	update_task_overlays_phase()
@@ -361,6 +365,12 @@ func update_task_overlays_phase() -> void:
 func update_blocked_tasks(dt: float) -> void:
 	if task_manager != null:
 		task_manager.update_blocked_tasks(dt)
+
+
+func update_render_height_queue() -> void:
+	if renderer == null:
+		return
+	renderer.process_render_height_queue(RENDER_HEIGHT_CHUNKS_PER_FRAME)
 
 
 func reassess_waiting_tasks() -> void:
@@ -427,21 +437,44 @@ func clear_drag_preview() -> void:
 
 
 #region Render Height
-func set_top_render_y(new_y: int) -> void:
+func set_top_render_y(new_y: int) -> int:
 	var old_y: int = top_render_y
 	top_render_y = clamp(new_y, 0, world_size_y - 1)
 	if top_render_y == old_y:
-		return
+		return 0
 	if streaming != null and streaming.last_stream_target_valid:
 		var target_x: int = int(floor(streaming.last_stream_target.x))
 		var target_z: int = int(floor(streaming.last_stream_target.z))
 		var target_coord := world_to_chunk_coords(target_x, top_render_y, target_z)
 		ensure_chunk_buffer_for_chunk(target_coord)
+	var rebuilt := 0
 	if renderer != null:
-		if streaming != null and streaming.stream_min_x <= streaming.stream_max_x and streaming.stream_min_z <= streaming.stream_max_z:
-			renderer.update_render_height_in_range(old_y, top_render_y, streaming.stream_min_x, streaming.stream_max_x, streaming.stream_min_z, streaming.stream_max_z)
-		else:
-			renderer.update_render_height(old_y, top_render_y)
+		var bounds := get_render_height_bounds()
+		var anchor := get_render_height_anchor()
+		rebuilt = renderer.queue_render_height_update(old_y, top_render_y, anchor, bounds["min_x"], bounds["max_x"], bounds["min_z"], bounds["max_z"])
+	return rebuilt
+
+
+func get_render_height_bounds() -> Dictionary:
+	var chunk_size: int = CHUNK_SIZE
+	var max_cx: int = int(floor(float(world_size_x) / float(chunk_size))) - 1
+	var max_cz: int = int(floor(float(world_size_z) / float(chunk_size))) - 1
+	var min_x := 0
+	var max_x := max_cx
+	var min_z := 0
+	var max_z := max_cz
+	if streaming != null and streaming.stream_min_x <= streaming.stream_max_x and streaming.stream_min_z <= streaming.stream_max_z:
+		min_x = streaming.stream_min_x
+		max_x = streaming.stream_max_x
+		min_z = streaming.stream_min_z
+		max_z = streaming.stream_max_z
+	return {"min_x": min_x, "max_x": max_x, "min_z": min_z, "max_z": max_z}
+
+
+func get_render_height_anchor() -> Vector3:
+	if streaming != null and streaming.last_stream_target_valid:
+		return streaming.last_stream_target
+	return Vector3(world_size_x * 0.5, float(top_render_y), world_size_z * 0.5)
 
 
 func is_visible_at_level(y_value: float) -> bool:

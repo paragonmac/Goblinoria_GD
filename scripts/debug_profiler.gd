@@ -5,11 +5,14 @@ extends RefCounted
 #region State
 var enabled: bool = false
 var window_sec: float = 3.0
+var hold_sec: float = 0.5
 var frame_data: Dictionary = {}
 var active: Dictionary = {}
 var history: Dictionary = {}
 var stats: Dictionary = {}
 var order: Array = []
+var hold_values: Dictionary = {}
+var hold_until: Dictionary = {}
 #endregion
 
 
@@ -20,6 +23,8 @@ func reset() -> void:
 	history.clear()
 	stats.clear()
 	order.clear()
+	hold_values.clear()
+	hold_until.clear()
 #endregion
 
 
@@ -66,7 +71,14 @@ func finish_frame() -> void:
 			if v > peak:
 				peak = v
 		var avg := sum / float(samples.size()) if samples.size() > 0 else 0.0
-		stats[label] = {"last": ms, "avg": avg, "peak": peak}
+		var prev_hold := float(hold_values.get(label, 0.0))
+		var prev_until := float(hold_until.get(label, 0.0))
+		var hold := prev_hold
+		if now >= prev_until or ms >= prev_hold:
+			hold = ms
+			hold_until[label] = now + hold_sec
+		hold_values[label] = hold
+		stats[label] = {"last": ms, "avg": avg, "peak": peak, "hold": hold}
 		history[label] = samples
 
 	frame_data.clear()
@@ -86,7 +98,7 @@ func get_report_lines(limit: int = 8) -> Array:
 	var max_val := 0.0
 	for label in labels:
 		var entry: Dictionary = stats[label]
-		var v: float = float(entry["last"])
+		var v: float = float(entry.get("hold", entry.get("last", 0.0)))
 		if v < min_val:
 			min_val = v
 		if v > max_val:
@@ -94,10 +106,11 @@ func get_report_lines(limit: int = 8) -> Array:
 	for i in range(count):
 		var label: String = labels[i]
 		var entry: Dictionary = stats[label]
-		var color_hex := _color_hex_for_value(float(entry["last"]), min_val, max_val)
+		var display_ms: float = float(entry.get("hold", entry.get("last", 0.0)))
+		var color_hex := _color_hex_for_value(display_ms, min_val, max_val)
 		lines.append("%s: %.2f ms (avg %.2f, peak %.2f)" % [
 			"[color=#%s]%s[/color]" % [color_hex, label],
-			float(entry["last"]),
+			display_ms,
 			float(entry["avg"]),
 			float(entry["peak"])
 		])

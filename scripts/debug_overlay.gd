@@ -26,6 +26,10 @@ var draw_rendered_label: Label
 var debug_timings_label: RichTextLabel
 #endregion
 
+#region Constants
+const DEBUG_TIMING_LINES := 12
+#endregion
+
 
 #region Lifecycle
 func _ready() -> void:
@@ -40,6 +44,8 @@ func initialize(world_ref: World, camera_ref: Camera3D) -> void:
 	world = world_ref
 	camera = camera_ref
 	debug_profiler = DebugProfiler.new()
+	if world != null:
+		world.debug_profiler = debug_profiler
 	if world != null and world.pathfinder != null:
 		world.pathfinder.debug_profiler = debug_profiler
 #endregion
@@ -96,6 +102,10 @@ func step_world(dt: float) -> void:
 	if world == null:
 		return
 	if show_debug_timings and debug_profiler != null and debug_profiler.enabled:
+		debug_profiler.begin("World.update_render_height_queue")
+		world.update_render_height_queue()
+		debug_profiler.end("World.update_render_height_queue")
+
 		debug_profiler.begin("World.update_workers")
 		world.update_workers(dt)
 		debug_profiler.end("World.update_workers")
@@ -207,6 +217,6 @@ func update_debug_timings_label() -> void:
 		return
 	if not show_debug_timings:
 		return
-	var lines: Array = debug_profiler.get_report_lines(8)
+	var lines: Array = debug_profiler.get_report_lines(DEBUG_TIMING_LINES)
 	debug_timings_label.text = "Debug Timings (ms)\n" + "\n".join(lines)
 #endregion
