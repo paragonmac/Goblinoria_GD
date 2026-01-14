@@ -47,7 +47,7 @@ const WORKER_SPAWN_OFFSETS := [
 
 #region Constants - Misc
 const VISIBILITY_Y_OFFSET := 1.0
-const RENDER_HEIGHT_CHUNKS_PER_FRAME := 8
+const RENDER_HEIGHT_CHUNKS_PER_FRAME := 16
 const DUMMY_INT := 666
 #endregion
 
@@ -231,6 +231,7 @@ func set_block_raw(x: int, y: int, z: int, value: int, mark_dirty: bool) -> void
 		chunk.dirty = true
 		chunk.generated = true
 		chunk.mesh_state = ChunkDataScript.MESH_STATE_NONE
+		chunk.mesh_revision += 1
 	touch_chunk(chunk)
 #endregion
 
@@ -270,7 +271,8 @@ func set_block(x: int, y: int, z: int, value: int) -> void:
 		return
 	set_block_raw(x, y, z, value, true)
 	if renderer != null:
-		renderer.regenerate_chunk(int(x / float(CHUNK_SIZE)), int(y / float(CHUNK_SIZE)), int(z / float(CHUNK_SIZE)))
+		var coord := world_to_chunk_coords(x, y, z)
+		renderer.queue_chunk_mesh_build(coord)
 
 
 func is_solid(x: int, y: int, z: int) -> bool:
@@ -371,6 +373,13 @@ func update_render_height_queue() -> void:
 	if renderer == null:
 		return
 	renderer.process_render_height_queue(RENDER_HEIGHT_CHUNKS_PER_FRAME)
+	renderer.process_mesh_results(renderer.MESH_APPLY_BUDGET)
+
+
+func is_render_height_busy() -> bool:
+	if renderer == null:
+		return false
+	return renderer.has_pending_render_height_work()
 
 
 func reassess_waiting_tasks() -> void:
@@ -394,6 +403,8 @@ func reset_streaming_state() -> void:
 func update_streaming(camera_pos: Vector3, dt: float) -> void:
 	if streaming != null:
 		streaming.update_streaming(camera_pos, dt)
+	if renderer != null:
+		renderer.update_render_height_anchor(camera_pos)
 #endregion
 
 

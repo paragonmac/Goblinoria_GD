@@ -86,6 +86,16 @@ func finish_frame() -> void:
 #endregion
 
 
+#region External Samples
+func add_sample(label: String, ms: float) -> void:
+	if not enabled:
+		return
+	if not order.has(label):
+		order.append(label)
+	frame_data[label] = int(frame_data.get(label, 0)) + int(ms * 1000.0)
+#endregion
+
+
 #region Reporting
 func get_report_lines(limit: int = 8) -> Array:
 	var lines: Array = []

@@ -12,6 +12,7 @@ var dirty: bool = false
 var last_access_tick: int = 0
 var generated: bool = false
 var mesh_state: int = MESH_STATE_NONE
+var mesh_revision: int = 0
 #endregion
 
 

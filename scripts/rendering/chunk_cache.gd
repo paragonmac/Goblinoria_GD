@@ -37,6 +37,12 @@ func is_chunk_built(coord: Vector3i) -> bool:
 	return chunk_nodes.has(coord)
 
 
+func get_chunk(coord: Vector3i) -> MeshInstance3D:
+	if not chunk_nodes.has(coord):
+		return null
+	return chunk_nodes[coord]
+
+
 func get_keys() -> Array:
 	return chunk_nodes.keys()
 #endregion

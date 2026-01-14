@@ -100,9 +100,141 @@ func build_chunk_mesh(world: World, cx: int, cy: int, cz: int) -> Dictionary:
 #endregion
 
 
+#region Mesh Data (Threaded)
+func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
+	var chunk_size: int = int(job["chunk_size"])
+	var cx: int = int(job["cx"])
+	var cy: int = int(job["cy"])
+	var cz: int = int(job["cz"])
+	var top_render_y: int = int(job["top_render_y"])
+	var air_id: int = int(job.get("air_id", 0))
+	var blocks: PackedByteArray = job["blocks"]
+	var neighbors: Dictionary = job["neighbors"]
+	var solid_table: PackedByteArray = job["solid_table"]
+	var color_table: PackedColorArray = job["color_table"]
+	var vertices := PackedVector3Array()
+	var normals := PackedVector3Array()
+	var colors := PackedColorArray()
+	var visible_faces := 0
+	var occluded_faces := 0
+
+	for lx in range(chunk_size):
+		var wx := cx * chunk_size + lx
+		for ly in range(chunk_size):
+			var wy := cy * chunk_size + ly
+			if wy > top_render_y:
+				continue
+			for lz in range(chunk_size):
+				var wz := cz * chunk_size + lz
+				var idx := chunk_index(chunk_size, lx, ly, lz)
+				var block_id := blocks[idx]
+				if block_id == air_id:
+					continue
+
+				var base := Vector3(lx, ly, lz)
+				var color := block_color_from_table(color_table, block_id, wx, wy, wz)
+
+				var above_id := air_id
+				if wy + 1 > top_render_y:
+					above_id = air_id
+				elif ly + 1 < chunk_size:
+					above_id = blocks[chunk_index(chunk_size, lx, ly + 1, lz)]
+				else:
+					above_id = neighbor_block(neighbors.get("y_pos", null), chunk_size, lx, 0, lz, air_id)
+				if not is_solid_id(above_id, solid_table):
+					add_face(vertices, normals, colors, base, Vector3.UP, color)
+					visible_faces += 1
+				else:
+					occluded_faces += 1
+
+				var below_id := air_id
+				if ly - 1 >= 0:
+					below_id = blocks[chunk_index(chunk_size, lx, ly - 1, lz)]
+				else:
+					below_id = neighbor_block(neighbors.get("y_neg", null), chunk_size, lx, chunk_size - 1, lz, air_id)
+				if not is_solid_id(below_id, solid_table):
+					add_face(vertices, normals, colors, base, Vector3.DOWN, color)
+					visible_faces += 1
+				else:
+					occluded_faces += 1
+
+				var forward_id := air_id
+				if lz + 1 < chunk_size:
+					forward_id = blocks[chunk_index(chunk_size, lx, ly, lz + 1)]
+				else:
+					forward_id = neighbor_block(neighbors.get("z_pos", null), chunk_size, lx, ly, 0, air_id)
+				if not is_solid_id(forward_id, solid_table):
+					add_face(vertices, normals, colors, base, Vector3.FORWARD, color)
+					visible_faces += 1
+				else:
+					occluded_faces += 1
+
+				var back_id := air_id
+				if lz - 1 >= 0:
+					back_id = blocks[chunk_index(chunk_size, lx, ly, lz - 1)]
+				else:
+					back_id = neighbor_block(neighbors.get("z_neg", null), chunk_size, lx, ly, chunk_size - 1, air_id)
+				if not is_solid_id(back_id, solid_table):
+					add_face(vertices, normals, colors, base, Vector3.BACK, color)
+					visible_faces += 1
+				else:
+					occluded_faces += 1
+
+				var right_id := air_id
+				if lx + 1 < chunk_size:
+					right_id = blocks[chunk_index(chunk_size, lx + 1, ly, lz)]
+				else:
+					right_id = neighbor_block(neighbors.get("x_pos", null), chunk_size, 0, ly, lz, air_id)
+				if not is_solid_id(right_id, solid_table):
+					add_face(vertices, normals, colors, base, Vector3.RIGHT, color)
+					visible_faces += 1
+				else:
+					occluded_faces += 1
+
+				var left_id := air_id
+				if lx - 1 >= 0:
+					left_id = blocks[chunk_index(chunk_size, lx - 1, ly, lz)]
+				else:
+					left_id = neighbor_block(neighbors.get("x_neg", null), chunk_size, chunk_size - 1, ly, lz, air_id)
+				if not is_solid_id(left_id, solid_table):
+					add_face(vertices, normals, colors, base, Vector3.LEFT, color)
+					visible_faces += 1
+				else:
+					occluded_faces += 1
+
+	var has_geometry := vertices.size() > 0
+	return {
+		"vertices": vertices,
+		"normals": normals,
+		"colors": colors,
+		"visible_faces": visible_faces,
+		"occluded_faces": occluded_faces,
+		"has_geometry": has_geometry,
+	}
+#endregion
+
+
 #region Block Colors
 func block_color(world: World, block_id: int, wx: int, wy: int, wz: int) -> Color:
 	var base: Color = world.get_block_color(block_id)
+	base = Color(base.r * BLOCK_ALBEDO_MULT, base.g * BLOCK_ALBEDO_MULT, base.b * BLOCK_ALBEDO_MULT, base.a)
+
+	var n1 := block_noise(wx, wy, wz)
+	var n2 := block_noise(wx + BLOCK_NOISE_OFFSET_2.x, wy + BLOCK_NOISE_OFFSET_2.y, wz + BLOCK_NOISE_OFFSET_2.z)
+	var n3 := block_noise(wx + BLOCK_NOISE_OFFSET_3.x, wy + BLOCK_NOISE_OFFSET_3.y, wz + BLOCK_NOISE_OFFSET_3.z)
+	var jitter := BLOCK_JITTER
+	return Color(
+		clamp(base.r + (n1 - NOISE_CENTER) * jitter, COLOR_MIN, COLOR_MAX),
+		clamp(base.g + (n2 - NOISE_CENTER) * jitter, COLOR_MIN, COLOR_MAX),
+		clamp(base.b + (n3 - NOISE_CENTER) * jitter, COLOR_MIN, COLOR_MAX),
+		base.a
+	)
+
+
+func block_color_from_table(color_table: PackedColorArray, block_id: int, wx: int, wy: int, wz: int) -> Color:
+	var base := Color(1.0, 1.0, 1.0, 1.0)
+	if block_id >= 0 and block_id < color_table.size():
+		base = color_table[block_id]
 	base = Color(base.r * BLOCK_ALBEDO_MULT, base.g * BLOCK_ALBEDO_MULT, base.b * BLOCK_ALBEDO_MULT, base.a)
 
 	var n1 := block_noise(wx, wy, wz)
@@ -121,6 +253,25 @@ func block_noise(wx: int, wy: int, wz: int) -> float:
 	var h: int = wx * HASH_X ^ wy * HASH_Y ^ wz * HASH_Z
 	h = (h ^ (h >> HASH_SHIFT)) & HASH_MASK
 	return float(h % BLOCK_NOISE_MOD) / BLOCK_NOISE_DIV
+#endregion
+
+
+#region Mesh Data Helpers
+func chunk_index(chunk_size: int, lx: int, ly: int, lz: int) -> int:
+	return (lz * chunk_size + ly) * chunk_size + lx
+
+
+func neighbor_block(neighbor_blocks: Variant, chunk_size: int, lx: int, ly: int, lz: int, air_id: int) -> int:
+	if neighbor_blocks == null or neighbor_blocks.size() == 0:
+		return air_id
+	var idx := chunk_index(chunk_size, lx, ly, lz)
+	return neighbor_blocks[idx]
+
+
+func is_solid_id(block_id: int, solid_table: PackedByteArray) -> bool:
+	if block_id < 0 or block_id >= solid_table.size():
+		return false
+	return solid_table[block_id] != 0
 #endregion
 
 

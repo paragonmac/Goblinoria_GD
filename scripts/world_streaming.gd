@@ -157,9 +157,8 @@ func process_chunk_queue() -> void:
 		var key: Vector3i = chunk_build_queue.pop_front()
 		chunk_build_set.erase(key)
 		var chunk := world.ensure_chunk(key)
-		chunk.mesh_state = ChunkData.MESH_STATE_PENDING
 		world.ensure_chunk_generated(key)
-		world.renderer.regenerate_chunk(key.x, key.y, key.z)
+		world.renderer.queue_chunk_mesh_build(key)
 		if stream_pending and key.y == stream_layer_y and stream_layer_remaining > 0:
 			stream_layer_remaining -= 1
 
