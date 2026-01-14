@@ -1,5 +1,7 @@
 # Voxel Colony Sim - Design Document v0.1
 
+Current prototype: Godot 4.5 / GDScript. Code samples are schematic.
+
 ## Vision
 
 Dwarf Fortress-style colony management game. Isometric 3D voxel world. Workers dig, build, and fight based on player commands. Emergent gameplay from simple systems interacting.
@@ -24,7 +26,7 @@ Core loop: Player issues commands → Workers claim and execute tasks → World 
 
 ```
 - 256³ total blocks
-- 32³ chunks (8×8×8 = 512 chunks)
+- 32³ chunks (32×32×32 = 32768 chunks)
 - 1 byte per block (type ID)
 - BlockInfo[256] static lookup table
 ```
@@ -40,7 +42,7 @@ const BlockInfo = struct {
     replaceable: bool,   // can stairs be placed here?
 };
 
-const CHUNK_SIZE = 32;
+const CHUNK_SIZE = 8;
 
 const Chunk = struct {
     blocks: [CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]BlockType,
@@ -242,12 +244,10 @@ Keeps data in cache, avoids dependencies between threads.
 ## Toolchain
 
 ```
-- Language: Zig
-- Graphics: Raylib (via raylib-zig)
-- Profiler: Tracy
-- IDE: CLion + ZigBrains plugin
-- OS: CachyOS (Linux)
-- Debugger: CLion (wraps gdb/lldb)
+- Engine: Godot 4.5
+- Language: GDScript
+- Profiler: ProProfiler addon (optional)
+- IDE: Godot editor
 ```
 
 ---

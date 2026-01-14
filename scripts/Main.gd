@@ -338,7 +338,9 @@ func _update_drag_preview() -> void:
 
 
 func update_hover_preview() -> void:
-	if is_dragging or world.player_mode != World.PlayerMode.STAIRS:
+	if is_dragging:
+		return
+	if world.player_mode != World.PlayerMode.STAIRS:
 		world.clear_drag_preview()
 		return
 
