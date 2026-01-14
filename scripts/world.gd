@@ -232,6 +232,8 @@ func set_block_raw(x: int, y: int, z: int, value: int, mark_dirty: bool) -> void
 		chunk.generated = true
 		chunk.mesh_state = ChunkDataScript.MESH_STATE_NONE
 		chunk.mesh_revision += 1
+		if renderer != null:
+			renderer.invalidate_chunk_mesh_cache(coord)
 	touch_chunk(chunk)
 #endregion
 
@@ -405,6 +407,13 @@ func update_streaming(camera_pos: Vector3, dt: float) -> void:
 		streaming.update_streaming(camera_pos, dt)
 	if renderer != null:
 		renderer.update_render_height_anchor(camera_pos)
+
+
+func prewarm_render_cache(stream_target: Vector3) -> void:
+	if streaming == null or renderer == null:
+		return
+	streaming.warmup_streaming(stream_target)
+	renderer.flush_mesh_jobs(true)
 #endregion
 
 

@@ -78,6 +78,8 @@ var info_block_pos := Vector3i(-1, -1, -1)
 var menu_open := false
 var world_started := false
 var last_render_height_queued: int = 0
+var y_level_label: Label
+var render_level_base_y: int = 0
 #endregion
 
 
@@ -85,6 +87,7 @@ var last_render_height_queued: int = 0
 func _ready() -> void:
 	Engine.max_fps = ENGINE_MAX_FPS
 	_setup_camera()
+	_setup_hud()
 	_setup_debug_overlay()
 	_setup_menu()
 	open_menu()
@@ -574,7 +577,10 @@ func close_menu() -> void:
 func _on_resume_pressed() -> void:
 	if not world_started:
 		_set_menu_status("Loading...")
+		await get_tree().process_frame
 		world.start_new_world()
+		_set_render_level_base()
+		world.prewarm_render_cache(get_stream_target())
 		world_started = true
 	close_menu()
 
@@ -593,6 +599,7 @@ func _on_load_pressed() -> void:
 	var ok := world.load_world(SAVE_PATH)
 	_set_menu_status("Loaded." if ok else "Load failed.")
 	if ok:
+		_set_render_level_base()
 		world_started = true
 		close_menu()
 
@@ -618,11 +625,32 @@ func _setup_debug_overlay() -> void:
 
 
 #region HUD
+func _setup_hud() -> void:
+	if hud_layer == null:
+		return
+	y_level_label = Label.new()
+	y_level_label.name = "YLevelLabel"
+	y_level_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	y_level_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	y_level_label.anchor_left = 1.0
+	y_level_label.anchor_right = 1.0
+	y_level_label.anchor_top = 1.0
+	y_level_label.anchor_bottom = 1.0
+	y_level_label.offset_left = -160.0
+	y_level_label.offset_top = -30.0
+	y_level_label.offset_right = -10.0
+	y_level_label.offset_bottom = -10.0
+	y_level_label.text = ""
+	hud_layer.add_child(y_level_label)
+
+
 func update_hud() -> void:
 	var mode_name := _get_mode_display_name()
 	var info_text := _get_info_display_text()
 	var task_count := world.task_queue.active_count()
 	hud_label.text = "Mode: %s%s | Tasks: %d" % [mode_name, info_text, task_count]
+	if y_level_label != null:
+		y_level_label.text = "Level: %d" % (world.top_render_y - render_level_base_y)
 
 
 func _get_mode_display_name() -> String:
@@ -652,3 +680,7 @@ func _get_info_display_text() -> String:
 		info_block_pos.z,
 	]
 #endregion
+
+
+func _set_render_level_base() -> void:
+	render_level_base_y = world.top_render_y

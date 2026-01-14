@@ -25,64 +25,49 @@ const BLOCK_NOISE_MOD := 1024
 const BLOCK_NOISE_DIV := 1023.0
 #endregion
 
+#region State
+var block_solid_table := PackedByteArray()
+var block_color_table := PackedColorArray()
+#endregion
+
 
 #region Mesh Building
 func build_chunk_mesh(world: World, cx: int, cy: int, cz: int) -> Dictionary:
-	var chunk_size: int = World.CHUNK_SIZE
-	var vertices := PackedVector3Array()
-	var normals := PackedVector3Array()
-	var colors := PackedColorArray()
-	var visible_faces := 0
-	var occluded_faces := 0
-
-	for lx in range(chunk_size):
-		var wx := cx * chunk_size + lx
-		for ly in range(chunk_size):
-			var wy := cy * chunk_size + ly
-			if wy > world.top_render_y:
-				continue
-			for lz in range(chunk_size):
-				var wz := cz * chunk_size + lz
-				var block_id := world.get_block_no_generate(wx, wy, wz)
-				if world.is_block_empty_id(block_id):
-					continue
-
-				var base := Vector3(lx, ly, lz)
-				var color := block_color(world, block_id, wx, wy, wz)
-
-				if not world.is_solid_no_generate(wx, wy + 1, wz) or wy + 1 > world.top_render_y:
-					add_face(vertices, normals, colors, base, Vector3.UP, color)
-					visible_faces += 1
-				else:
-					occluded_faces += 1
-				if not world.is_solid_no_generate(wx, wy - 1, wz):
-					add_face(vertices, normals, colors, base, Vector3.DOWN, color)
-					visible_faces += 1
-				else:
-					occluded_faces += 1
-				if not world.is_solid_no_generate(wx, wy, wz + 1):
-					add_face(vertices, normals, colors, base, Vector3.FORWARD, color)
-					visible_faces += 1
-				else:
-					occluded_faces += 1
-				if not world.is_solid_no_generate(wx, wy, wz - 1):
-					add_face(vertices, normals, colors, base, Vector3.BACK, color)
-					visible_faces += 1
-				else:
-					occluded_faces += 1
-				if not world.is_solid_no_generate(wx + 1, wy, wz):
-					add_face(vertices, normals, colors, base, Vector3.RIGHT, color)
-					visible_faces += 1
-				else:
-					occluded_faces += 1
-				if not world.is_solid_no_generate(wx - 1, wy, wz):
-					add_face(vertices, normals, colors, base, Vector3.LEFT, color)
-					visible_faces += 1
-				else:
-					occluded_faces += 1
-
+	if world == null:
+		return _build_empty_mesh_result()
+	var coord := Vector3i(cx, cy, cz)
+	var chunk: ChunkData = world.get_chunk(coord)
+	if chunk == null or not chunk.generated:
+		return _build_empty_mesh_result()
+	_ensure_block_tables(world)
+	var neighbors: Dictionary = {
+		"x_neg": _copy_neighbor_blocks(world, Vector3i(cx - 1, cy, cz)),
+		"x_pos": _copy_neighbor_blocks(world, Vector3i(cx + 1, cy, cz)),
+		"y_neg": _copy_neighbor_blocks(world, Vector3i(cx, cy - 1, cz)),
+		"y_pos": _copy_neighbor_blocks(world, Vector3i(cx, cy + 1, cz)),
+		"z_neg": _copy_neighbor_blocks(world, Vector3i(cx, cy, cz - 1)),
+		"z_pos": _copy_neighbor_blocks(world, Vector3i(cx, cy, cz + 1)),
+	}
+	var job := {
+		"chunk_size": World.CHUNK_SIZE,
+		"cx": cx,
+		"cy": cy,
+		"cz": cz,
+		"top_render_y": world.top_render_y,
+		"air_id": World.BLOCK_ID_AIR,
+		"blocks": chunk.blocks,
+		"neighbors": neighbors,
+		"solid_table": block_solid_table,
+		"color_table": block_color_table,
+	}
+	var data := build_chunk_arrays_from_data(job)
+	var vertices: PackedVector3Array = data["vertices"]
+	var normals: PackedVector3Array = data["normals"]
+	var colors: PackedColorArray = data["colors"]
+	var visible_faces: int = int(data["visible_faces"])
+	var occluded_faces: int = int(data["occluded_faces"])
+	var has_geometry: bool = bool(data["has_geometry"])
 	var mesh := ArrayMesh.new()
-	var has_geometry := vertices.size() > 0
 	if has_geometry:
 		var arrays := []
 		arrays.resize(Mesh.ARRAY_MAX)
@@ -257,6 +242,36 @@ func block_noise(wx: int, wy: int, wz: int) -> float:
 
 
 #region Mesh Data Helpers
+func _build_empty_mesh_result() -> Dictionary:
+	return {
+		"mesh": ArrayMesh.new(),
+		"visible_faces": 0,
+		"occluded_faces": 0,
+		"has_geometry": false,
+	}
+
+
+func _ensure_block_tables(world: World) -> void:
+	if world == null:
+		return
+	if block_solid_table.size() == BlockRegistry.TABLE_SIZE and block_color_table.size() == BlockRegistry.TABLE_SIZE:
+		return
+	block_solid_table.resize(BlockRegistry.TABLE_SIZE)
+	block_color_table.resize(BlockRegistry.TABLE_SIZE)
+	for i in range(BlockRegistry.TABLE_SIZE):
+		block_solid_table[i] = 1 if world.is_block_solid_id(i) else 0
+		block_color_table[i] = world.get_block_color(i)
+
+
+func _copy_neighbor_blocks(world: World, coord: Vector3i) -> Variant:
+	if world == null:
+		return null
+	var chunk: ChunkData = world.get_chunk(coord)
+	if chunk == null or not chunk.generated:
+		return null
+	return chunk.blocks
+
+
 func chunk_index(chunk_size: int, lx: int, ly: int, lz: int) -> int:
 	return (lz * chunk_size + ly) * chunk_size + lx
 

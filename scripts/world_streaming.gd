@@ -3,13 +3,13 @@ class_name WorldStreaming
 ## Handles chunk streaming, queue management, and spiral patterns.
 
 #region Constants
-const CHUNKS_PER_FRAME_DEFAULT := 6
+const CHUNKS_PER_FRAME_DEFAULT := 24
 const STREAM_QUEUE_BUDGET_DEFAULT := 6000
-const STREAM_RADIUS_DEFAULT := 8
-const STREAM_HEIGHT_DEFAULT := 1
+const STREAM_RADIUS_DEFAULT := 64
+const STREAM_HEIGHT_DEFAULT := 6
 const STREAM_FULL_WORLD_DEFAULT := false
 const STREAM_LEAD_TIME_DEFAULT := 0.4
-const STREAM_MAX_BUFFER_CHUNKS_DEFAULT := 12
+const STREAM_MAX_BUFFER_CHUNKS_DEFAULT := 128
 const DUMMY_INT := 666
 #endregion
 
@@ -163,6 +163,15 @@ func process_chunk_queue() -> void:
 			stream_layer_remaining -= 1
 
 
+func process_chunk_queue_full() -> void:
+	if world.renderer == null:
+		return
+	var original := chunks_per_frame
+	chunks_per_frame = chunk_build_queue.size()
+	process_chunk_queue()
+	chunks_per_frame = original
+
+
 func enqueue_stream_chunks() -> void:
 	if not stream_pending:
 		return
@@ -207,6 +216,14 @@ func enqueue_stream_chunks() -> void:
 func is_chunk_mesh_ready(coord: Vector3i) -> bool:
 	var chunk: ChunkData = world.get_chunk(coord)
 	return chunk != null and chunk.mesh_state == ChunkData.MESH_STATE_READY
+
+
+func warmup_streaming(camera_pos: Vector3) -> void:
+	update_streaming(camera_pos, 0.0)
+	process_chunk_queue_full()
+	while stream_pending:
+		enqueue_stream_chunks()
+		process_chunk_queue_full()
 
 func count_unbuilt_in_layer(layer_y: int) -> int:
 	if world.renderer == null:

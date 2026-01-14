@@ -23,6 +23,7 @@ var profiler_panel: PanelContainer
 var profiler_ui: CPUProfilerUI
 var draw_burden_label: Label
 var draw_rendered_label: Label
+var draw_memory_label: Label
 var debug_timings_label: RichTextLabel
 #endregion
 
@@ -70,6 +71,8 @@ func toggle_draw_burden() -> void:
 		draw_burden_label.visible = show_draw_burden
 	if draw_rendered_label != null:
 		draw_rendered_label.visible = show_draw_burden
+	if draw_memory_label != null:
+		draw_memory_label.visible = show_draw_burden
 
 
 func toggle_debug_timings() -> void:
@@ -146,6 +149,11 @@ func update_draw_burden() -> void:
 	var total: int = int(rendered_stats.get("total", 0))
 	var render_percent: float = float(rendered_stats.get("percent", 0.0))
 	draw_rendered_label.text = "Tris Rendered: %d/%d (%.1f%%)" % [rendered, total, render_percent]
+
+	var static_mem: float = float(Performance.get_monitor(Performance.MEMORY_STATIC))
+	draw_memory_label.text = "Memory: static %.1f MB" % [
+		static_mem / 1048576.0,
+	]
 #endregion
 
 
@@ -193,6 +201,20 @@ func setup_draw_burden_label() -> void:
 	draw_rendered_label.text = ""
 	draw_rendered_label.visible = show_draw_burden
 	add_child(draw_rendered_label)
+
+	draw_memory_label = Label.new()
+	draw_memory_label.name = "DrawMemoryLabel"
+	draw_memory_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	draw_memory_label.vertical_alignment = VERTICAL_ALIGNMENT_TOP
+	draw_memory_label.anchor_left = 1.0
+	draw_memory_label.anchor_right = 1.0
+	draw_memory_label.offset_left = -420.0
+	draw_memory_label.offset_top = 58.0
+	draw_memory_label.offset_right = -10.0
+	draw_memory_label.offset_bottom = 82.0
+	draw_memory_label.text = ""
+	draw_memory_label.visible = show_draw_burden
+	add_child(draw_memory_label)
 
 
 func setup_debug_timings_label() -> void:
