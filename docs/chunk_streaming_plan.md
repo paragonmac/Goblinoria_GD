@@ -69,11 +69,13 @@ This is the working plan for chunked storage, streaming, and persistence.
 - [x] Render zone: actively drawn chunks.
 - [x] Buffer zone: meshed and cached, but `visible = false`.
 - [x] Unload zone: chunks outside `UNLOAD_RADIUS` are candidates for unload.
+- [x] View-scaled buffer expansion for stream/render bounds.
 
 ## Milestone 6: Render Streaming Tied to Chunk State
 - [x] Mesh state per chunk: `NONE | PENDING | READY`.
 - [x] Only mesh when chunk is loaded + in stream range (render + buffer).
 - [x] Clear mesh on unload.
+- [x] Rebuild neighbor meshes when block edits hit chunk edges.
 - [ ] Require neighbor data before meshing to avoid seams.
 - [ ] If meshing without neighbors, re-mesh chunks when neighbors load.
 - [ ] Track neighbor-triggered remesh in `pending_neighbor_remesh: Dictionary`.

@@ -3,14 +3,14 @@ class_name OverlayRenderer
 ## Renders task overlays and drag preview boxes for block operations.
 
 #region Constants
-const TASK_OVERLAY_SIZE := Vector3(1.05, 1.05, 1.05)
-const DRAG_PREVIEW_SIZE := Vector3(1.02, 1.02, 1.02)
-const USE_FLAT_OVERLAYS := true
+const TASK_OVERLAY_SIZE := Vector3(1.0, 1.0, 1.0)
+const DRAG_PREVIEW_SIZE := Vector3(1.0, 1.0, 1.0)
+const USE_FLAT_OVERLAYS := false
 const FLAT_OVERLAY_SIZE := Vector2(1.0, 1.0)
-const TASK_OVERLAY_ALPHA := 0.7
-const BLOCKED_OVERLAY_ALPHA := 0.35
-const DRAG_OVERLAY_ALPHA := 0.45
-const DRAG_DEFAULT_ALPHA := 0.35
+const TASK_OVERLAY_ALPHA := 0.5
+const BLOCKED_OVERLAY_ALPHA := 0.5
+const DRAG_OVERLAY_ALPHA := 0.5
+const DRAG_DEFAULT_ALPHA := 0.5
 const DIG_TASK_COLOR := Color(1.0, 0.2, 0.2)
 const PLACE_TASK_COLOR := Color(0.2, 0.2, 1.0)
 const STAIRS_TASK_COLOR := Color(0.7, 0.5, 0.2)
@@ -20,18 +20,30 @@ const DRAG_STAIRS_COLOR := Color(1.0, 0.7, 0.2)
 const DRAG_DEFAULT_COLOR := Color(0.8, 0.8, 0.8)
 const ROUND_HALF := 0.5
 const COLOR_MAX := 1.0
-const OVERLAY_Y_OFFSET := 0.52  # Place flat quad just above block top face (0.5 + small margin)
+const OVERLAY_Y_OFFSET := 0.0  # 3D box centered at block position (use 0.52 for flat overlays)
 const OVERLAY_SHADER_CODE := """shader_type spatial;
-render_mode unshaded, cull_disabled, depth_test_disabled;
+render_mode unshaded, cull_back, depth_draw_never;
 
 uniform vec4 albedo_color : source_color = vec4(1.0, 1.0, 1.0, 0.5);
+uniform float top_render_y = 1000.0;
+
+varying float world_y;
+
+void vertex() {
+	world_y = (MODEL_MATRIX * vec4(VERTEX, 1.0)).y;
+	VERTEX += NORMAL * 0.001;  // Small offset to avoid z-fighting
+}
 
 void fragment() {
+	if (world_y > top_render_y + 0.5) {
+		discard;
+	}
 	ALBEDO = albedo_color.rgb;
 	ALPHA = albedo_color.a;
 }
 """
 var overlay_shader: Shader = null
+var all_overlay_materials: Array = []
 #endregion
 
 #region State
@@ -59,8 +71,17 @@ func _create_overlay_shader_material(color: Color) -> ShaderMaterial:
 	var mat := ShaderMaterial.new()
 	mat.shader = overlay_shader
 	mat.set_shader_parameter("albedo_color", color)
+	if world != null:
+		mat.set_shader_parameter("top_render_y", float(world.top_render_y))
 	mat.render_priority = 100  # Render after terrain
+	all_overlay_materials.append(mat)
 	return mat
+
+
+func set_top_render_y(value: int) -> void:
+	for mat in all_overlay_materials:
+		if mat != null and is_instance_valid(mat):
+			mat.set_shader_parameter("top_render_y", float(value))
 #endregion
 
 

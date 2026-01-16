@@ -8,10 +8,14 @@ const SEED_MASK := 0x7fffffff
 const TOPSOIL_DEPTH_MIN := 2
 const TOPSOIL_DEPTH_MAX := 4
 const SEA_LEVEL_FILL_OFFSET := 1
+const HEIGHT_NOISE_FREQUENCY := 0.01
+const HEIGHT_NOISE_AMPLITUDE := 8
 #endregion
 
 #region State
 var world: World
+var height_noise: FastNoiseLite
+var height_noise_seed: int = -1
 #endregion
 
 
@@ -48,20 +52,25 @@ func mix_seed(value: int) -> int:
 func generate_chunk(coord: Vector3i, chunk: World.ChunkDataType) -> void:
 	var chunk_size: int = World.CHUNK_SIZE
 	var base_y: int = coord.y * chunk_size
-	var max_y: int = min(world.sea_level + SEA_LEVEL_FILL_OFFSET, world.world_size_y)
-	if base_y >= max_y:
+	var max_height: int = min(world.sea_level + HEIGHT_NOISE_AMPLITUDE, world.world_size_y - 1)
+	if base_y > max_height:
 		chunk.generated = true
 		world.touch_chunk(chunk)
 		return
-	var fill_y_max: int = min(chunk_size, max_y - base_y)
+	_ensure_height_noise()
 	var rng := RandomNumberGenerator.new()
 	rng.seed = chunk_seed_from_coord(coord)
 	var dirt_depth: int = rng.randi_range(TOPSOIL_DEPTH_MIN, TOPSOIL_DEPTH_MAX)
-	var surface_y: int = min(world.sea_level, world.world_size_y - 1)
-	for ly in range(fill_y_max):
-		var world_y: int = base_y + ly
-		for lx in range(chunk_size):
-			for lz in range(chunk_size):
+	for lx in range(chunk_size):
+		var wx: int = coord.x * chunk_size + lx
+		for lz in range(chunk_size):
+			var wz: int = coord.z * chunk_size + lz
+			var surface_y: int = _height_at(wx, wz)
+			if surface_y < base_y:
+				continue
+			var fill_max: int = min(chunk_size - 1, surface_y - base_y)
+			for ly in range(fill_max + 1):
+				var world_y: int = base_y + ly
 				var idx := world.chunk_index(lx, ly, lz)
 				var block_id: int = World.DEFAULT_MATERIAL
 				if world_y == surface_y:
@@ -83,3 +92,19 @@ func prime_spawn_chunks() -> void:
 		var coord := world.world_to_chunk_coords(spawn_x, sample_y, spawn_z)
 		world.ensure_chunk_generated(coord)
 #endregion
+
+
+func _ensure_height_noise() -> void:
+	if height_noise == null:
+		height_noise = FastNoiseLite.new()
+	if height_noise_seed != world.world_seed:
+		height_noise.seed = world.world_seed
+		height_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+		height_noise.frequency = HEIGHT_NOISE_FREQUENCY
+		height_noise_seed = world.world_seed
+
+
+func _height_at(wx: int, wz: int) -> int:
+	var n: float = height_noise.get_noise_2d(float(wx), float(wz))
+	var height := world.sea_level + int(round(n * HEIGHT_NOISE_AMPLITUDE))
+	return clampi(height, 0, world.world_size_y - 1)

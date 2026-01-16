@@ -6,6 +6,7 @@ class_name WorldRenderer
 const ChunkMesherScript = preload("res://scripts/rendering/chunk_mesher.gd")
 const ChunkCacheScript = preload("res://scripts/rendering/chunk_cache.gd")
 const OverlayRendererScript = preload("res://scripts/rendering/overlay_renderer.gd")
+const BlockTerrainShader = preload("res://scripts/rendering/block_terrain.gdshader")
 #endregion
 
 #region Constants
@@ -17,22 +18,6 @@ const MESH_BUILD_LOG_THRESHOLD_MS := 5.0
 const MESH_APPLY_BUDGET := 8
 const MESH_CACHE_RADIUS := 0
 const MESH_PREFETCH_BELOW_ONLY := true
-const BLOCK_SHADER_CODE := """shader_type spatial;
-render_mode cull_back, depth_prepass_alpha;
-
-uniform float top_render_y = 0.0;
-
-void fragment() {
-	if (UV2.x > top_render_y) {
-		discard;
-	}
-	if (UV2.y > 0.5 && top_render_y >= UV2.x + 1.0) {
-		discard;
-	}
-	ALBEDO = COLOR.rgb;
-	ALPHA = COLOR.a;
-}
-"""
 #endregion
 
 #region State
@@ -842,10 +827,8 @@ func _set_chunk_visibility(coord: Vector3i, visible: bool) -> void:
 #region Materials
 func get_block_material() -> Material:
 	if block_material == null:
-		var shader := Shader.new()
-		shader.code = BLOCK_SHADER_CODE
 		var shader_material := ShaderMaterial.new()
-		shader_material.shader = shader
+		shader_material.shader = BlockTerrainShader
 		if world != null:
 			shader_material.set_shader_parameter("top_render_y", float(world.top_render_y))
 		block_material = shader_material
@@ -857,6 +840,8 @@ func set_top_render_y(value: int) -> void:
 	if mat is ShaderMaterial:
 		var shader_material := mat as ShaderMaterial
 		shader_material.set_shader_parameter("top_render_y", float(value))
+	if overlay_renderer != null:
+		overlay_renderer.set_top_render_y(value)
 #endregion
 
 

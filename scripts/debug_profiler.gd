@@ -4,7 +4,7 @@ extends RefCounted
 
 #region State
 var enabled: bool = false
-var window_sec: float = 3.0
+var window_sec: float = 2.0
 var hold_sec: float = 0.5
 var frame_data: Dictionary = {}
 var active: Dictionary = {}
@@ -57,6 +57,7 @@ func finish_frame() -> void:
 		return
 	var now: float = Time.get_ticks_msec() / 1000.0
 	var cutoff: float = now - window_sec
+	_prune_history(cutoff)
 	for label in frame_data.keys():
 		var ms: float = float(frame_data[label]) / 1000.0
 		var samples: Array = history.get(label, [])
@@ -84,6 +85,20 @@ func finish_frame() -> void:
 	frame_data.clear()
 	active.clear()
 #endregion
+
+
+func _prune_history(cutoff: float) -> void:
+	for label in history.keys():
+		var samples: Array = history[label]
+		while samples.size() > 0 and float(samples[0]["t"]) < cutoff:
+			samples.remove_at(0)
+		if samples.is_empty():
+			history.erase(label)
+			stats.erase(label)
+			hold_values.erase(label)
+			hold_until.erase(label)
+		else:
+			history[label] = samples
 
 
 #region External Samples
