@@ -16,6 +16,23 @@ const NEAR_SAMPLE_MIN := 0.1
 const MESH_BUILD_LOG_THRESHOLD_MS := 5.0
 const MESH_APPLY_BUDGET := 8
 const MESH_CACHE_RADIUS := 0
+const MESH_PREFETCH_BELOW_ONLY := true
+const BLOCK_SHADER_CODE := """shader_type spatial;
+render_mode cull_back, depth_prepass_alpha;
+
+uniform float top_render_y = 0.0;
+
+void fragment() {
+	if (UV2.x > top_render_y) {
+		discard;
+	}
+	if (UV2.y > 0.5 && top_render_y >= UV2.x + 1.0) {
+		discard;
+	}
+	ALBEDO = COLOR.rgb;
+	ALPHA = COLOR.a;
+}
+"""
 #endregion
 
 #region State
@@ -24,7 +41,7 @@ var mesher = ChunkMesherScript.new()
 var mesher_thread = ChunkMesherScript.new()
 var chunk_cache = ChunkCacheScript.new()
 var overlay_renderer = OverlayRendererScript.new()
-var block_material: StandardMaterial3D
+var block_material: Material
 var chunk_face_stats: Dictionary = {}
 var total_visible_faces: int = 0
 var total_occluded_faces: int = 0
@@ -154,11 +171,11 @@ func regenerate_chunk(cx: int, cy: int, cz: int) -> void:
 
 
 #region Async Meshing
-func queue_chunk_mesh_build(coord: Vector3i, top_render_y: int = -1) -> void:
+func queue_chunk_mesh_build(coord: Vector3i, top_render_y: int = -1, respect_top: bool = false, high_priority: bool = false, force_sync: bool = false) -> void:
 	if world == null:
 		return
 	_ensure_block_tables()
-	if not use_async_meshing:
+	if not use_async_meshing or force_sync:
 		regenerate_chunk(coord.x, coord.y, coord.z)
 		return
 	if not mesh_thread_running:
@@ -168,21 +185,24 @@ func queue_chunk_mesh_build(coord: Vector3i, top_render_y: int = -1) -> void:
 		return
 	var revision: int = chunk.mesh_revision
 	var queued_rev: int = int(mesh_job_set.get(coord, -1))
-	if queued_rev >= revision and chunk.mesh_state == ChunkData.MESH_STATE_PENDING:
+	if queued_rev >= revision and chunk.mesh_state == ChunkData.MESH_STATE_PENDING and not respect_top:
 		return
 	chunk.mesh_state = ChunkData.MESH_STATE_PENDING
-	var job := _build_mesh_job(coord, revision, top_render_y, false)
+	var job := _build_mesh_job(coord, revision, top_render_y, false, respect_top)
 	if job.is_empty():
 		_apply_empty_mesh(coord)
 		return
 	mesh_job_set[coord] = revision
 	mesh_job_mutex.lock()
-	var insert_index := mesh_job_queue.size()
-	for i in range(mesh_job_queue.size()):
-		if bool(mesh_job_queue[i].get("prefetch", false)):
-			insert_index = i
-			break
-	mesh_job_queue.insert(insert_index, job)
+	if high_priority:
+		mesh_job_queue.insert(0, job)
+	else:
+		var insert_index := mesh_job_queue.size()
+		for i in range(mesh_job_queue.size()):
+			if bool(mesh_job_queue[i].get("prefetch", false)):
+				insert_index = i
+				break
+		mesh_job_queue.insert(insert_index, job)
 	mesh_job_mutex.unlock()
 	mesh_job_semaphore.post()
 
@@ -192,8 +212,11 @@ func _queue_prefetch_layers(coord: Vector3i, local_top: int) -> void:
 		return
 	if local_top < 0:
 		return
+	if not _is_chunk_in_current_render_zone(coord):
+		return
 	for offset in range(1, MESH_CACHE_RADIUS + 1):
-		_queue_prefetch_job(coord, local_top + offset)
+		if not MESH_PREFETCH_BELOW_ONLY:
+			_queue_prefetch_job(coord, local_top + offset)
 		_queue_prefetch_job(coord, local_top - offset)
 
 
@@ -220,7 +243,7 @@ func _queue_prefetch_job(coord: Vector3i, local_top: int) -> void:
 		return
 	var chunk_base_y: int = coord.y * chunk_size
 	var top_render_y := chunk_base_y + local_top
-	var job := _build_mesh_job(coord, revision, top_render_y, true)
+	var job := _build_mesh_job(coord, revision, top_render_y, true, false)
 	if job.is_empty():
 		return
 	mesh_prefetch_set[key] = revision
@@ -263,6 +286,7 @@ func _apply_mesh_result(result: Dictionary) -> bool:
 	var local_top: int = int(result.get("local_top", -1))
 	var revision: int = int(result.get("mesh_revision", -1))
 	var prefetch: bool = bool(result.get("prefetch", false))
+	var respect_top: bool = bool(result.get("respect_top", false))
 	if chunk == null:
 		if prefetch:
 			_clear_prefetch_job_record(coord, local_top, revision)
@@ -280,6 +304,7 @@ func _apply_mesh_result(result: Dictionary) -> bool:
 	var vertices: PackedVector3Array = result["vertices"]
 	var normals: PackedVector3Array = result["normals"]
 	var colors: PackedColorArray = result["colors"]
+	var uv2s: PackedVector2Array = result["uv2"]
 	var visible_faces: int = int(result["visible_faces"])
 	var occluded_faces: int = int(result["occluded_faces"])
 	var has_geometry: bool = bool(result["has_geometry"])
@@ -291,6 +316,7 @@ func _apply_mesh_result(result: Dictionary) -> bool:
 		arrays[Mesh.ARRAY_VERTEX] = vertices
 		arrays[Mesh.ARRAY_NORMAL] = normals
 		arrays[Mesh.ARRAY_COLOR] = colors
+		arrays[Mesh.ARRAY_TEX_UV2] = uv2s
 		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
 	var chunk_size: int = World.CHUNK_SIZE
@@ -299,7 +325,9 @@ func _apply_mesh_result(result: Dictionary) -> bool:
 		current_local_top = min(current_local_top, chunk_size - 1)
 	else:
 		current_local_top = -1
-	var should_apply := not prefetch or current_local_top == local_top
+	var should_apply := not prefetch
+	if prefetch or respect_top:
+		should_apply = current_local_top == local_top
 	if should_apply:
 		var mesh_instance: MeshInstance3D = chunk_cache.ensure_chunk(coord, chunk_size)
 		var prev_counts: Vector2i = chunk_face_stats.get(coord, Vector2i(0, 0))
@@ -373,7 +401,7 @@ func _prefetch_key(coord: Vector3i, local_top: int) -> String:
 	return "%d,%d,%d,%d" % [coord.x, coord.y, coord.z, local_top]
 
 
-func _build_mesh_job(coord: Vector3i, revision: int, top_render_y: int, prefetch: bool) -> Dictionary:
+func _build_mesh_job(coord: Vector3i, revision: int, top_render_y: int, prefetch: bool, respect_top: bool) -> Dictionary:
 	if world == null:
 		return {}
 	var chunk: ChunkData = world.get_chunk(coord)
@@ -384,8 +412,7 @@ func _build_mesh_job(coord: Vector3i, revision: int, top_render_y: int, prefetch
 	var chunk_base_y: int = coord.y * World.CHUNK_SIZE
 	if top_render_y < chunk_base_y:
 		return {}
-	var local_top: int = int(min(top_render_y - chunk_base_y, World.CHUNK_SIZE - 1))
-	top_render_y = chunk_base_y + local_top
+	var local_top: int = World.CHUNK_SIZE - 1
 	var neighbors: Dictionary = {
 		"x_neg": _copy_neighbor_blocks(Vector3i(coord.x - 1, coord.y, coord.z)),
 		"x_pos": _copy_neighbor_blocks(Vector3i(coord.x + 1, coord.y, coord.z)),
@@ -409,6 +436,7 @@ func _build_mesh_job(coord: Vector3i, revision: int, top_render_y: int, prefetch
 		"mesh_revision": revision,
 		"local_top": local_top,
 		"prefetch": prefetch,
+		"respect_top": respect_top,
 	}
 
 
@@ -439,6 +467,7 @@ func _mesh_worker_loop() -> void:
 		result["mesh_revision"] = job.get("mesh_revision", -1)
 		result["local_top"] = job.get("local_top", -1)
 		result["prefetch"] = job.get("prefetch", false)
+		result["respect_top"] = job.get("respect_top", false)
 		result["build_ms"] = float(Time.get_ticks_usec() - build_start) / 1000.0
 		mesh_result_mutex.lock()
 		mesh_result_queue.append(result)
@@ -508,8 +537,13 @@ func process_render_height_queue(budget: int) -> int:
 	for _i in range(build_count):
 		var coord: Vector3i = render_height_queue.pop_front()
 		render_height_queue_set.erase(coord)
-		queue_chunk_mesh_build(coord, render_height_target_y)
+		queue_chunk_mesh_build(coord, render_height_target_y, true)
 	return build_count
+
+
+func clear_render_height_queue() -> void:
+	render_height_queue.clear()
+	render_height_queue_set.clear()
 
 
 func has_pending_render_height_work() -> bool:
@@ -806,11 +840,23 @@ func _set_chunk_visibility(coord: Vector3i, visible: bool) -> void:
 
 
 #region Materials
-func get_block_material() -> StandardMaterial3D:
+func get_block_material() -> Material:
 	if block_material == null:
-		block_material = StandardMaterial3D.new()
-		block_material.vertex_color_use_as_albedo = true
+		var shader := Shader.new()
+		shader.code = BLOCK_SHADER_CODE
+		var shader_material := ShaderMaterial.new()
+		shader_material.shader = shader
+		if world != null:
+			shader_material.set_shader_parameter("top_render_y", float(world.top_render_y))
+		block_material = shader_material
 	return block_material
+
+
+func set_top_render_y(value: int) -> void:
+	var mat := get_block_material()
+	if mat is ShaderMaterial:
+		var shader_material := mat as ShaderMaterial
+		shader_material.set_shader_parameter("top_render_y", float(value))
 #endregion
 
 
@@ -960,4 +1006,12 @@ func update_render_height_in_range(old_y: int, new_y: int, min_x: int, max_x: in
 #region Chunk Queries
 func is_chunk_built(coord: Vector3i) -> bool:
 	return chunk_cache.is_chunk_built(coord)
+#endregion
+
+
+#region Debug Stats
+func get_overlay_debug_stats() -> Dictionary:
+	if overlay_renderer == null:
+		return {}
+	return overlay_renderer.get_overlay_debug_stats()
 #endregion

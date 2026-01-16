@@ -280,8 +280,6 @@ func _handle_render_layer_keys() -> void:
 
 
 func _handle_render_layer_change(delta: int) -> void:
-	if world.is_render_height_busy():
-		return
 	if debug_overlay != null:
 		debug_overlay.run_timed("World.set_top_render_y", Callable(self, "_apply_render_layer").bind(delta))
 	else:

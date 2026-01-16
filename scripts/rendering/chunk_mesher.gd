@@ -64,6 +64,7 @@ func build_chunk_mesh(world: World, cx: int, cy: int, cz: int) -> Dictionary:
 	var vertices: PackedVector3Array = data["vertices"]
 	var normals: PackedVector3Array = data["normals"]
 	var colors: PackedColorArray = data["colors"]
+	var uv2s: PackedVector2Array = data["uv2"]
 	var visible_faces: int = int(data["visible_faces"])
 	var occluded_faces: int = int(data["occluded_faces"])
 	var has_geometry: bool = bool(data["has_geometry"])
@@ -74,6 +75,7 @@ func build_chunk_mesh(world: World, cx: int, cy: int, cz: int) -> Dictionary:
 		arrays[Mesh.ARRAY_VERTEX] = vertices
 		arrays[Mesh.ARRAY_NORMAL] = normals
 		arrays[Mesh.ARRAY_COLOR] = colors
+		arrays[Mesh.ARRAY_TEX_UV2] = uv2s
 		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
 	return {
@@ -91,7 +93,6 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 	var cx: int = int(job["cx"])
 	var cy: int = int(job["cy"])
 	var cz: int = int(job["cz"])
-	var top_render_y: int = int(job["top_render_y"])
 	var air_id: int = int(job.get("air_id", 0))
 	var blocks: PackedByteArray = job["blocks"]
 	var neighbors: Dictionary = job["neighbors"]
@@ -100,6 +101,7 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 	var vertices := PackedVector3Array()
 	var normals := PackedVector3Array()
 	var colors := PackedColorArray()
+	var uv2s := PackedVector2Array()
 	var visible_faces := 0
 	var occluded_faces := 0
 
@@ -107,8 +109,6 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 		var wx := cx * chunk_size + lx
 		for ly in range(chunk_size):
 			var wy := cy * chunk_size + ly
-			if wy > top_render_y:
-				continue
 			for lz in range(chunk_size):
 				var wz := cz * chunk_size + lz
 				var idx := chunk_index(chunk_size, lx, ly, lz)
@@ -117,20 +117,21 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 					continue
 
 				var base := Vector3(lx, ly, lz)
+				var block_center_y: float = float(wy)
 				var color := block_color_from_table(color_table, block_id, wx, wy, wz)
 
 				var above_id := air_id
-				if wy + 1 > top_render_y:
-					above_id = air_id
-				elif ly + 1 < chunk_size:
+				if ly + 1 < chunk_size:
 					above_id = blocks[chunk_index(chunk_size, lx, ly + 1, lz)]
 				else:
 					above_id = neighbor_block(neighbors.get("y_pos", null), chunk_size, lx, 0, lz, air_id)
-				if not is_solid_id(above_id, solid_table):
-					add_face(vertices, normals, colors, base, Vector3.UP, color)
-					visible_faces += 1
-				else:
+				var above_solid := is_solid_id(above_id, solid_table)
+				var top_flag := 1.0 if above_solid else 0.0
+				add_face(vertices, normals, colors, uv2s, base, Vector3.UP, color, block_center_y, top_flag)
+				if above_solid:
 					occluded_faces += 1
+				else:
+					visible_faces += 1
 
 				var below_id := air_id
 				if ly - 1 >= 0:
@@ -138,7 +139,7 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 				else:
 					below_id = neighbor_block(neighbors.get("y_neg", null), chunk_size, lx, chunk_size - 1, lz, air_id)
 				if not is_solid_id(below_id, solid_table):
-					add_face(vertices, normals, colors, base, Vector3.DOWN, color)
+					add_face(vertices, normals, colors, uv2s, base, Vector3.DOWN, color, block_center_y, 0.0)
 					visible_faces += 1
 				else:
 					occluded_faces += 1
@@ -149,7 +150,7 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 				else:
 					forward_id = neighbor_block(neighbors.get("z_pos", null), chunk_size, lx, ly, 0, air_id)
 				if not is_solid_id(forward_id, solid_table):
-					add_face(vertices, normals, colors, base, Vector3.FORWARD, color)
+					add_face(vertices, normals, colors, uv2s, base, Vector3.FORWARD, color, block_center_y, 0.0)
 					visible_faces += 1
 				else:
 					occluded_faces += 1
@@ -160,7 +161,7 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 				else:
 					back_id = neighbor_block(neighbors.get("z_neg", null), chunk_size, lx, ly, chunk_size - 1, air_id)
 				if not is_solid_id(back_id, solid_table):
-					add_face(vertices, normals, colors, base, Vector3.BACK, color)
+					add_face(vertices, normals, colors, uv2s, base, Vector3.BACK, color, block_center_y, 0.0)
 					visible_faces += 1
 				else:
 					occluded_faces += 1
@@ -171,7 +172,7 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 				else:
 					right_id = neighbor_block(neighbors.get("x_pos", null), chunk_size, 0, ly, lz, air_id)
 				if not is_solid_id(right_id, solid_table):
-					add_face(vertices, normals, colors, base, Vector3.RIGHT, color)
+					add_face(vertices, normals, colors, uv2s, base, Vector3.RIGHT, color, block_center_y, 0.0)
 					visible_faces += 1
 				else:
 					occluded_faces += 1
@@ -182,7 +183,7 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 				else:
 					left_id = neighbor_block(neighbors.get("x_neg", null), chunk_size, chunk_size - 1, ly, lz, air_id)
 				if not is_solid_id(left_id, solid_table):
-					add_face(vertices, normals, colors, base, Vector3.LEFT, color)
+					add_face(vertices, normals, colors, uv2s, base, Vector3.LEFT, color, block_center_y, 0.0)
 					visible_faces += 1
 				else:
 					occluded_faces += 1
@@ -192,6 +193,7 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 		"vertices": vertices,
 		"normals": normals,
 		"colors": colors,
+		"uv2": uv2s,
 		"visible_faces": visible_faces,
 		"occluded_faces": occluded_faces,
 		"has_geometry": has_geometry,
@@ -291,7 +293,7 @@ func is_solid_id(block_id: int, solid_table: PackedByteArray) -> bool:
 
 
 #region Face Generation
-func add_face(vertices: PackedVector3Array, normals: PackedVector3Array, colors: PackedColorArray, base: Vector3, normal: Vector3, color: Color) -> void:
+func add_face(vertices: PackedVector3Array, normals: PackedVector3Array, colors: PackedColorArray, uv2s: PackedVector2Array, base: Vector3, normal: Vector3, color: Color, block_center_y: float, top_flag: float) -> void:
 	var h := FACE_HALF_SIZE
 	var v1: Vector3
 	var v2: Vector3
@@ -331,10 +333,12 @@ func add_face(vertices: PackedVector3Array, normals: PackedVector3Array, colors:
 
 	var shade := face_shade(normal)
 	var shaded := Color(color.r * shade, color.g * shade, color.b * shade, COLOR_MAX)
+	var uv2 := Vector2(block_center_y, top_flag)
 
 	vertices.append_array([v1, v3, v2, v1, v4, v3])
 	normals.append_array([normal, normal, normal, normal, normal, normal])
 	colors.append_array([shaded, shaded, shaded, shaded, shaded, shaded])
+	uv2s.append_array([uv2, uv2, uv2, uv2, uv2, uv2])
 
 
 func face_shade(normal: Vector3) -> float:

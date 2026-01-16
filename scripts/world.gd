@@ -116,6 +116,7 @@ func init_world(seed_world_flag: bool = true) -> void:
 	spawn_coord = Vector3i(0, sea_level, 0)
 	if renderer != null:
 		renderer.reset_stats()
+		renderer.set_top_render_y(top_render_y)
 	reset_streaming_state()
 	worker_chunk_cache.clear()
 	if seed_world_flag:
@@ -141,7 +142,10 @@ func save_world(path: String) -> bool:
 
 
 func load_world(path: String) -> bool:
-	return save_load.load_world(path)
+	var ok := save_load.load_world(path)
+	if ok and renderer != null:
+		renderer.set_top_render_y(top_render_y)
+	return ok
 #endregion
 
 
@@ -292,7 +296,9 @@ func set_block(x: int, y: int, z: int, value: int) -> void:
 	set_block_raw(x, y, z, value, true)
 	if renderer != null:
 		var coord := world_to_chunk_coords(x, y, z)
-		renderer.queue_chunk_mesh_build(coord)
+		renderer.queue_chunk_mesh_build(coord, -1, false, true, true)
+		var local := chunk_to_local_coords(x, y, z)
+		_queue_neighbor_mesh_updates(coord, local)
 
 
 func is_solid(x: int, y: int, z: int) -> bool:
@@ -335,6 +341,35 @@ func get_block_color(block_id: int) -> Color:
 func get_block_name(block_id: int) -> String:
 	return block_registry.get_name(block_id)
 #endregion
+
+
+func _queue_neighbor_mesh_updates(coord: Vector3i, local: Vector3i) -> void:
+	var chunk_size := CHUNK_SIZE
+	if local.x == 0:
+		_queue_mesh_if_loaded(Vector3i(coord.x - 1, coord.y, coord.z))
+	if local.x == chunk_size - 1:
+		_queue_mesh_if_loaded(Vector3i(coord.x + 1, coord.y, coord.z))
+	if local.y == 0:
+		_queue_mesh_if_loaded(Vector3i(coord.x, coord.y - 1, coord.z))
+	if local.y == chunk_size - 1:
+		_queue_mesh_if_loaded(Vector3i(coord.x, coord.y + 1, coord.z))
+	if local.z == 0:
+		_queue_mesh_if_loaded(Vector3i(coord.x, coord.y, coord.z - 1))
+	if local.z == chunk_size - 1:
+		_queue_mesh_if_loaded(Vector3i(coord.x, coord.y, coord.z + 1))
+
+
+func _queue_mesh_if_loaded(coord: Vector3i) -> void:
+	if not is_chunk_coord_valid(coord):
+		return
+	var chunk: ChunkDataType = get_chunk(coord)
+	if chunk == null or not chunk.generated:
+		return
+	chunk.mesh_state = ChunkDataScript.MESH_STATE_NONE
+	chunk.mesh_revision += 1
+	if renderer != null:
+		renderer.invalidate_chunk_mesh_cache(coord)
+		renderer.queue_chunk_mesh_build(coord, -1, false, true, true)
 
 
 #region Rendering Stats
@@ -493,21 +528,27 @@ func set_top_render_y(new_y: int) -> int:
 		var target_z: int = int(floor(streaming.last_stream_target.z))
 		var target_coord := world_to_chunk_coords(target_x, top_render_y, target_z)
 		ensure_chunk_buffer_for_chunk(target_coord)
-	var rebuilt := 0
 	if renderer != null:
-		var bounds := get_render_height_bounds()
-		var anchor := get_render_height_anchor()
-		rebuilt = renderer.queue_render_height_update(old_y, top_render_y, anchor, bounds["min_x"], bounds["max_x"], bounds["min_z"], bounds["max_z"])
-	return rebuilt
+		renderer.set_top_render_y(top_render_y)
+		renderer.clear_render_height_queue()
+	return 0
 
 
 func get_render_height_bounds() -> Dictionary:
-	if streaming != null and streaming.stream_min_x <= streaming.stream_max_x and streaming.stream_min_z <= streaming.stream_max_z:
-		var min_x := streaming.stream_min_x
-		var max_x := streaming.stream_max_x
-		var min_z := streaming.stream_min_z
-		var max_z := streaming.stream_max_z
-		return {"min_x": min_x, "max_x": max_x, "min_z": min_z, "max_z": max_z}
+	if streaming != null:
+		var render_min_x := streaming.last_render_zone_min_cx
+		var render_max_x := streaming.last_render_zone_max_cx
+		var render_min_z := streaming.last_render_zone_min_cz
+		var render_max_z := streaming.last_render_zone_max_cz
+		if render_min_x != streaming.DUMMY_INT and render_max_x != -streaming.DUMMY_INT:
+			if render_min_x <= render_max_x and render_min_z <= render_max_z:
+				return {"min_x": render_min_x, "max_x": render_max_x, "min_z": render_min_z, "max_z": render_max_z}
+		if streaming.stream_min_x <= streaming.stream_max_x and streaming.stream_min_z <= streaming.stream_max_z:
+			var min_x := streaming.stream_min_x
+			var max_x := streaming.stream_max_x
+			var min_z := streaming.stream_min_z
+			var max_z := streaming.stream_max_z
+			return {"min_x": min_x, "max_x": max_x, "min_z": min_z, "max_z": max_z}
 	var anchor := get_render_height_anchor()
 	var radius := 8
 	if streaming != null:

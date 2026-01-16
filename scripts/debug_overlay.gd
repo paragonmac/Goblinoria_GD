@@ -212,16 +212,19 @@ func update_streaming_capture(dt: float) -> void:
 		return
 	streaming_capture_timer -= STREAMING_CAPTURE_INTERVAL
 	var stats := _collect_streaming_stats()
+	var overlay_stats := _collect_overlay_stats()
 	var cam_pos := Vector3.ZERO
 	if camera != null:
 		cam_pos = camera.global_transform.origin
 	var mem_static: float = float(Performance.get_monitor(Performance.MEMORY_STATIC)) / 1048576.0
 	var now_ms: int = Time.get_ticks_msec() - streaming_capture_start_ms
-	var line := "%d,%.2f,%.2f,%.2f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.2f" % [
+	var overlay_positions_str := _format_overlay_positions(overlay_stats)
+	var line := "%d,%.2f,%.2f,%.2f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.2f,%d,%d,%d,%d,\"%s\"" % [
 		now_ms,
 		cam_pos.x,
 		cam_pos.y,
 		cam_pos.z,
+		int(stats["top_render_y"]),
 		int(stats["loaded_chunks"]),
 		int(stats["build_queue"]),
 		int(stats["stream_pending"]),
@@ -236,6 +239,11 @@ func update_streaming_capture(dt: float) -> void:
 		int(stats["mesh_job_set"]),
 		int(stats["mesh_prefetch_set"]),
 		mem_static,
+		int(overlay_stats.get("drag_count", 0)),
+		int(overlay_stats.get("drag_visible_count", 0)),
+		int(overlay_stats.get("task_count", 0)),
+		int(overlay_stats.get("task_visible_count", 0)),
+		overlay_positions_str,
 	]
 	streaming_capture_lines.append(line)
 
@@ -245,7 +253,7 @@ func _start_streaming_capture() -> void:
 	streaming_capture_start_ms = Time.get_ticks_msec()
 	streaming_capture_lines.clear()
 	streaming_capture_path = "user://streaming_capture_%d.csv" % streaming_capture_start_ms
-	streaming_capture_lines.append("t_ms,cam_x,cam_y,cam_z,loaded_chunks,build_queue,stream_pending,stream_radius,render_radius,unload_radius,buffer_last,buffer_base,buffer_max,mesh_job_queue,mesh_result_queue,mesh_job_set,mesh_prefetch_set,mem_static_mb")
+	streaming_capture_lines.append("t_ms,cam_x,cam_y,cam_z,top_render_y,loaded_chunks,build_queue,stream_pending,stream_radius,render_radius,unload_radius,buffer_last,buffer_base,buffer_max,mesh_job_queue,mesh_result_queue,mesh_job_set,mesh_prefetch_set,mem_static_mb,drag_count,drag_visible,task_count,task_visible,overlay_positions")
 	print("Streaming capture started: %s" % streaming_capture_path)
 
 
@@ -263,8 +271,54 @@ func _stop_streaming_capture() -> void:
 	streaming_capture_path = ""
 
 
+func _collect_overlay_stats() -> Dictionary:
+	if world == null or world.renderer == null:
+		return {}
+	return world.renderer.get_overlay_debug_stats()
+
+
+func _format_overlay_positions(overlay_stats: Dictionary) -> String:
+	var parts: Array = []
+	# Add parent/sample debug info
+	var parent_pos: Vector3 = overlay_stats.get("parent_global_pos", Vector3.ZERO)
+	var sample_pos: Vector3 = overlay_stats.get("sample_global_pos", Vector3.ZERO)
+	var mesh_valid: bool = overlay_stats.get("sample_mesh_valid", false)
+	var in_tree: bool = overlay_stats.get("sample_in_tree", false)
+	var renderer_vis: bool = overlay_stats.get("overlay_renderer_visible", true)
+	var chunk_origins: int = overlay_stats.get("chunk_origin_count", 0)
+	var non_origins: int = overlay_stats.get("non_origin_count", 0)
+	parts.append("PARENT[%.1f;%.1f;%.1f]" % [parent_pos.x, parent_pos.y, parent_pos.z])
+	parts.append("SAMPLE[gpos:%.1f;%.1f;%.1f|mesh:%s|tree:%s|rvis:%s]" % [
+		sample_pos.x, sample_pos.y, sample_pos.z,
+		"y" if mesh_valid else "n",
+		"y" if in_tree else "n",
+		"y" if renderer_vis else "n"
+	])
+	parts.append("CHUNKS[origins:%d|non:%d]" % [chunk_origins, non_origins])
+	# Add material debug info
+	var mat_info: String = overlay_stats.get("sample_material_info", "")
+	if not mat_info.is_empty():
+		parts.append("MAT[%s]" % mat_info)
+	var drag_positions: Array = overlay_stats.get("drag_positions", [])
+	var task_positions: Array = overlay_stats.get("task_positions", [])
+	# Limit to first 10 positions each to keep CSV manageable
+	var max_positions := 10
+	for i in range(min(drag_positions.size(), max_positions)):
+		var pos: Vector3i = drag_positions[i]
+		parts.append("d:%d;%d;%d" % [pos.x, pos.y, pos.z])
+	if drag_positions.size() > max_positions:
+		parts.append("d:+%d more" % (drag_positions.size() - max_positions))
+	for i in range(min(task_positions.size(), max_positions)):
+		var pos: Vector3i = task_positions[i]
+		parts.append("t:%d;%d;%d" % [pos.x, pos.y, pos.z])
+	if task_positions.size() > max_positions:
+		parts.append("t:+%d more" % (task_positions.size() - max_positions))
+	return "|".join(parts)
+
+
 func _collect_streaming_stats() -> Dictionary:
 	var stats := {
+		"top_render_y": 0,
 		"loaded_chunks": 0,
 		"build_queue": 0,
 		"stream_pending": 0,
@@ -281,6 +335,7 @@ func _collect_streaming_stats() -> Dictionary:
 	}
 	if world == null:
 		return stats
+	stats["top_render_y"] = world.top_render_y
 	stats["loaded_chunks"] = world.chunks.size()
 	if world.streaming != null:
 		var streaming: WorldStreaming = world.streaming
