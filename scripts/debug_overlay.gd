@@ -131,6 +131,10 @@ func step_world(dt: float) -> void:
 	if world == null:
 		return
 	if show_debug_timings and debug_profiler != null and debug_profiler.enabled:
+		debug_profiler.begin("World.process_generation_results")
+		world.process_generation_results()
+		debug_profiler.end("World.process_generation_results")
+
 		debug_profiler.begin("World.update_render_height_queue")
 		world.update_render_height_queue()
 		debug_profiler.end("World.update_render_height_queue")

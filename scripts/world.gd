@@ -48,6 +48,7 @@ const WORKER_SPAWN_OFFSETS := [
 #region Constants - Misc
 const VISIBILITY_Y_OFFSET := 1.0
 const RENDER_HEIGHT_CHUNKS_PER_FRAME := 16
+const GENERATION_APPLY_BUDGET := 8
 const DUMMY_INT := 666
 #endregion
 
@@ -114,6 +115,8 @@ func init_world(seed_world_flag: bool = true) -> void:
 	sea_level = max(world_size_y - SEA_LEVEL_DEPTH, SEA_LEVEL_MIN)
 	top_render_y = sea_level
 	spawn_coord = Vector3i(0, sea_level, 0)
+	if generator != null:
+		generator.reset_generation_jobs()
 	if renderer != null:
 		renderer.reset_stats()
 		renderer.set_top_render_y(top_render_y)
@@ -145,6 +148,8 @@ func load_world(path: String) -> bool:
 	var ok := save_load.load_world(path)
 	if ok and renderer != null:
 		renderer.set_top_render_y(top_render_y)
+	if ok and generator != null:
+		generator.reset_generation_jobs()
 	return ok
 #endregion
 
@@ -196,6 +201,20 @@ func ensure_chunk_generated(coord: Vector3i) -> ChunkDataType:
 		return chunk
 	generator.generate_chunk(coord, chunk)
 	return chunk
+
+
+func request_chunk_generation_async(coord: Vector3i) -> bool:
+	if not is_chunk_coord_valid(coord):
+		return false
+	var chunk := ensure_chunk(coord)
+	if chunk.generated:
+		return true
+	if save_load != null and save_load.load_chunk_into(coord, chunk):
+		touch_chunk(chunk)
+		return true
+	if generator != null:
+		generator.queue_chunk_generation(coord)
+	return false
 
 
 func unload_chunk(coord: Vector3i) -> void:
@@ -389,11 +408,18 @@ func get_camera_tris_rendered(camera: Camera3D) -> Dictionary:
 	if renderer == null:
 		return {"rendered": 0, "total": 0, "percent": 0.0}
 	return renderer.get_camera_tris_rendered(camera)
+
+
+func get_generation_stats() -> Dictionary:
+	if generator == null:
+		return {"queued": 0, "results": 0, "active": 0}
+	return generator.get_generation_stats()
 #endregion
 
 
 #region World Update Loop
 func update_world(dt: float) -> void:
+	process_generation_results()
 	update_render_height_queue()
 	update_workers(dt)
 	update_task_queue()
@@ -437,6 +463,11 @@ func update_render_height_queue() -> void:
 	renderer.process_mesh_results(renderer.MESH_APPLY_BUDGET)
 
 
+func process_generation_results() -> void:
+	if generator != null:
+		generator.process_generation_results(GENERATION_APPLY_BUDGET)
+
+
 func is_render_height_busy() -> bool:
 	if renderer == null:
 		return false
@@ -476,6 +507,11 @@ func prewarm_render_cache(view_rect: Rect2, plane_y: float) -> void:
 	streaming.warmup_streaming(view_rect, plane_y)
 	renderer.flush_mesh_jobs(true)
 #endregion
+
+
+func _exit_tree() -> void:
+	if generator != null:
+		generator.shutdown_generation_thread()
 
 
 #region Workers

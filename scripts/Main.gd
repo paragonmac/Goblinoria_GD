@@ -79,6 +79,7 @@ var menu_open := false
 var world_started := false
 var last_render_height_queued: int = 0
 var y_level_label: Label
+var gen_status_label: Label
 var render_level_base_y: int = 0
 #endregion
 
@@ -670,6 +671,20 @@ func _setup_hud() -> void:
 	y_level_label.offset_bottom = -10.0
 	y_level_label.text = ""
 	hud_layer.add_child(y_level_label)
+	gen_status_label = Label.new()
+	gen_status_label.name = "GenStatusLabel"
+	gen_status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	gen_status_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	gen_status_label.anchor_left = 1.0
+	gen_status_label.anchor_right = 1.0
+	gen_status_label.anchor_top = 1.0
+	gen_status_label.anchor_bottom = 1.0
+	gen_status_label.offset_left = -240.0
+	gen_status_label.offset_top = -50.0
+	gen_status_label.offset_right = -10.0
+	gen_status_label.offset_bottom = -30.0
+	gen_status_label.text = ""
+	hud_layer.add_child(gen_status_label)
 
 
 func update_hud() -> void:
@@ -679,6 +694,12 @@ func update_hud() -> void:
 	hud_label.text = "Mode: %s%s | Tasks: %d" % [mode_name, info_text, task_count]
 	if y_level_label != null:
 		y_level_label.text = "Level: %d" % (world.top_render_y - render_level_base_y)
+	if gen_status_label != null:
+		var stats := world.get_generation_stats()
+		var queued: int = int(stats.get("queued", 0))
+		var active: int = int(stats.get("active", 0))
+		var results: int = int(stats.get("results", 0))
+		gen_status_label.text = "Gen q:%d act:%d res:%d" % [queued, active, results]
 
 
 func _get_mode_display_name() -> String:

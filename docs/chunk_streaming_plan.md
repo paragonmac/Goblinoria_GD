@@ -87,9 +87,9 @@ This is the working plan for chunked storage, streaming, and persistence.
 
 ## Milestone 8: Async IO
 - [ ] Background thread for load/save.
-- [ ] Thread-safe request queue.
-- [ ] Main-thread handoff for chunk data.
-- [ ] Placeholder state for in-flight chunks.
+- [x] Thread-safe request queue.
+- [x] Main-thread handoff for chunk data.
+- [x] Placeholder state for in-flight chunks.
 
 ## Milestone 9: Region Files (Optional)
 - [ ] Decide region layout: 2D (x/z) + vertical slabs or full 3D cubes.
