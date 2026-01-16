@@ -36,9 +36,7 @@ func is_blocking(world, block_id: int) -> bool:
 
 
 func is_walkable(world, x: int, y: int, z: int) -> bool:
-	if x < 0 or y < 0 or z < 0:
-		return false
-	if x >= world.world_size_x or y >= world.world_size_y or z >= world.world_size_z:
+	if y < 0 or y >= world.world_size_y:
 		return false
 	if y < MIN_WALKABLE_Y:
 		return false

@@ -15,7 +15,7 @@ const NEAR_SAMPLE_OFFSET := 0.1
 const NEAR_SAMPLE_MIN := 0.1
 const MESH_BUILD_LOG_THRESHOLD_MS := 5.0
 const MESH_APPLY_BUDGET := 8
-const MESH_CACHE_RADIUS := 16
+const MESH_CACHE_RADIUS := 0
 #endregion
 
 #region State
@@ -43,6 +43,7 @@ var mesh_job_semaphore := Semaphore.new()
 var mesh_result_queue: Array = []
 var mesh_result_mutex := Mutex.new()
 var mesh_prefetch_set: Dictionary = {}
+var render_zone_visible: Dictionary = {}
 var block_solid_table := PackedByteArray()
 var block_color_table := PackedColorArray()
 #endregion
@@ -82,6 +83,7 @@ func clear_chunks() -> void:
 	render_height_queue_set.clear()
 	chunk_mesh_cache.clear()
 	mesh_prefetch_set.clear()
+	render_zone_visible.clear()
 	_clear_mesh_jobs()
 	if world == null:
 		return
@@ -91,20 +93,23 @@ func clear_chunks() -> void:
 #endregion
 
 
+func clear_chunk(coord: Vector3i) -> void:
+	_cancel_chunk_jobs(coord)
+	render_height_queue_set.erase(coord)
+	if render_height_queue.has(coord):
+		render_height_queue.erase(coord)
+	if chunk_face_stats.has(coord):
+		var prev_counts: Vector2i = chunk_face_stats[coord]
+		total_visible_faces -= prev_counts.x
+		total_occluded_faces -= prev_counts.y
+		chunk_face_stats.erase(coord)
+	if chunk_mesh_cache.has(coord):
+		chunk_mesh_cache.erase(coord)
+	if chunk_cache != null:
+		chunk_cache.remove_chunk(coord)
+
+
 #region Chunk Building
-func build_all_chunks() -> void:
-	if world == null:
-		return
-	var chunk_size: int = World.CHUNK_SIZE
-	var chunks_x: int = int(floor(float(world.world_size_x) / float(chunk_size)))
-	var chunks_y: int = int(floor(float(world.world_size_y) / float(chunk_size)))
-	var chunks_z: int = int(floor(float(world.world_size_z) / float(chunk_size)))
-	for cx in range(chunks_x):
-		for cy in range(chunks_y):
-			for cz in range(chunks_z):
-				regenerate_chunk(cx, cy, cz)
-
-
 func regenerate_chunk(cx: int, cy: int, cz: int) -> void:
 	if world == null:
 		return
@@ -134,7 +139,7 @@ func regenerate_chunk(cx: int, cy: int, cz: int) -> void:
 	total_occluded_faces += occluded_faces - prev_counts.y
 	chunk_face_stats[key] = Vector2i(visible_faces, occluded_faces)
 	mesh_instance.mesh = mesh
-	mesh_instance.visible = has_geometry
+	mesh_instance.visible = has_geometry and _is_chunk_in_current_render_zone(key)
 	if has_geometry:
 		mesh_instance.material_override = get_block_material()
 	var chunk: ChunkData = world.get_chunk(key)
@@ -158,8 +163,8 @@ func queue_chunk_mesh_build(coord: Vector3i, top_render_y: int = -1) -> void:
 		return
 	if not mesh_thread_running:
 		_start_mesh_worker()
-	var chunk: ChunkData = world.ensure_chunk_generated(coord)
-	if chunk == null:
+	var chunk: ChunkData = world.get_chunk(coord)
+	if chunk == null or not chunk.generated:
 		return
 	var revision: int = chunk.mesh_revision
 	var queued_rev: int = int(mesh_job_set.get(coord, -1))
@@ -302,7 +307,7 @@ func _apply_mesh_result(result: Dictionary) -> bool:
 		total_occluded_faces += occluded_faces - prev_counts.y
 		chunk_face_stats[coord] = Vector2i(visible_faces, occluded_faces)
 		mesh_instance.mesh = mesh
-		mesh_instance.visible = has_geometry
+		mesh_instance.visible = has_geometry and _is_chunk_in_current_render_zone(coord)
 		if has_geometry:
 			mesh_instance.material_override = get_block_material()
 		chunk.mesh_state = ChunkData.MESH_STATE_READY
@@ -338,6 +343,30 @@ func _clear_prefetch_job_record(coord: Vector3i, local_top: int, revision: int) 
 	var queued_rev: int = int(mesh_prefetch_set.get(key, -1))
 	if queued_rev <= revision:
 		mesh_prefetch_set.erase(key)
+
+
+func _cancel_chunk_jobs(coord: Vector3i) -> void:
+	mesh_job_mutex.lock()
+	for i in range(mesh_job_queue.size() - 1, -1, -1):
+		var job: Dictionary = mesh_job_queue[i]
+		if job.get("coord", null) == coord:
+			mesh_job_queue.remove_at(i)
+	mesh_job_mutex.unlock()
+	mesh_result_mutex.lock()
+	for i in range(mesh_result_queue.size() - 1, -1, -1):
+		var result: Dictionary = mesh_result_queue[i]
+		if result.get("coord", null) == coord:
+			mesh_result_queue.remove_at(i)
+	mesh_result_mutex.unlock()
+	mesh_job_set.erase(coord)
+	_purge_prefetch_for_coord(coord)
+
+
+func _purge_prefetch_for_coord(coord: Vector3i) -> void:
+	for key in mesh_prefetch_set.keys():
+		var key_str: String = key
+		if key_str.begins_with("%d,%d,%d," % [coord.x, coord.y, coord.z]):
+			mesh_prefetch_set.erase(key_str)
 
 
 func _prefetch_key(coord: Vector3i, local_top: int) -> String:
@@ -707,7 +736,7 @@ func _apply_mesh_entry(coord: Vector3i, entry: Dictionary, chunk: ChunkData) -> 
 	total_occluded_faces += occluded_faces - prev_counts.y
 	chunk_face_stats[coord] = Vector2i(visible_faces, occluded_faces)
 	mesh_instance.mesh = mesh
-	mesh_instance.visible = has_geometry
+	mesh_instance.visible = has_geometry and _is_chunk_in_current_render_zone(coord)
 	if has_geometry:
 		mesh_instance.material_override = get_block_material()
 	chunk.mesh_state = ChunkData.MESH_STATE_READY
@@ -740,6 +769,42 @@ func _hide_chunk_mesh(coord: Vector3i) -> void:
 #endregion
 
 
+#region Render Zone
+func update_render_zone(min_cx: int, max_cx: int, min_cz: int, max_cz: int, min_cy: int, max_cy: int) -> void:
+	var new_visible: Dictionary = {}
+	if min_cx <= max_cx and min_cz <= max_cz and min_cy <= max_cy:
+		for cy: int in range(min_cy, max_cy + 1):
+			for cx: int in range(min_cx, max_cx + 1):
+				for cz: int in range(min_cz, max_cz + 1):
+					var coord := Vector3i(cx, cy, cz)
+					new_visible[coord] = true
+					_set_chunk_visibility(coord, true)
+	for key in render_zone_visible.keys():
+		if not new_visible.has(key):
+			_set_chunk_visibility(key, false)
+	render_zone_visible = new_visible
+
+
+func _is_chunk_in_current_render_zone(coord: Vector3i) -> bool:
+	if render_zone_visible.is_empty():
+		return true
+	return render_zone_visible.has(coord)
+
+
+func _set_chunk_visibility(coord: Vector3i, visible: bool) -> void:
+	var mesh_instance: MeshInstance3D = chunk_cache.get_chunk(coord)
+	if mesh_instance == null:
+		return
+	if not visible:
+		mesh_instance.visible = false
+		return
+	if mesh_instance.mesh == null:
+		mesh_instance.visible = false
+		return
+	mesh_instance.visible = true
+#endregion
+
+
 #region Materials
 func get_block_material() -> StandardMaterial3D:
 	if block_material == null:
@@ -758,6 +823,42 @@ func get_draw_burden_stats() -> Dictionary:
 	if total_tris > 0:
 		percent = float(drawn_tris) / float(total_tris) * PERCENT_FACTOR
 	return {"drawn": drawn_tris, "culled": culled_tris, "percent": percent}
+
+
+func get_chunk_draw_stats() -> Dictionary:
+	var loaded := 0
+	if world != null:
+		loaded = world.chunks.size()
+	var keys: Array = chunk_cache.get_keys()
+	var meshed: int = keys.size()
+	var visible: int = 0
+	for key in keys:
+		var mesh_instance: MeshInstance3D = chunk_cache.get_chunk(key)
+		if mesh_instance == null:
+			continue
+		if mesh_instance.mesh == null:
+			continue
+		if mesh_instance.visible:
+			visible += 1
+	var zone: int = render_zone_visible.size()
+	return {"loaded": loaded, "meshed": meshed, "visible": visible, "zone": zone}
+
+
+func get_mesh_work_stats() -> Dictionary:
+	var job_queue := 0
+	var result_queue := 0
+	mesh_job_mutex.lock()
+	job_queue = mesh_job_queue.size()
+	mesh_job_mutex.unlock()
+	mesh_result_mutex.lock()
+	result_queue = mesh_result_queue.size()
+	mesh_result_mutex.unlock()
+	return {
+		"job_queue": job_queue,
+		"result_queue": result_queue,
+		"job_set": mesh_job_set.size(),
+		"prefetch_set": mesh_prefetch_set.size(),
+	}
 
 
 func get_camera_tris_rendered(camera: Camera3D) -> Dictionary:
@@ -842,18 +943,16 @@ func clear_drag_preview() -> void:
 func update_render_height(old_y: int, new_y: int) -> int:
 	if world == null:
 		return 0
-	var chunk_size: int = World.CHUNK_SIZE
-	var max_cx: int = int(floor(float(world.world_size_x) / float(chunk_size))) - 1
-	var max_cz: int = int(floor(float(world.world_size_z) / float(chunk_size))) - 1
-	var anchor := Vector3(world.world_size_x * 0.5, float(world.top_render_y), world.world_size_z * 0.5)
-	return queue_render_height_update(old_y, new_y, anchor, 0, max_cx, 0, max_cz)
+	var bounds := world.get_render_height_bounds()
+	var anchor := world.get_render_height_anchor()
+	return queue_render_height_update(old_y, new_y, anchor, bounds["min_x"], bounds["max_x"], bounds["min_z"], bounds["max_z"])
 
 func update_render_height_in_range(old_y: int, new_y: int, min_x: int, max_x: int, min_z: int, max_z: int) -> int:
 	if world == null:
 		return 0
 	if min_x > max_x or min_z > max_z:
 		return 0
-	var anchor := Vector3(world.world_size_x * 0.5, float(world.top_render_y), world.world_size_z * 0.5)
+	var anchor := world.get_render_height_anchor()
 	return queue_render_height_update(old_y, new_y, anchor, min_x, max_x, min_z, max_z)
 #endregion
 

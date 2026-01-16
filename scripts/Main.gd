@@ -110,16 +110,16 @@ func _input(event: InputEvent) -> void:
 
 #region Camera Setup & Updates
 func _setup_camera() -> void:
-	var center := Vector3(
-		world.world_size_x / 2.0,
-		world.top_render_y,
-		world.world_size_z / 2.0
-	)
+	var center := Vector3(0.0, world.top_render_y, 0.0)
 	camera.position = center + CAMERA_OFFSET
 	camera.projection = Camera3D.PROJECTION_ORTHOGONAL
 	camera.current = true
 	camera.size = CAMERA_ORTHO_SIZE_DEFAULT
-	cam_zoom_max = float(max(world.world_size_x, world.world_size_z)) * CAMERA_ORTHO_SIZE_MULT * CAMERA_ZOOM_MAX_MULT
+	var base_radius := 8
+	if world.streaming != null:
+		base_radius = world.streaming.stream_radius_base
+	var base_span := float(base_radius * World.CHUNK_SIZE * 2 + World.CHUNK_SIZE)
+	cam_zoom_max = max(CAMERA_ORTHO_SIZE_DEFAULT, base_span * CAMERA_ORTHO_SIZE_MULT * CAMERA_ZOOM_MAX_MULT)
 	_apply_isometric_rotation()
 
 
@@ -206,9 +206,31 @@ func _get_camera_right_flat() -> Vector3:
 	return right.normalized() if right.length_squared() > MOVE_EPSILON else Vector3.ZERO
 
 
+func get_stream_view_rect() -> Rect2:
+	var viewport_size := get_viewport().get_visible_rect().size
+	var plane_y: float = float(world.top_render_y)
+	var points: Array = [
+		_raycast_to_plane(Vector2(0.0, 0.0), plane_y),
+		_raycast_to_plane(Vector2(viewport_size.x, 0.0), plane_y),
+		_raycast_to_plane(Vector2(viewport_size.x, viewport_size.y), plane_y),
+		_raycast_to_plane(Vector2(0.0, viewport_size.y), plane_y),
+	]
+	var min_x: float = 1e20
+	var max_x: float = -1e20
+	var min_z: float = 1e20
+	var max_z: float = -1e20
+	for point: Vector3 in points:
+		min_x = minf(min_x, point.x)
+		max_x = maxf(max_x, point.x)
+		min_z = minf(min_z, point.z)
+		max_z = maxf(max_z, point.z)
+	return Rect2(Vector2(min_x, min_z), Vector2(max_x - min_x, max_z - min_z))
+
+
 func get_stream_target() -> Vector3:
-	var screen_center := get_viewport().get_visible_rect().size * SCREEN_CENTER_FACTOR
-	return _raycast_to_plane(screen_center, float(world.top_render_y))
+	var rect: Rect2 = get_stream_view_rect()
+	var center_2d: Vector2 = rect.position + rect.size * 0.5
+	return Vector3(center_2d.x, float(world.top_render_y), center_2d.y)
 #endregion
 
 
@@ -244,6 +266,10 @@ func _handle_debug_keys() -> void:
 		debug_overlay.toggle_draw_burden()
 	if is_key_just_pressed(KEY_F4):
 		debug_overlay.toggle_debug_timings()
+	if is_key_just_pressed(KEY_F5):
+		debug_overlay.toggle_streaming_stats()
+	if is_key_just_pressed(KEY_F6):
+		debug_overlay.toggle_streaming_capture()
 
 
 func _handle_render_layer_keys() -> void:
@@ -304,18 +330,24 @@ func _run_frame_updates(dt: float) -> void:
 
 func _run_timed_updates(dt: float) -> void:
 	debug_overlay.run_timed("Main.update_camera", Callable(self, "update_camera").bind(dt))
-	debug_overlay.run_timed("World.update_streaming", Callable(world, "update_streaming").bind(get_stream_target(), dt))
+	var view_rect: Rect2 = get_stream_view_rect()
+	var plane_y: float = float(world.top_render_y)
+	debug_overlay.run_timed("World.update_streaming", Callable(world, "update_streaming").bind(view_rect, plane_y, dt))
 	debug_overlay.run_timed("Main.handle_mouse", Callable(self, "handle_mouse"))
 	debug_overlay.run_timed("Main.update_hover_preview", Callable(self, "update_hover_preview"))
 	debug_overlay.run_timed("Main.update_info_hover", Callable(self, "update_info_hover"))
 	debug_overlay.run_timed("Main.update_hud", Callable(self, "update_hud"))
 	debug_overlay.update_draw_burden()
+	debug_overlay.update_streaming_stats()
+	debug_overlay.update_streaming_capture(dt)
 	debug_overlay.step_world(dt)
 
 
 func _run_direct_updates(dt: float) -> void:
 	update_camera(dt)
-	world.update_streaming(get_stream_target(), dt)
+	var view_rect: Rect2 = get_stream_view_rect()
+	var plane_y: float = float(world.top_render_y)
+	world.update_streaming(view_rect, plane_y, dt)
 	handle_mouse()
 	update_hover_preview()
 	update_info_hover()
@@ -532,10 +564,7 @@ func _enqueue_task_at(x: int, y: int, z: int) -> void:
 
 
 func _is_valid_position(x: int, y: int, z: int) -> bool:
-	return x >= 0 and y >= 0 and z >= 0 \
-		and x < world.world_size_x \
-		and y < world.world_size_y \
-		and z < world.world_size_z
+	return y >= 0 and y < world.world_size_y
 #endregion
 
 
@@ -580,7 +609,8 @@ func _on_resume_pressed() -> void:
 		await get_tree().process_frame
 		world.start_new_world()
 		_set_render_level_base()
-		world.prewarm_render_cache(get_stream_target())
+		var view_rect: Rect2 = get_stream_view_rect()
+		world.prewarm_render_cache(view_rect, float(world.top_render_y))
 		world_started = true
 	close_menu()
 

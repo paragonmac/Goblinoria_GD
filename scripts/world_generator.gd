@@ -45,19 +45,6 @@ func mix_seed(value: int) -> int:
 
 
 #region Chunk Generation
-func seed_all_chunks() -> void:
-	world.chunks.clear()
-	world.chunk_access_tick = 0
-	var chunk_size: int = World.CHUNK_SIZE
-	var max_cx: int = int(floor(float(world.world_size_x) / float(chunk_size)))
-	var max_cy: int = int(floor(float(world.world_size_y) / float(chunk_size)))
-	var max_cz: int = int(floor(float(world.world_size_z) / float(chunk_size)))
-	for cx in range(max_cx):
-		for cy in range(max_cy):
-			for cz in range(max_cz):
-				world.ensure_chunk_generated(Vector3i(cx, cy, cz))
-
-
 func generate_chunk(coord: Vector3i, chunk: World.ChunkDataType) -> void:
 	var chunk_size: int = World.CHUNK_SIZE
 	var base_y: int = coord.y * chunk_size
@@ -87,12 +74,12 @@ func generate_chunk(coord: Vector3i, chunk: World.ChunkDataType) -> void:
 
 
 func prime_spawn_chunks() -> void:
-	var center_x: int = int(world.world_size_x / 2.0)
-	var center_z: int = int(world.world_size_z / 2.0)
+	var center_x: int = world.spawn_coord.x
+	var center_z: int = world.spawn_coord.z
 	var sample_y: int = clampi(world.sea_level - 1, 0, world.world_size_y - 1)
 	for offset in World.WORKER_SPAWN_OFFSETS:
-		var spawn_x: int = clampi(center_x + offset.x, 0, world.world_size_x - 1)
-		var spawn_z: int = clampi(center_z + offset.y, 0, world.world_size_z - 1)
+		var spawn_x: int = center_x + offset.x
+		var spawn_z: int = center_z + offset.y
 		var coord := world.world_to_chunk_coords(spawn_x, sample_y, spawn_z)
 		world.ensure_chunk_generated(coord)
 #endregion

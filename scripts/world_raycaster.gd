@@ -47,7 +47,7 @@ func raycast_block(ray_origin: Vector3, ray_dir: Vector3, max_distance: float) -
 	var distance := 0.0
 
 	while distance < max_distance:
-		if voxel.x >= 0 and voxel.y >= 0 and voxel.z >= 0 and voxel.x < world.world_size_x and voxel.y < world.world_size_y and voxel.z < world.world_size_z:
+		if voxel.y >= 0 and voxel.y < world.world_size_y:
 			if voxel.y <= world.top_render_y and not world.is_block_empty_id(world.get_block(voxel.x, voxel.y, voxel.z)):
 				return {"hit": true, "pos": voxel}
 

@@ -16,6 +16,8 @@ var debug_profiler: DebugProfiler
 var show_profiler: bool = false
 var show_draw_burden: bool = false
 var show_debug_timings: bool = false
+var show_streaming_stats: bool = false
+var streaming_capture_enabled: bool = false
 #endregion
 
 #region UI Elements
@@ -25,10 +27,19 @@ var draw_burden_label: Label
 var draw_rendered_label: Label
 var draw_memory_label: Label
 var debug_timings_label: RichTextLabel
+var streaming_stats_label: Label
 #endregion
 
 #region Constants
 const DEBUG_TIMING_LINES := 12
+const STREAMING_CAPTURE_INTERVAL := 0.25
+#endregion
+
+#region Capture State
+var streaming_capture_timer: float = 0.0
+var streaming_capture_start_ms: int = 0
+var streaming_capture_path := ""
+var streaming_capture_lines: Array = []
 #endregion
 
 
@@ -36,6 +47,7 @@ const DEBUG_TIMING_LINES := 12
 func _ready() -> void:
 	setup_profiler_ui()
 	setup_draw_burden_label()
+	setup_streaming_stats_label()
 	setup_debug_timings_label()
 #endregion
 
@@ -86,6 +98,20 @@ func toggle_debug_timings() -> void:
 		debug_profiler.enabled = true
 	else:
 		debug_profiler.enabled = false
+
+
+func toggle_streaming_stats() -> void:
+	show_streaming_stats = not show_streaming_stats
+	if streaming_stats_label != null:
+		streaming_stats_label.visible = show_streaming_stats
+
+
+func toggle_streaming_capture() -> void:
+	streaming_capture_enabled = not streaming_capture_enabled
+	if streaming_capture_enabled:
+		_start_streaming_capture()
+	else:
+		_stop_streaming_capture()
 #endregion
 
 
@@ -138,23 +164,141 @@ func update_draw_burden() -> void:
 		return
 	if world == null or camera == null:
 		return
-	var stats: Dictionary = world.get_draw_burden_stats()
-	var drawn: int = int(stats.get("drawn", 0))
-	var culled: int = int(stats.get("culled", 0))
-	var percent: float = float(stats.get("percent", 0.0))
-	draw_burden_label.text = "Tris Drawn/Culled: %d/%d (%.1f%%)" % [drawn, culled, percent]
-
-	var rendered_stats: Dictionary = world.get_camera_tris_rendered(camera)
-	var rendered: int = int(rendered_stats.get("rendered", 0))
-	var total: int = int(rendered_stats.get("total", 0))
-	var render_percent: float = float(rendered_stats.get("percent", 0.0))
-	draw_rendered_label.text = "Tris Rendered: %d/%d (%.1f%%)" % [rendered, total, render_percent]
+	var stats: Dictionary = world.get_chunk_draw_stats()
+	var loaded: int = int(stats.get("loaded", 0))
+	var meshed: int = int(stats.get("meshed", 0))
+	var visible: int = int(stats.get("visible", 0))
+	var zone: int = int(stats.get("zone", 0))
+	draw_burden_label.text = "Chunks Loaded/Meshed: %d/%d" % [loaded, meshed]
+	draw_rendered_label.text = "Chunks Visible/Zone: %d/%d" % [visible, zone]
 
 	var static_mem: float = float(Performance.get_monitor(Performance.MEMORY_STATIC))
 	draw_memory_label.text = "Memory: static %.1f MB" % [
 		static_mem / 1048576.0,
 	]
 #endregion
+
+
+func update_streaming_stats() -> void:
+	if not show_streaming_stats:
+		return
+	if streaming_stats_label == null or world == null:
+		return
+	var stats := _collect_streaming_stats()
+	streaming_stats_label.text = "Streaming chunks:%d build:%d pending:%s\nMesh q:%d res:%d act:%d pre:%d\nRadii s:%d r:%d u:%d\nBuffer %d (base %d max %d)" % [
+		int(stats["loaded_chunks"]),
+		int(stats["build_queue"]),
+		"true" if int(stats["stream_pending"]) != 0 else "false",
+		int(stats["mesh_job_queue"]),
+		int(stats["mesh_result_queue"]),
+		int(stats["mesh_job_set"]),
+		int(stats["mesh_prefetch_set"]),
+		int(stats["stream_radius"]),
+		int(stats["render_radius"]),
+		int(stats["unload_radius"]),
+		int(stats["buffer_last"]),
+		int(stats["buffer_base"]),
+		int(stats["buffer_max"]),
+	]
+
+
+func update_streaming_capture(dt: float) -> void:
+	if not streaming_capture_enabled:
+		return
+	if world == null:
+		return
+	streaming_capture_timer += dt
+	if streaming_capture_timer < STREAMING_CAPTURE_INTERVAL:
+		return
+	streaming_capture_timer -= STREAMING_CAPTURE_INTERVAL
+	var stats := _collect_streaming_stats()
+	var cam_pos := Vector3.ZERO
+	if camera != null:
+		cam_pos = camera.global_transform.origin
+	var mem_static: float = float(Performance.get_monitor(Performance.MEMORY_STATIC)) / 1048576.0
+	var now_ms: int = Time.get_ticks_msec() - streaming_capture_start_ms
+	var line := "%d,%.2f,%.2f,%.2f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.2f" % [
+		now_ms,
+		cam_pos.x,
+		cam_pos.y,
+		cam_pos.z,
+		int(stats["loaded_chunks"]),
+		int(stats["build_queue"]),
+		int(stats["stream_pending"]),
+		int(stats["stream_radius"]),
+		int(stats["render_radius"]),
+		int(stats["unload_radius"]),
+		int(stats["buffer_last"]),
+		int(stats["buffer_base"]),
+		int(stats["buffer_max"]),
+		int(stats["mesh_job_queue"]),
+		int(stats["mesh_result_queue"]),
+		int(stats["mesh_job_set"]),
+		int(stats["mesh_prefetch_set"]),
+		mem_static,
+	]
+	streaming_capture_lines.append(line)
+
+
+func _start_streaming_capture() -> void:
+	streaming_capture_timer = 0.0
+	streaming_capture_start_ms = Time.get_ticks_msec()
+	streaming_capture_lines.clear()
+	streaming_capture_path = "user://streaming_capture_%d.csv" % streaming_capture_start_ms
+	streaming_capture_lines.append("t_ms,cam_x,cam_y,cam_z,loaded_chunks,build_queue,stream_pending,stream_radius,render_radius,unload_radius,buffer_last,buffer_base,buffer_max,mesh_job_queue,mesh_result_queue,mesh_job_set,mesh_prefetch_set,mem_static_mb")
+	print("Streaming capture started: %s" % streaming_capture_path)
+
+
+func _stop_streaming_capture() -> void:
+	if streaming_capture_path.is_empty():
+		return
+	var file := FileAccess.open(streaming_capture_path, FileAccess.WRITE)
+	if file == null:
+		push_warning("Streaming capture failed: %s" % streaming_capture_path)
+		return
+	file.store_string("\n".join(streaming_capture_lines))
+	file.flush()
+	print("Streaming capture saved: %s" % streaming_capture_path)
+	streaming_capture_lines.clear()
+	streaming_capture_path = ""
+
+
+func _collect_streaming_stats() -> Dictionary:
+	var stats := {
+		"loaded_chunks": 0,
+		"build_queue": 0,
+		"stream_pending": 0,
+		"stream_radius": 0,
+		"render_radius": 0,
+		"unload_radius": 0,
+		"buffer_base": 0,
+		"buffer_max": 0,
+		"buffer_last": 0,
+		"mesh_job_queue": 0,
+		"mesh_result_queue": 0,
+		"mesh_job_set": 0,
+		"mesh_prefetch_set": 0,
+	}
+	if world == null:
+		return stats
+	stats["loaded_chunks"] = world.chunks.size()
+	if world.streaming != null:
+		var streaming: WorldStreaming = world.streaming
+		stats["build_queue"] = streaming.chunk_build_queue.size()
+		stats["stream_pending"] = 1 if streaming.stream_pending else 0
+		stats["stream_radius"] = streaming.stream_radius_chunks
+		stats["render_radius"] = streaming.render_radius_chunks
+		stats["unload_radius"] = streaming.unload_radius_chunks
+		stats["buffer_base"] = streaming.stream_base_buffer_chunks
+		stats["buffer_max"] = streaming.stream_max_buffer_chunks
+		stats["buffer_last"] = streaming.last_buffer_chunks
+	if world.renderer != null:
+		var mesh_stats: Dictionary = world.renderer.get_mesh_work_stats()
+		stats["mesh_job_queue"] = int(mesh_stats.get("job_queue", 0))
+		stats["mesh_result_queue"] = int(mesh_stats.get("result_queue", 0))
+		stats["mesh_job_set"] = int(mesh_stats.get("job_set", 0))
+		stats["mesh_prefetch_set"] = int(mesh_stats.get("prefetch_set", 0))
+	return stats
 
 
 #region UI Setup
@@ -215,6 +359,22 @@ func setup_draw_burden_label() -> void:
 	draw_memory_label.text = ""
 	draw_memory_label.visible = show_draw_burden
 	add_child(draw_memory_label)
+
+
+func setup_streaming_stats_label() -> void:
+	streaming_stats_label = Label.new()
+	streaming_stats_label.name = "StreamingStatsLabel"
+	streaming_stats_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	streaming_stats_label.vertical_alignment = VERTICAL_ALIGNMENT_TOP
+	streaming_stats_label.anchor_left = 0.0
+	streaming_stats_label.anchor_right = 0.0
+	streaming_stats_label.offset_left = 10.0
+	streaming_stats_label.offset_top = 10.0
+	streaming_stats_label.offset_right = 380.0
+	streaming_stats_label.offset_bottom = 86.0
+	streaming_stats_label.text = ""
+	streaming_stats_label.visible = show_streaming_stats
+	add_child(streaming_stats_label)
 
 
 func setup_debug_timings_label() -> void:

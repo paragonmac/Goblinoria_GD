@@ -59,6 +59,7 @@ var sea_level := DUMMY_INT
 var top_render_y := DUMMY_INT
 var vertical_scroll := DUMMY_INT
 var world_seed: int = 0
+var spawn_coord := Vector3i.ZERO
 #endregion
 
 #region Chunk State
@@ -112,6 +113,7 @@ func init_world(seed_world_flag: bool = true) -> void:
 	chunk_access_tick = 0
 	sea_level = max(world_size_y - SEA_LEVEL_DEPTH, SEA_LEVEL_MIN)
 	top_render_y = sea_level
+	spawn_coord = Vector3i(0, sea_level, 0)
 	if renderer != null:
 		renderer.reset_stats()
 	reset_streaming_state()
@@ -119,11 +121,13 @@ func init_world(seed_world_flag: bool = true) -> void:
 	if seed_world_flag:
 		if world_seed == 0:
 			world_seed = generator.generate_world_seed()
-		generator.seed_all_chunks()
+		generator.prime_spawn_chunks()
 		spawn_initial_workers()
 
 
 func start_new_world(seed_value: int = -1) -> void:
+	if save_load != null:
+		save_load.clear_world_dir()
 	init_world(false)
 	world_seed = seed_value if seed_value >= 0 else generator.generate_world_seed()
 	generator.prime_spawn_chunks()
@@ -144,13 +148,24 @@ func load_world(path: String) -> bool:
 #region Chunk Utilities
 func world_to_chunk_coords(x: int, y: int, z: int) -> Vector3i:
 	return Vector3i(
-		int(floor(float(x) / float(CHUNK_SIZE))),
-		int(floor(float(y) / float(CHUNK_SIZE))),
-		int(floor(float(z) / float(CHUNK_SIZE)))
+		floor_div(x, CHUNK_SIZE),
+		floor_div(y, CHUNK_SIZE),
+		floor_div(z, CHUNK_SIZE)
 	)
 
 func chunk_to_local_coords(x: int, y: int, z: int) -> Vector3i:
-	return Vector3i(x % CHUNK_SIZE, y % CHUNK_SIZE, z % CHUNK_SIZE)
+	return Vector3i(
+		positive_mod(x, CHUNK_SIZE),
+		positive_mod(y, CHUNK_SIZE),
+		positive_mod(z, CHUNK_SIZE)
+	)
+
+func floor_div(a: int, b: int) -> int:
+	return int(floor(float(a) / float(b)))
+
+func positive_mod(a: int, b: int) -> int:
+	var r := a % b
+	return r + b if r < 0 else r
 
 func chunk_index(lx: int, ly: int, lz: int) -> int:
 	return (lz * CHUNK_SIZE + ly) * CHUNK_SIZE + lx
@@ -173,8 +188,21 @@ func ensure_chunk_generated(coord: Vector3i) -> ChunkDataType:
 	var chunk := ensure_chunk(coord)
 	if chunk.generated:
 		return chunk
+	if save_load != null and save_load.load_chunk_into(coord, chunk):
+		return chunk
 	generator.generate_chunk(coord, chunk)
 	return chunk
+
+
+func unload_chunk(coord: Vector3i) -> void:
+	var chunk: ChunkDataType = get_chunk(coord)
+	if chunk == null:
+		return
+	if chunk.dirty and save_load != null:
+		save_load.save_chunk_current(coord, chunk)
+	if renderer != null:
+		renderer.clear_chunk(coord)
+	chunks.erase(coord)
 
 func touch_chunk(chunk: ChunkDataType) -> void:
 	chunk_access_tick += 1
@@ -182,10 +210,8 @@ func touch_chunk(chunk: ChunkDataType) -> void:
 
 
 func is_chunk_coord_valid(coord: Vector3i) -> bool:
-	var max_cx: int = int(floor(float(world_size_x) / float(CHUNK_SIZE)))
 	var max_cy: int = int(floor(float(world_size_y) / float(CHUNK_SIZE)))
-	var max_cz: int = int(floor(float(world_size_z) / float(CHUNK_SIZE)))
-	return coord.x >= 0 and coord.x < max_cx and coord.y >= 0 and coord.y < max_cy and coord.z >= 0 and coord.z < max_cz
+	return coord.y >= 0 and coord.y < max_cy
 
 
 func ensure_chunk_buffer_for_pos(pos: Vector3i) -> void:
@@ -219,9 +245,7 @@ func debug_verify_chunk(coord: Vector3i) -> bool:
 
 
 func set_block_raw(x: int, y: int, z: int, value: int, mark_dirty: bool) -> void:
-	if x < 0 or y < 0 or z < 0:
-		return
-	if x >= world_size_x or y >= world_size_y or z >= world_size_z:
+	if y < 0 or y >= world_size_y:
 		return
 	var coord := world_to_chunk_coords(x, y, z)
 	var local := chunk_to_local_coords(x, y, z)
@@ -240,9 +264,7 @@ func set_block_raw(x: int, y: int, z: int, value: int, mark_dirty: bool) -> void
 
 #region Block Access
 func get_block(x: int, y: int, z: int) -> int:
-	if x < 0 or y < 0 or z < 0:
-		return BLOCK_ID_AIR
-	if x >= world_size_x or y >= world_size_y or z >= world_size_z:
+	if y < 0 or y >= world_size_y:
 		return BLOCK_ID_AIR
 	var coord := world_to_chunk_coords(x, y, z)
 	var chunk: ChunkDataType = ensure_chunk_generated(coord)
@@ -252,9 +274,7 @@ func get_block(x: int, y: int, z: int) -> int:
 
 
 func get_block_no_generate(x: int, y: int, z: int) -> int:
-	if x < 0 or y < 0 or z < 0:
-		return BLOCK_ID_AIR
-	if x >= world_size_x or y >= world_size_y or z >= world_size_z:
+	if y < 0 or y >= world_size_y:
 		return BLOCK_ID_AIR
 	var coord := world_to_chunk_coords(x, y, z)
 	var chunk: ChunkDataType = get_chunk(coord)
@@ -265,9 +285,7 @@ func get_block_no_generate(x: int, y: int, z: int) -> int:
 
 
 func set_block(x: int, y: int, z: int, value: int) -> void:
-	if x < 0 or y < 0 or z < 0:
-		return
-	if x >= world_size_x or y >= world_size_y or z >= world_size_z:
+	if y < 0 or y >= world_size_y:
 		return
 	if value < 0 or value >= BlockRegistryScript.TABLE_SIZE:
 		return
@@ -324,6 +342,12 @@ func get_draw_burden_stats() -> Dictionary:
 	if renderer == null:
 		return {"drawn": 0, "culled": 0, "percent": 0.0}
 	return renderer.get_draw_burden_stats()
+
+
+func get_chunk_draw_stats() -> Dictionary:
+	if renderer == null:
+		return {"loaded": 0, "meshed": 0, "visible": 0, "zone": 0}
+	return renderer.get_chunk_draw_stats()
 
 
 func get_camera_tris_rendered(camera: Camera3D) -> Dictionary:
@@ -402,28 +426,30 @@ func reset_streaming_state() -> void:
 		streaming.reset_state()
 
 
-func update_streaming(camera_pos: Vector3, dt: float) -> void:
+func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
 	if streaming != null:
-		streaming.update_streaming(camera_pos, dt)
+		streaming.update_streaming(view_rect, plane_y, dt)
 	if renderer != null:
-		renderer.update_render_height_anchor(camera_pos)
+		var center_x: float = view_rect.position.x + view_rect.size.x * 0.5
+		var center_z: float = view_rect.position.y + view_rect.size.y * 0.5
+		renderer.update_render_height_anchor(Vector3(center_x, plane_y, center_z))
 
 
-func prewarm_render_cache(stream_target: Vector3) -> void:
+func prewarm_render_cache(view_rect: Rect2, plane_y: float) -> void:
 	if streaming == null or renderer == null:
 		return
-	streaming.warmup_streaming(stream_target)
+	streaming.warmup_streaming(view_rect, plane_y)
 	renderer.flush_mesh_jobs(true)
 #endregion
 
 
 #region Workers
 func spawn_initial_workers() -> void:
-	var center_x: int = int(world_size_x / 2.0)
-	var center_z: int = int(world_size_z / 2.0)
+	var center_x: int = spawn_coord.x
+	var center_z: int = spawn_coord.z
 	for offset in WORKER_SPAWN_OFFSETS:
-		var spawn_x: int = clampi(center_x + offset.x, 0, world_size_x - 1)
-		var spawn_z: int = clampi(center_z + offset.y, 0, world_size_z - 1)
+		var spawn_x: int = center_x + offset.x
+		var spawn_z: int = center_z + offset.y
 		var surface_y := find_surface_y(spawn_x, spawn_z)
 		var worker := Worker.new()
 		worker.position = Vector3(spawn_x, surface_y + WORKER_SPAWN_HEIGHT_OFFSET, spawn_z)
@@ -476,25 +502,28 @@ func set_top_render_y(new_y: int) -> int:
 
 
 func get_render_height_bounds() -> Dictionary:
-	var chunk_size: int = CHUNK_SIZE
-	var max_cx: int = int(floor(float(world_size_x) / float(chunk_size))) - 1
-	var max_cz: int = int(floor(float(world_size_z) / float(chunk_size))) - 1
-	var min_x := 0
-	var max_x := max_cx
-	var min_z := 0
-	var max_z := max_cz
 	if streaming != null and streaming.stream_min_x <= streaming.stream_max_x and streaming.stream_min_z <= streaming.stream_max_z:
-		min_x = streaming.stream_min_x
-		max_x = streaming.stream_max_x
-		min_z = streaming.stream_min_z
-		max_z = streaming.stream_max_z
+		var min_x := streaming.stream_min_x
+		var max_x := streaming.stream_max_x
+		var min_z := streaming.stream_min_z
+		var max_z := streaming.stream_max_z
+		return {"min_x": min_x, "max_x": max_x, "min_z": min_z, "max_z": max_z}
+	var anchor := get_render_height_anchor()
+	var radius := 8
+	if streaming != null:
+		radius = streaming.stream_radius_base
+	var anchor_coord := world_to_chunk_coords(int(floor(anchor.x)), top_render_y, int(floor(anchor.z)))
+	var min_x := anchor_coord.x - radius
+	var max_x := anchor_coord.x + radius
+	var min_z := anchor_coord.z - radius
+	var max_z := anchor_coord.z + radius
 	return {"min_x": min_x, "max_x": max_x, "min_z": min_z, "max_z": max_z}
 
 
 func get_render_height_anchor() -> Vector3:
 	if streaming != null and streaming.last_stream_target_valid:
 		return streaming.last_stream_target
-	return Vector3(world_size_x * 0.5, float(top_render_y), world_size_z * 0.5)
+	return Vector3(0.0, float(top_render_y), 0.0)
 
 
 func is_visible_at_level(y_value: float) -> bool:
