@@ -34,6 +34,7 @@ var streaming_stats_label: Label
 const DEBUG_TIMING_LINES := 12
 const STREAMING_CAPTURE_INTERVAL := 0.25
 const DEBUG_POLL_INTERVAL_SEC := 0.25
+const MAP_EXPORT_RADIUS := 64
 #endregion
 
 #region Capture State
@@ -529,4 +530,81 @@ func dump_ramp_counts() -> void:
 		samples[World.INNER_SOUTHEAST_ID],
 		samples[World.INNER_NORTHWEST_ID],
 		samples[World.INNER_NORTHEAST_ID],
+	])
+
+
+func export_map_snapshot(radius: int = MAP_EXPORT_RADIUS, loaded_only: bool = true) -> void:
+	if world == null:
+		return
+	var center: Vector3i = world.spawn_coord
+	var stamp: int = Time.get_ticks_msec()
+	var base_path := "user://map_export_%d" % stamp
+	var height_path := "%s_height.csv" % base_path
+	var ramp_path := "%s_ramps.csv" % base_path
+
+	var height_file := FileAccess.open(height_path, FileAccess.WRITE)
+	if height_file == null:
+		push_warning("Map export failed: %s" % height_path)
+		return
+	height_file.store_line("x,z,loaded,surface_y,top_block_id")
+
+	var ramp_file := FileAccess.open(ramp_path, FileAccess.WRITE)
+	if ramp_file == null:
+		push_warning("Map export failed: %s" % ramp_path)
+		ramp_path = ""
+
+	var loaded_columns := {}
+	if loaded_only:
+		for coord_key in world.chunks.keys():
+			var coord: Vector3i = coord_key
+			loaded_columns[Vector2i(coord.x, coord.z)] = true
+
+	var chunk_size: int = World.CHUNK_SIZE
+	var min_x: int = center.x - radius
+	var max_x: int = center.x + radius
+	var min_z: int = center.z - radius
+	var max_z: int = center.z + radius
+	for x in range(min_x, max_x + 1):
+		var cx: int = world.floor_div(x, chunk_size)
+		for z in range(min_z, max_z + 1):
+			var cz: int = world.floor_div(z, chunk_size)
+			var loaded := true
+			if loaded_only:
+				loaded = loaded_columns.has(Vector2i(cx, cz))
+			var surface_y := -1
+			var top_id := World.BLOCK_ID_AIR
+			if loaded:
+				for y in range(world.world_size_y - 1, -1, -1):
+					var block_id: int = world.get_block_no_generate(x, y, z)
+					if block_id != World.BLOCK_ID_AIR:
+						surface_y = y
+						top_id = block_id
+						break
+			height_file.store_line("%d,%d,%d,%d,%d" % [x, z, 1 if loaded else 0, surface_y, top_id])
+
+	if ramp_file != null:
+		ramp_file.store_line("x,y,z,ramp_id")
+		for coord_key in world.chunks.keys():
+			var coord: Vector3i = coord_key
+			var chunk: ChunkData = world.chunks[coord]
+			if chunk == null or not chunk.generated:
+				continue
+			var blocks: PackedByteArray = chunk.blocks
+			for idx in range(blocks.size()):
+				var block_id: int = blocks[idx]
+				if not world.is_ramp_block_id(block_id):
+					continue
+				var lx: int = idx % chunk_size
+				var ly: int = floori(float(idx) / float(chunk_size)) % chunk_size
+				var lz: int = floori(float(idx) / float(chunk_size * chunk_size))
+				var wx: int = coord.x * chunk_size + lx
+				var wy: int = coord.y * chunk_size + ly
+				var wz: int = coord.z * chunk_size + lz
+				ramp_file.store_line("%d,%d,%d,%d" % [wx, wy, wz, block_id])
+		ramp_file.flush()
+
+	height_file.flush()
+	print("Map export saved: %s%s" % [
+		height_path,
+		"" if ramp_path.is_empty() else " | " + ramp_path,
 	])

@@ -276,6 +276,8 @@ func _handle_debug_keys() -> void:
 	if is_key_just_pressed(KEY_F8):
 		if world != null and world.renderer != null:
 			world.renderer.toggle_debug_normals()
+	if is_key_just_pressed(KEY_F9):
+		debug_overlay.export_map_snapshot()
 
 
 func _handle_render_layer_keys() -> void:

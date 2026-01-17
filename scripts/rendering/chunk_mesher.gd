@@ -135,7 +135,8 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 					below_id = neighbor_block(neighbors.get("y_neg", null), chunk_size, lx, chunk_size - 1, lz, air_id)
 				var color_id := block_id
 				if is_ramp_id(block_id, ramp_table) and below_id != air_id:
-					color_id = below_id
+					if not _is_inner_corner_id(block_id):
+						color_id = below_id
 				var color := block_color_from_table(color_table, color_id, wx, wy, wz)
 
 				var forward_id := air_id
@@ -167,10 +168,10 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 				var back_occluding_ramp := is_occluding_id(back_id, solid_table, ramp_table)
 				var right_occluding_ramp := is_occluding_id(right_id, solid_table, ramp_table)
 				var left_occluding_ramp := is_occluding_id(left_id, solid_table, ramp_table)
-				var forward_occluding_solid := is_solid_id(forward_id, solid_table)
-				var back_occluding_solid := is_solid_id(back_id, solid_table)
-				var right_occluding_solid := is_solid_id(right_id, solid_table)
-				var left_occluding_solid := is_solid_id(left_id, solid_table)
+				var forward_occluding := is_face_occluding(forward_id, solid_table, ramp_table, Vector3.BACK)
+				var back_occluding := is_face_occluding(back_id, solid_table, ramp_table, Vector3.FORWARD)
+				var right_occluding := is_face_occluding(right_id, solid_table, ramp_table, Vector3.LEFT)
+				var left_occluding := is_face_occluding(left_id, solid_table, ramp_table, Vector3.RIGHT)
 
 				if is_ramp_id(block_id, ramp_table):
 					var counts := add_ramp_faces(
@@ -206,25 +207,25 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 				else:
 					occluded_faces += 1
 
-				if not forward_occluding_solid:
+				if not forward_occluding:
 					add_face(vertices, normals, colors, uv2s, base, Vector3.FORWARD, color, block_center_y, 0.0)
 					visible_faces += 1
 				else:
 					occluded_faces += 1
 
-				if not back_occluding_solid:
+				if not back_occluding:
 					add_face(vertices, normals, colors, uv2s, base, Vector3.BACK, color, block_center_y, 0.0)
 					visible_faces += 1
 				else:
 					occluded_faces += 1
 
-				if not right_occluding_solid:
+				if not right_occluding:
 					add_face(vertices, normals, colors, uv2s, base, Vector3.RIGHT, color, block_center_y, 0.0)
 					visible_faces += 1
 				else:
 					occluded_faces += 1
 
-				if not left_occluding_solid:
+				if not left_occluding:
 					add_face(vertices, normals, colors, uv2s, base, Vector3.LEFT, color, block_center_y, 0.0)
 					visible_faces += 1
 				else:
@@ -347,6 +348,34 @@ func is_occluding_id(block_id: int, solid_table: PackedByteArray, ramp_table: Pa
 	if is_ramp_id(block_id, ramp_table):
 		return false
 	return is_solid_id(block_id, solid_table)
+
+
+func is_face_occluding(block_id: int, solid_table: PackedByteArray, ramp_table: PackedByteArray, neighbor_face: Vector3) -> bool:
+	if is_ramp_id(block_id, ramp_table):
+		return _ramp_side_is_full(block_id, neighbor_face)
+	return is_solid_id(block_id, solid_table)
+
+
+func _ramp_side_is_full(block_id: int, side: Vector3) -> bool:
+	var h := FACE_HALF_SIZE
+	var heights := _ramp_corner_heights(block_id, h)
+	var a: float
+	var b: float
+	if side == Vector3.BACK:
+		a = float(heights["nw"])
+		b = float(heights["ne"])
+	elif side == Vector3.FORWARD:
+		a = float(heights["sw"])
+		b = float(heights["se"])
+	elif side == Vector3.RIGHT:
+		a = float(heights["ne"])
+		b = float(heights["se"])
+	elif side == Vector3.LEFT:
+		a = float(heights["nw"])
+		b = float(heights["sw"])
+	else:
+		return false
+	return a > 0.0 and b > 0.0
 #endregion
 
 
@@ -411,12 +440,15 @@ func add_quad_with_normal(
 	expected_normal: Vector3,
 	color: Color,
 	block_center_y: float,
-	top_flag: float
+	top_flag: float,
+	flip_winding: bool = false
 ) -> void:
 	var normal := (v2 - v1).cross(v3 - v1).normalized()
 	var reverse := normal.dot(expected_normal) < 0.0
 	if reverse:
 		normal = -normal
+	if flip_winding:
+		reverse = not reverse
 	var shade := face_shade(normal)
 	var shaded := Color(color.r * shade, color.g * shade, color.b * shade, COLOR_MAX)
 	var uv2 := Vector2(block_center_y, top_flag)
@@ -463,6 +495,42 @@ func add_tri_with_normal(
 	uv2s.append_array([uv2, uv2, uv2])
 
 
+func add_tri_double_sided(
+	vertices: PackedVector3Array,
+	normals: PackedVector3Array,
+	colors: PackedColorArray,
+	uv2s: PackedVector2Array,
+	v1: Vector3,
+	v2: Vector3,
+	v3: Vector3,
+	expected_normal: Vector3,
+	color: Color,
+	block_center_y: float,
+	top_flag: float,
+	flip_winding: bool = false
+) -> void:
+	add_tri_with_normal(vertices, normals, colors, uv2s, v1, v2, v3, expected_normal, color, block_center_y, top_flag, flip_winding)
+	add_tri_with_normal(vertices, normals, colors, uv2s, v1, v2, v3, expected_normal, color, block_center_y, top_flag, not flip_winding)
+
+
+func add_quad_double_sided(
+	vertices: PackedVector3Array,
+	normals: PackedVector3Array,
+	colors: PackedColorArray,
+	uv2s: PackedVector2Array,
+	v1: Vector3,
+	v2: Vector3,
+	v3: Vector3,
+	v4: Vector3,
+	expected_normal: Vector3,
+	color: Color,
+	block_center_y: float,
+	top_flag: float
+) -> void:
+	add_quad_with_normal(vertices, normals, colors, uv2s, v1, v2, v3, v4, expected_normal, color, block_center_y, top_flag, false)
+	add_quad_with_normal(vertices, normals, colors, uv2s, v1, v2, v3, v4, expected_normal, color, block_center_y, top_flag, true)
+
+
 func add_ramp_faces(
 	vertices: PackedVector3Array,
 	normals: PackedVector3Array,
@@ -504,34 +572,34 @@ func add_ramp_faces(
 		var flip_inner_winding := block_id == 108 or block_id == 109 or block_id == 111
 		match low_corner:
 			"sw":
-				add_tri_with_normal(vertices, normals, colors, uv2s, sw, nw, ne, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
-				add_tri_with_normal(vertices, normals, colors, uv2s, sw, ne, se, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
+				add_tri_double_sided(vertices, normals, colors, uv2s, sw, nw, ne, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
+				add_tri_double_sided(vertices, normals, colors, uv2s, sw, ne, se, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
 			"se":
-				add_tri_with_normal(vertices, normals, colors, uv2s, se, ne, nw, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
-				add_tri_with_normal(vertices, normals, colors, uv2s, se, nw, sw, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
+				add_tri_double_sided(vertices, normals, colors, uv2s, se, ne, nw, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
+				add_tri_double_sided(vertices, normals, colors, uv2s, se, nw, sw, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
 			"nw":
-				add_tri_with_normal(vertices, normals, colors, uv2s, nw, ne, se, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
-				add_tri_with_normal(vertices, normals, colors, uv2s, nw, se, sw, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
+				add_tri_double_sided(vertices, normals, colors, uv2s, nw, ne, se, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
+				add_tri_double_sided(vertices, normals, colors, uv2s, nw, se, sw, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
 			"ne":
-				add_tri_with_normal(vertices, normals, colors, uv2s, ne, nw, sw, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
-				add_tri_with_normal(vertices, normals, colors, uv2s, ne, sw, se, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
+				add_tri_double_sided(vertices, normals, colors, uv2s, ne, nw, sw, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
+				add_tri_double_sided(vertices, normals, colors, uv2s, ne, sw, se, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
 	else:
 		# Regular ramps use quad rendering, except ramp_se which needs flipped cull.
 		if block_id == 106:
-			add_tri_with_normal(vertices, normals, colors, uv2s, nw, se, sw, Vector3.UP, color, block_center_y, top_flag, true)
-			add_tri_with_normal(vertices, normals, colors, uv2s, nw, ne, se, Vector3.UP, color, block_center_y, top_flag, true)
+			add_tri_double_sided(vertices, normals, colors, uv2s, nw, se, sw, Vector3.UP, color, block_center_y, top_flag, true)
+			add_tri_double_sided(vertices, normals, colors, uv2s, nw, ne, se, Vector3.UP, color, block_center_y, top_flag, true)
 		else:
-			add_quad_with_normal(vertices, normals, colors, uv2s, nw, sw, se, ne, Vector3.UP, color, block_center_y, top_flag)
+			add_quad_double_sided(vertices, normals, colors, uv2s, nw, sw, se, ne, Vector3.UP, color, block_center_y, top_flag)
 	if above_occluding:
-		counts["occluded"] += 1
+		counts["occluded"] += 2
 	else:
-		counts["visible"] += 1
+		counts["visible"] += 2
 
 	if below_occluding:
-		counts["occluded"] += 1
+		counts["occluded"] += 2
 	else:
-		add_quad_with_normal(vertices, normals, colors, uv2s, bnw, bne, bse, bsw, Vector3.DOWN, color, block_center_y, 0.0)
-		counts["visible"] += 1
+		add_quad_double_sided(vertices, normals, colors, uv2s, bnw, bne, bse, bsw, Vector3.DOWN, color, block_center_y, 0.0)
+		counts["visible"] += 2
 
 	var north_counts := _add_ramp_side(vertices, normals, colors, uv2s, Vector3.BACK, bnw, bne, nw, ne, color, block_center_y, north_occluding)
 	var south_counts := _add_ramp_side(vertices, normals, colors, uv2s, Vector3.FORWARD, bsw, bse, sw, se, color, block_center_y, south_occluding)
@@ -559,7 +627,7 @@ func _add_ramp_side(
 ) -> Dictionary:
 	var counts := {"visible": 0, "occluded": 0}
 	if neighbor_occluding:
-		counts["occluded"] = 1
+		counts["occluded"] = 2
 		return counts
 	var bottom_y := bottom_a.y
 	var top_a_flat := is_equal_approx(top_a.y, bottom_y)
@@ -567,15 +635,15 @@ func _add_ramp_side(
 	if top_a_flat and top_b_flat:
 		return counts
 	if top_a_flat and not top_b_flat:
-		add_tri_with_normal(vertices, normals, colors, uv2s, bottom_a, bottom_b, top_b, expected_normal, color, block_center_y, 0.0)
-		counts["visible"] = 1
+		add_tri_double_sided(vertices, normals, colors, uv2s, bottom_a, bottom_b, top_b, expected_normal, color, block_center_y, 0.0)
+		counts["visible"] = 2
 		return counts
 	if top_b_flat and not top_a_flat:
-		add_tri_with_normal(vertices, normals, colors, uv2s, bottom_a, bottom_b, top_a, expected_normal, color, block_center_y, 0.0)
-		counts["visible"] = 1
+		add_tri_double_sided(vertices, normals, colors, uv2s, bottom_a, bottom_b, top_a, expected_normal, color, block_center_y, 0.0)
+		counts["visible"] = 2
 		return counts
-	add_quad_with_normal(vertices, normals, colors, uv2s, bottom_a, bottom_b, top_b, top_a, expected_normal, color, block_center_y, 0.0)
-	counts["visible"] = 1
+	add_quad_double_sided(vertices, normals, colors, uv2s, bottom_a, bottom_b, top_b, top_a, expected_normal, color, block_center_y, 0.0)
+	counts["visible"] = 2
 	return counts
 
 

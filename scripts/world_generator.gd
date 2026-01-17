@@ -18,6 +18,8 @@ const LARGE_AMPLITUDE := 14
 const MACRO_FLAT_CUTOFF := 0.8
 const MACRO_SMALL_CUTOFF := 0.96
 const MAX_HEIGHT_AMPLITUDE := LARGE_AMPLITUDE
+const RAMP_MIN_NEIGHBOR_MATCH := 1
+const INNER_RAMP_MIN_NEIGHBOR_MATCH := 0
 # Minimum terrain feature size - heights are sampled on this grid and interpolated
 # This prevents isolated holes smaller than this size
 # Smaller values = more varied terrain with corner ramps, larger = smoother slopes
@@ -361,6 +363,18 @@ func _apply_ramp_blocks(coord: Vector3i, chunk: ChunkData) -> void:
 			var ramp_id: int = result["ramp_id"]
 			if ramp_id < 0:
 				continue
+			var low_corner := _inner_ramp_low_corner(ramp_id)
+			if not low_corner.is_empty():
+				var min_h := mini(mini(h_nw, h_ne), mini(h_sw, h_se))
+				if not _inner_ramp_low_edges_clear(wx, wz, low_corner, min_h):
+					continue
+			var is_outer_corner := _is_outer_corner_id(ramp_id)
+			var require_same_id := low_corner.is_empty() and not is_outer_corner
+			var min_matches := RAMP_MIN_NEIGHBOR_MATCH
+			if is_outer_corner:
+				min_matches = 0
+			if not _ramp_has_neighbor_support(wx, wz, ramp_id, h_nw, h_ne, h_sw, h_se, require_same_id, low_corner, min_matches):
+				continue
 			var ramp_y: int = result["ramp_y"]
 			if ramp_y < base_y or ramp_y >= base_y + chunk_size:
 				continue
@@ -396,6 +410,18 @@ func _apply_ramp_blocks_with_noise(
 			var ramp_id: int = result["ramp_id"]
 			if ramp_id < 0:
 				continue
+			var low_corner := _inner_ramp_low_corner(ramp_id)
+			if not low_corner.is_empty():
+				var min_h := mini(mini(h_nw, h_ne), mini(h_sw, h_se))
+				if not _inner_ramp_low_edges_clear_with_noise(wx, wz, low_corner, min_h, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise):
+					continue
+			var is_outer_corner := _is_outer_corner_id(ramp_id)
+			var require_same_id := low_corner.is_empty() and not is_outer_corner
+			var min_matches := RAMP_MIN_NEIGHBOR_MATCH
+			if is_outer_corner:
+				min_matches = 0
+			if not _ramp_has_neighbor_support_with_noise(wx, wz, ramp_id, h_nw, h_ne, h_sw, h_se, require_same_id, low_corner, min_matches, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise):
+				continue
 			var ramp_y: int = result["ramp_y"]
 			if ramp_y < base_y or ramp_y >= base_y + chunk_size:
 				continue
@@ -430,6 +456,191 @@ func _height_at_with_noise(
 	var h1 := lerpf(h01, h11, frac_x)
 	var height := lerpf(h0, h1, frac_z)
 	return clampi(int(round(height)), 0, world_size_y - 1)
+
+
+func _ramp_has_neighbor_support(wx: int, wz: int, ramp_id: int, h_nw: int, h_ne: int, h_sw: int, h_se: int, require_same_id: bool, low_corner: String, min_matches: int) -> bool:
+	var matches := 0
+	var w_nw := _height_at(wx - 1, wz)
+	var w_sw := _height_at(wx - 1, wz + 1)
+	var w_result := _get_marching_squares_ramp(w_nw, h_nw, w_sw, h_sw)
+	var w_id := int(w_result.get("ramp_id", -1))
+	if w_id >= 0 and (not require_same_id or w_id == ramp_id):
+		matches += 1
+	var e_ne := _height_at(wx + 2, wz)
+	var e_se := _height_at(wx + 2, wz + 1)
+	var e_result := _get_marching_squares_ramp(h_ne, e_ne, h_se, e_se)
+	var e_id := int(e_result.get("ramp_id", -1))
+	if e_id >= 0 and (not require_same_id or e_id == ramp_id):
+		matches += 1
+	var n_nw := _height_at(wx, wz - 1)
+	var n_ne := _height_at(wx + 1, wz - 1)
+	var n_result := _get_marching_squares_ramp(n_nw, n_ne, h_nw, h_ne)
+	var n_id := int(n_result.get("ramp_id", -1))
+	if n_id >= 0 and (not require_same_id or n_id == ramp_id):
+		matches += 1
+	var s_sw := _height_at(wx, wz + 2)
+	var s_se := _height_at(wx + 1, wz + 2)
+	var s_result := _get_marching_squares_ramp(h_sw, h_se, s_sw, s_se)
+	var s_id := int(s_result.get("ramp_id", -1))
+	if s_id >= 0 and (not require_same_id or s_id == ramp_id):
+		matches += 1
+	if not low_corner.is_empty():
+		var low_matches := 0
+		match low_corner:
+			"sw":
+				if w_id >= 0:
+					low_matches += 1
+				if s_id >= 0:
+					low_matches += 1
+			"se":
+				if e_id >= 0:
+					low_matches += 1
+				if s_id >= 0:
+					low_matches += 1
+			"nw":
+				if w_id >= 0:
+					low_matches += 1
+				if n_id >= 0:
+					low_matches += 1
+			"ne":
+				if e_id >= 0:
+					low_matches += 1
+				if n_id >= 0:
+					low_matches += 1
+		return low_matches >= INNER_RAMP_MIN_NEIGHBOR_MATCH
+	return matches >= min_matches
+
+
+func _ramp_has_neighbor_support_with_noise(
+	wx: int,
+	wz: int,
+	ramp_id: int,
+	h_nw: int,
+	h_ne: int,
+	h_sw: int,
+	h_se: int,
+	require_same_id: bool,
+	low_corner: String,
+	min_matches: int,
+	sea_level: int,
+	world_size_y: int,
+	flat_noise: FastNoiseLite,
+	small_noise: FastNoiseLite,
+	large_noise: FastNoiseLite,
+	macro_noise: FastNoiseLite
+) -> bool:
+	var matches := 0
+	var w_nw := _height_at_with_noise(wx - 1, wz, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise)
+	var w_sw := _height_at_with_noise(wx - 1, wz + 1, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise)
+	var w_result := _get_marching_squares_ramp(w_nw, h_nw, w_sw, h_sw)
+	var w_id := int(w_result.get("ramp_id", -1))
+	if w_id >= 0 and (not require_same_id or w_id == ramp_id):
+		matches += 1
+	var e_ne := _height_at_with_noise(wx + 2, wz, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise)
+	var e_se := _height_at_with_noise(wx + 2, wz + 1, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise)
+	var e_result := _get_marching_squares_ramp(h_ne, e_ne, h_se, e_se)
+	var e_id := int(e_result.get("ramp_id", -1))
+	if e_id >= 0 and (not require_same_id or e_id == ramp_id):
+		matches += 1
+	var n_nw := _height_at_with_noise(wx, wz - 1, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise)
+	var n_ne := _height_at_with_noise(wx + 1, wz - 1, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise)
+	var n_result := _get_marching_squares_ramp(n_nw, n_ne, h_nw, h_ne)
+	var n_id := int(n_result.get("ramp_id", -1))
+	if n_id >= 0 and (not require_same_id or n_id == ramp_id):
+		matches += 1
+	var s_sw := _height_at_with_noise(wx, wz + 2, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise)
+	var s_se := _height_at_with_noise(wx + 1, wz + 2, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise)
+	var s_result := _get_marching_squares_ramp(h_sw, h_se, s_sw, s_se)
+	var s_id := int(s_result.get("ramp_id", -1))
+	if s_id >= 0 and (not require_same_id or s_id == ramp_id):
+		matches += 1
+	if not low_corner.is_empty():
+		var low_matches := 0
+		match low_corner:
+			"sw":
+				if w_id >= 0:
+					low_matches += 1
+				if s_id >= 0:
+					low_matches += 1
+			"se":
+				if e_id >= 0:
+					low_matches += 1
+				if s_id >= 0:
+					low_matches += 1
+			"nw":
+				if w_id >= 0:
+					low_matches += 1
+				if n_id >= 0:
+					low_matches += 1
+			"ne":
+				if e_id >= 0:
+					low_matches += 1
+				if n_id >= 0:
+					low_matches += 1
+		return low_matches >= INNER_RAMP_MIN_NEIGHBOR_MATCH
+	return matches >= min_matches
+
+
+func _inner_ramp_low_corner(ramp_id: int) -> String:
+	match ramp_id:
+		World.INNER_SOUTHWEST_ID:
+			return "sw"
+		World.INNER_SOUTHEAST_ID:
+			return "se"
+		World.INNER_NORTHWEST_ID:
+			return "nw"
+		World.INNER_NORTHEAST_ID:
+			return "ne"
+		_:
+			return ""
+
+
+func _inner_ramp_low_edges_clear(wx: int, wz: int, low_corner: String, min_h: int) -> bool:
+	match low_corner:
+		"sw":
+			return _height_at(wx - 1, wz + 1) <= min_h and _height_at(wx, wz + 2) <= min_h
+		"se":
+			return _height_at(wx + 2, wz + 1) <= min_h and _height_at(wx + 1, wz + 2) <= min_h
+		"nw":
+			return _height_at(wx - 1, wz) <= min_h and _height_at(wx, wz - 1) <= min_h
+		"ne":
+			return _height_at(wx + 2, wz) <= min_h and _height_at(wx + 1, wz - 1) <= min_h
+	return true
+
+
+func _inner_ramp_low_edges_clear_with_noise(
+	wx: int,
+	wz: int,
+	low_corner: String,
+	min_h: int,
+	sea_level: int,
+	world_size_y: int,
+	flat_noise: FastNoiseLite,
+	small_noise: FastNoiseLite,
+	large_noise: FastNoiseLite,
+	macro_noise: FastNoiseLite
+) -> bool:
+	match low_corner:
+		"sw":
+			return _height_at_with_noise(wx - 1, wz + 1, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise) <= min_h \
+				and _height_at_with_noise(wx, wz + 2, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise) <= min_h
+		"se":
+			return _height_at_with_noise(wx + 2, wz + 1, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise) <= min_h \
+				and _height_at_with_noise(wx + 1, wz + 2, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise) <= min_h
+		"nw":
+			return _height_at_with_noise(wx - 1, wz, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise) <= min_h \
+				and _height_at_with_noise(wx, wz - 1, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise) <= min_h
+		"ne":
+			return _height_at_with_noise(wx + 2, wz, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise) <= min_h \
+				and _height_at_with_noise(wx + 1, wz - 1, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise) <= min_h
+	return true
+
+
+func _is_outer_corner_id(ramp_id: int) -> bool:
+	return ramp_id == World.RAMP_NORTHEAST_ID \
+		or ramp_id == World.RAMP_NORTHWEST_ID \
+		or ramp_id == World.RAMP_SOUTHEAST_ID \
+		or ramp_id == World.RAMP_SOUTHWEST_ID
 
 
 func _raw_height_at(
