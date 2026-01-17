@@ -25,8 +25,56 @@ const BLOCK_ID_AIR := 0
 const BLOCK_ID_GRANITE := 1
 const BLOCK_ID_DIRT := 2
 const BLOCK_ID_GRASS := 10
-const STAIR_BLOCK_ID := 100
+const RAMP_NORTH_ID := 100
+const RAMP_SOUTH_ID := 101
+const RAMP_EAST_ID := 102
+const RAMP_WEST_ID := 103
+const RAMP_NORTHEAST_ID := 104
+const RAMP_NORTHWEST_ID := 105
+const RAMP_SOUTHEAST_ID := 106
+const RAMP_SOUTHWEST_ID := 107
+const INNER_SOUTHWEST_ID := 108
+const INNER_SOUTHEAST_ID := 109
+const INNER_NORTHWEST_ID := 110
+const INNER_NORTHEAST_ID := 111
+const STAIR_BLOCK_ID := RAMP_NORTH_ID
+const RAMP_BLOCK_IDS := [
+	RAMP_NORTH_ID,
+	RAMP_SOUTH_ID,
+	RAMP_EAST_ID,
+	RAMP_WEST_ID,
+	RAMP_NORTHEAST_ID,
+	RAMP_NORTHWEST_ID,
+	RAMP_SOUTHEAST_ID,
+	RAMP_SOUTHWEST_ID,
+	INNER_SOUTHWEST_ID,
+	INNER_SOUTHEAST_ID,
+	INNER_NORTHWEST_ID,
+	INNER_NORTHEAST_ID,
+	106,  # RAMP_SOUTHEAST literal
+	111,  # INNER_NORTHEAST literal
+]
 const DEFAULT_MATERIAL := BLOCK_ID_GRANITE
+# Marching squares lookup: index = nw_high*1 + ne_high*2 + sw_high*4 + se_high*8
+# Maps 4-bit corner configuration to ramp ID (-1 = no ramp)
+const MARCHING_SQUARES_RAMP := [
+	-1,                  # 0:  0000 - all low, no ramp
+	RAMP_NORTHWEST_ID,   # 1:  0001 - NW high (outer corner)
+	RAMP_NORTHEAST_ID,   # 2:  0010 - NE high (outer corner)
+	RAMP_NORTH_ID,       # 3:  0011 - NW+NE high (north edge)
+	RAMP_SOUTHWEST_ID,   # 4:  0100 - SW high (outer corner)
+	RAMP_WEST_ID,        # 5:  0101 - NW+SW high (west edge)
+	-1,                  # 6:  0110 - NE+SW high (saddle point)
+	INNER_SOUTHEAST_ID,  # 7:  0111 - NW+NE+SW high, SE low (inner corner)
+	RAMP_SOUTHEAST_ID,   # 8:  1000 - SE high (outer corner)
+	-1,                  # 9:  1001 - NW+SE high (saddle point)
+	RAMP_EAST_ID,        # 10: 1010 - NE+SE high (east edge)
+	INNER_SOUTHWEST_ID,  # 11: 1011 - NW+NE+SE high, SW low (inner corner)
+	RAMP_SOUTH_ID,       # 12: 1100 - SW+SE high (south edge)
+	INNER_NORTHEAST_ID,  # 13: 1101 - NW+SW+SE high, NE low (inner corner)
+	INNER_NORTHWEST_ID,  # 14: 1110 - NE+SW+SE high, NW low (inner corner)
+	-1,                  # 15: 1111 - all high, no ramp
+]
 #endregion
 
 #region Constants - World Generation
@@ -346,11 +394,15 @@ func is_diggable_at(x: int, y: int, z: int) -> bool:
 
 func can_place_stairs_at(x: int, y: int, z: int) -> bool:
 	var block_id := get_block(x, y, z)
-	return block_id != STAIR_BLOCK_ID and block_registry.is_replaceable(block_id)
+	return not is_ramp_block_id(block_id) and block_registry.is_replaceable(block_id)
 
 
 func is_stairs_at(x: int, y: int, z: int) -> bool:
-	return get_block(x, y, z) == STAIR_BLOCK_ID
+	return is_ramp_block_id(get_block(x, y, z))
+
+
+func is_ramp_block_id(block_id: int) -> bool:
+	return RAMP_BLOCK_IDS.has(block_id)
 
 
 func get_block_color(block_id: int) -> Color:

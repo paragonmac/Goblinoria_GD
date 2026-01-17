@@ -3,7 +3,6 @@ class_name Pathfinder
 ## A* pathfinding for voxel worlds with stair support.
 
 #region Constants
-const STAIR_BLOCK_ID := 100
 const MIN_WALKABLE_Y := 1
 const LEVEL_STEP := 1
 const MAX_ITERATIONS := 10000
@@ -30,7 +29,7 @@ var debug_profiler: DebugProfiler
 
 #region Walkability
 func is_blocking(world, block_id: int) -> bool:
-	if block_id == STAIR_BLOCK_ID:
+	if world.is_ramp_block_id(block_id):
 		return false
 	return world.is_block_solid_id(block_id)
 
@@ -54,7 +53,7 @@ func can_change_level(world, from: Vector3i, to: Vector3i) -> bool:
 		return true
 	var from_block: int = world.get_block(from.x, from.y, from.z)
 	var to_block: int = world.get_block(to.x, to.y, to.z)
-	return from_block == STAIR_BLOCK_ID or to_block == STAIR_BLOCK_ID
+	return world.is_ramp_block_id(from_block) or world.is_ramp_block_id(to_block)
 #endregion
 
 

@@ -8,13 +8,28 @@ const SEED_MASK := 0x7fffffff
 const TOPSOIL_DEPTH_MIN := 2
 const TOPSOIL_DEPTH_MAX := 4
 const SEA_LEVEL_FILL_OFFSET := 1
-const HEIGHT_NOISE_FREQUENCY := 0.01
-const HEIGHT_NOISE_AMPLITUDE := 8
+const FLAT_NOISE_FREQUENCY := 0.02
+const SMALL_NOISE_FREQUENCY := 0.01
+const LARGE_NOISE_FREQUENCY := 0.005
+const MACRO_NOISE_FREQUENCY := 0.0015
+const FLAT_AMPLITUDE := 2
+const SMALL_AMPLITUDE := 6
+const LARGE_AMPLITUDE := 14
+const MACRO_FLAT_CUTOFF := 0.8
+const MACRO_SMALL_CUTOFF := 0.96
+const MAX_HEIGHT_AMPLITUDE := LARGE_AMPLITUDE
+# Minimum terrain feature size - heights are sampled on this grid and interpolated
+# This prevents isolated holes smaller than this size
+# Smaller values = more varied terrain with corner ramps, larger = smoother slopes
+const TERRAIN_CELL_SIZE := 4
 #endregion
 
 #region State
 var world: World
-var height_noise: FastNoiseLite
+var height_noise_flat: FastNoiseLite
+var height_noise_small: FastNoiseLite
+var height_noise_large: FastNoiseLite
+var height_noise_macro: FastNoiseLite
 var height_noise_seed: int = -1
 var generation_thread: Thread
 var generation_thread_running: bool = false
@@ -62,7 +77,7 @@ func mix_seed(value: int) -> int:
 func generate_chunk(coord: Vector3i, chunk: World.ChunkDataType) -> void:
 	var chunk_size: int = World.CHUNK_SIZE
 	var base_y: int = coord.y * chunk_size
-	var max_height: int = min(world.sea_level + HEIGHT_NOISE_AMPLITUDE, world.world_size_y - 1)
+	var max_height: int = min(world.sea_level + MAX_HEIGHT_AMPLITUDE, world.world_size_y - 1)
 	if base_y > max_height:
 		chunk.generated = true
 		world.touch_chunk(chunk)
@@ -88,6 +103,7 @@ func generate_chunk(coord: Vector3i, chunk: World.ChunkDataType) -> void:
 				elif world_y >= surface_y - dirt_depth:
 					block_id = World.BLOCK_ID_DIRT
 				chunk.blocks[idx] = block_id
+	_apply_ramp_blocks(coord, chunk)
 	chunk.generated = true
 	world.touch_chunk(chunk)
 
@@ -205,9 +221,10 @@ func _start_generation_thread() -> void:
 
 
 func _generation_thread_main() -> void:
-	var noise := FastNoiseLite.new()
-	noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	noise.frequency = HEIGHT_NOISE_FREQUENCY
+	var flat_noise := FastNoiseLite.new()
+	var small_noise := FastNoiseLite.new()
+	var large_noise := FastNoiseLite.new()
+	var macro_noise := FastNoiseLite.new()
 	var noise_seed: int = -1
 	while true:
 		generation_semaphore.wait()
@@ -223,9 +240,9 @@ func _generation_thread_main() -> void:
 		generation_mutex.unlock()
 		var seed: int = int(job.get("world_seed", 0))
 		if seed != noise_seed:
-			noise.seed = seed
+			_configure_height_noises(seed, flat_noise, small_noise, large_noise, macro_noise)
 			noise_seed = seed
-		var blocks := _generate_chunk_blocks(job, noise)
+		var blocks := _generate_chunk_blocks(job, flat_noise, small_noise, large_noise, macro_noise)
 		var result := {
 			"coord": job.get("coord", Vector3i.ZERO),
 			"blocks": blocks,
@@ -237,13 +254,13 @@ func _generation_thread_main() -> void:
 		generation_mutex.unlock()
 
 
-func _generate_chunk_blocks(job: Dictionary, noise: FastNoiseLite) -> PackedByteArray:
+func _generate_chunk_blocks(job: Dictionary, flat_noise: FastNoiseLite, small_noise: FastNoiseLite, large_noise: FastNoiseLite, macro_noise: FastNoiseLite) -> PackedByteArray:
 	var coord: Vector3i = job.get("coord", Vector3i.ZERO)
 	var chunk_size: int = int(job.get("chunk_size", World.CHUNK_SIZE))
 	var world_size_y: int = int(job.get("world_size_y", 0))
 	var sea_level: int = int(job.get("sea_level", 0))
 	var base_y: int = coord.y * chunk_size
-	var max_height: int = min(sea_level + HEIGHT_NOISE_AMPLITUDE, world_size_y - 1)
+	var max_height: int = min(sea_level + MAX_HEIGHT_AMPLITUDE, world_size_y - 1)
 	if base_y > max_height:
 		return PackedByteArray()
 	var block_air: int = int(job.get("block_id_air", World.BLOCK_ID_AIR))
@@ -261,9 +278,7 @@ func _generate_chunk_blocks(job: Dictionary, noise: FastNoiseLite) -> PackedByte
 		var wx: int = coord.x * chunk_size + lx
 		for lz in range(chunk_size):
 			var wz: int = coord.z * chunk_size + lz
-			var n: float = noise.get_noise_2d(float(wx), float(wz))
-			var surface_y := sea_level + int(round(n * HEIGHT_NOISE_AMPLITUDE))
-			surface_y = clampi(surface_y, 0, world_size_y - 1)
+			var surface_y := _height_at_with_noise(wx, wz, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise)
 			if surface_y < base_y:
 				continue
 			var fill_max: int = min(chunk_size - 1, surface_y - base_y)
@@ -276,6 +291,7 @@ func _generate_chunk_blocks(job: Dictionary, noise: FastNoiseLite) -> PackedByte
 				elif world_y >= surface_y - dirt_depth:
 					block_id = block_dirt
 				blocks[idx] = block_id
+	_apply_ramp_blocks_with_noise(job, blocks, flat_noise, small_noise, large_noise, macro_noise)
 	return blocks
 
 
@@ -294,16 +310,167 @@ func _chunk_seed_from_coord_with_seed(coord: Vector3i, seed: int) -> int:
 
 
 func _ensure_height_noise() -> void:
-	if height_noise == null:
-		height_noise = FastNoiseLite.new()
+	if height_noise_flat == null:
+		height_noise_flat = FastNoiseLite.new()
+	if height_noise_small == null:
+		height_noise_small = FastNoiseLite.new()
+	if height_noise_large == null:
+		height_noise_large = FastNoiseLite.new()
+	if height_noise_macro == null:
+		height_noise_macro = FastNoiseLite.new()
 	if height_noise_seed != world.world_seed:
-		height_noise.seed = world.world_seed
-		height_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
-		height_noise.frequency = HEIGHT_NOISE_FREQUENCY
+		_configure_height_noises(world.world_seed, height_noise_flat, height_noise_small, height_noise_large, height_noise_macro)
 		height_noise_seed = world.world_seed
 
 
 func _height_at(wx: int, wz: int) -> int:
-	var n: float = height_noise.get_noise_2d(float(wx), float(wz))
-	var height := world.sea_level + int(round(n * HEIGHT_NOISE_AMPLITUDE))
-	return clampi(height, 0, world.world_size_y - 1)
+	return _height_at_with_noise(wx, wz, world.sea_level, world.world_size_y, height_noise_flat, height_noise_small, height_noise_large, height_noise_macro)
+
+
+## Marching squares ramp selection using 4 corner heights.
+## Returns {"ramp_id": int, "ramp_y": int} where ramp_y is placement height.
+## Corners: NW=(wx,wz), NE=(wx+1,wz), SW=(wx,wz+1), SE=(wx+1,wz+1)
+func _get_marching_squares_ramp(h_nw: int, h_ne: int, h_sw: int, h_se: int) -> Dictionary:
+	var min_h := mini(mini(h_nw, h_ne), mini(h_sw, h_se))
+	var max_h := maxi(maxi(h_nw, h_ne), maxi(h_sw, h_se))
+	# Only handle 1-block height transitions
+	if max_h - min_h != 1:
+		return {"ramp_id": -1, "ramp_y": -1}
+	# Build 4-bit index: corners at max height are "high"
+	var index := 0
+	if h_nw == max_h: index += 1
+	if h_ne == max_h: index += 2
+	if h_sw == max_h: index += 4
+	if h_se == max_h: index += 8
+	return {"ramp_id": World.MARCHING_SQUARES_RAMP[index], "ramp_y": min_h + 1}
+
+
+func _apply_ramp_blocks(coord: Vector3i, chunk: ChunkData) -> void:
+	var chunk_size: int = World.CHUNK_SIZE
+	var base_y: int = coord.y * chunk_size
+	for lx in range(chunk_size):
+		var wx: int = coord.x * chunk_size + lx
+		for lz in range(chunk_size):
+			var wz: int = coord.z * chunk_size + lz
+			# Marching squares: sample 4 corner heights
+			var h_nw := _height_at(wx, wz)
+			var h_ne := _height_at(wx + 1, wz)
+			var h_sw := _height_at(wx, wz + 1)
+			var h_se := _height_at(wx + 1, wz + 1)
+			var result := _get_marching_squares_ramp(h_nw, h_ne, h_sw, h_se)
+			var ramp_id: int = result["ramp_id"]
+			if ramp_id < 0:
+				continue
+			var ramp_y: int = result["ramp_y"]
+			if ramp_y < base_y or ramp_y >= base_y + chunk_size:
+				continue
+			var ly: int = ramp_y - base_y
+			var idx := world.chunk_index(lx, ly, lz)
+			# Ramp replaces terrain at transition boundaries (don't check for air)
+			chunk.blocks[idx] = ramp_id
+
+
+func _apply_ramp_blocks_with_noise(
+	job: Dictionary,
+	blocks: PackedByteArray,
+	flat_noise: FastNoiseLite,
+	small_noise: FastNoiseLite,
+	large_noise: FastNoiseLite,
+	macro_noise: FastNoiseLite
+) -> void:
+	var coord: Vector3i = job.get("coord", Vector3i.ZERO)
+	var chunk_size: int = int(job.get("chunk_size", World.CHUNK_SIZE))
+	var world_size_y: int = int(job.get("world_size_y", 0))
+	var sea_level: int = int(job.get("sea_level", 0))
+	var base_y: int = coord.y * chunk_size
+	for lx in range(chunk_size):
+		var wx: int = coord.x * chunk_size + lx
+		for lz in range(chunk_size):
+			var wz: int = coord.z * chunk_size + lz
+			# Marching squares: sample 4 corner heights
+			var h_nw := _height_at_with_noise(wx, wz, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise)
+			var h_ne := _height_at_with_noise(wx + 1, wz, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise)
+			var h_sw := _height_at_with_noise(wx, wz + 1, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise)
+			var h_se := _height_at_with_noise(wx + 1, wz + 1, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise)
+			var result := _get_marching_squares_ramp(h_nw, h_ne, h_sw, h_se)
+			var ramp_id: int = result["ramp_id"]
+			if ramp_id < 0:
+				continue
+			var ramp_y: int = result["ramp_y"]
+			if ramp_y < base_y or ramp_y >= base_y + chunk_size:
+				continue
+			var ly: int = ramp_y - base_y
+			var idx: int = (lz * chunk_size + ly) * chunk_size + lx
+			# Ramp replaces terrain at transition boundaries (don't check for air)
+			blocks[idx] = ramp_id
+
+
+func _height_at_with_noise(
+	wx: int,
+	wz: int,
+	sea_level: int,
+	world_size_y: int,
+	flat_noise: FastNoiseLite,
+	small_noise: FastNoiseLite,
+	large_noise: FastNoiseLite,
+	macro_noise: FastNoiseLite
+) -> int:
+	# Sample on coarse grid and bilinearly interpolate for smooth terrain
+	var cell_x := floori(float(wx) / float(TERRAIN_CELL_SIZE))
+	var cell_z := floori(float(wz) / float(TERRAIN_CELL_SIZE))
+	var frac_x := (float(wx) - float(cell_x * TERRAIN_CELL_SIZE)) / float(TERRAIN_CELL_SIZE)
+	var frac_z := (float(wz) - float(cell_z * TERRAIN_CELL_SIZE)) / float(TERRAIN_CELL_SIZE)
+	# Sample heights at 4 cell corners
+	var h00 := _raw_height_at(cell_x * TERRAIN_CELL_SIZE, cell_z * TERRAIN_CELL_SIZE, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise)
+	var h10 := _raw_height_at((cell_x + 1) * TERRAIN_CELL_SIZE, cell_z * TERRAIN_CELL_SIZE, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise)
+	var h01 := _raw_height_at(cell_x * TERRAIN_CELL_SIZE, (cell_z + 1) * TERRAIN_CELL_SIZE, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise)
+	var h11 := _raw_height_at((cell_x + 1) * TERRAIN_CELL_SIZE, (cell_z + 1) * TERRAIN_CELL_SIZE, sea_level, world_size_y, flat_noise, small_noise, large_noise, macro_noise)
+	# Bilinear interpolation
+	var h0 := lerpf(h00, h10, frac_x)
+	var h1 := lerpf(h01, h11, frac_x)
+	var height := lerpf(h0, h1, frac_z)
+	return clampi(int(round(height)), 0, world_size_y - 1)
+
+
+func _raw_height_at(
+	wx: int,
+	wz: int,
+	sea_level: int,
+	_world_size_y: int,
+	flat_noise: FastNoiseLite,
+	small_noise: FastNoiseLite,
+	large_noise: FastNoiseLite,
+	macro_noise: FastNoiseLite
+) -> float:
+	var macro_value := (macro_noise.get_noise_2d(float(wx), float(wz)) + 1.0) * 0.5
+	var amplitude := FLAT_AMPLITUDE
+	var n := 0.0
+	if macro_value < MACRO_FLAT_CUTOFF:
+		n = flat_noise.get_noise_2d(float(wx), float(wz))
+		amplitude = FLAT_AMPLITUDE
+	elif macro_value < MACRO_SMALL_CUTOFF:
+		n = small_noise.get_noise_2d(float(wx), float(wz))
+		amplitude = SMALL_AMPLITUDE
+	else:
+		n = large_noise.get_noise_2d(float(wx), float(wz))
+		amplitude = LARGE_AMPLITUDE
+	return float(sea_level) + n * float(amplitude)
+
+
+func _configure_height_noises(
+	seed: int,
+	flat_noise: FastNoiseLite,
+	small_noise: FastNoiseLite,
+	large_noise: FastNoiseLite,
+	macro_noise: FastNoiseLite
+) -> void:
+	_configure_noise(flat_noise, mix_seed(seed ^ 0x1f), FLAT_NOISE_FREQUENCY)
+	_configure_noise(small_noise, mix_seed(seed ^ 0x2f), SMALL_NOISE_FREQUENCY)
+	_configure_noise(large_noise, mix_seed(seed ^ 0x3f), LARGE_NOISE_FREQUENCY)
+	_configure_noise(macro_noise, mix_seed(seed ^ 0x4f), MACRO_NOISE_FREQUENCY)
+
+
+func _configure_noise(noise: FastNoiseLite, seed: int, frequency: float) -> void:
+	noise.seed = seed
+	noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	noise.frequency = frequency

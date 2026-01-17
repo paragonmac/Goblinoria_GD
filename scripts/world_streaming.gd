@@ -62,9 +62,15 @@ var stream_max_y: int = - DUMMY_INT
 var stream_pending: bool = false
 var stream_plane_index: int = 0
 var stream_plane_size: int = 0
+var render_plane_index: int = 0
+var buffer_plane_index: int = 0
+var render_plane_size: int = 0
+var buffer_plane_size: int = 0
 var stream_layer_y: int = 0
 var stream_layer_remaining: int = 0
 var stream_spiral_offsets: Array = []
+var render_spiral_offsets: Array = []
+var buffer_spiral_offsets: Array = []
 var last_spiral_x_range: int = -1
 var last_spiral_z_range: int = -1
 var last_render_zone_min_cx: int = DUMMY_INT
@@ -105,9 +111,15 @@ func reset_state() -> void:
 	stream_pending = false
 	stream_plane_index = 0
 	stream_plane_size = 0
+	render_plane_index = 0
+	buffer_plane_index = 0
+	render_plane_size = 0
+	buffer_plane_size = 0
 	stream_layer_y = 0
 	stream_layer_remaining = 0
 	stream_spiral_offsets.clear()
+	render_spiral_offsets.clear()
+	buffer_spiral_offsets.clear()
 	last_spiral_x_range = -1
 	last_spiral_z_range = -1
 	unload_timer = 0.0
@@ -229,10 +241,14 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
 				stream_spiral_offsets = build_spiral_offsets_2d(x_range, z_range)
 				last_spiral_x_range = x_range
 				last_spiral_z_range = z_range
-			stream_plane_size = stream_spiral_offsets.size()
+			_partition_spiral_offsets(render_min_cx, render_max_cx, render_min_cz, render_max_cz)
+			stream_plane_size = render_plane_size + buffer_plane_size
 			stream_pending = stream_plane_size > 0
 		stream_layer_y = stream_max_y
 		stream_layer_remaining = stream_plane_size
+		stream_plane_index = 0
+		render_plane_index = 0
+		buffer_plane_index = 0
 	enqueue_stream_chunks()
 	process_chunk_queue()
 	unload_timer += dt
@@ -297,6 +313,8 @@ func enqueue_stream_chunks() -> void:
 			return
 		stream_layer_y -= 1
 		stream_plane_index = 0
+		render_plane_index = 0
+		buffer_plane_index = 0
 		stream_layer_remaining = stream_plane_size
 	var plane_size: int = stream_plane_size
 	if plane_size <= 0:
@@ -306,19 +324,18 @@ func enqueue_stream_chunks() -> void:
 	if remaining_in_plane <= 0:
 		return
 	var budget: int = min(stream_queue_budget, remaining_in_plane)
-	for _i in range(budget):
-		var plane_index: int = stream_plane_index
-		var offset: Vector2i = stream_spiral_offsets[plane_index]
-		var key := Vector3i(stream_min_x + offset.x, stream_layer_y, stream_min_z + offset.y)
-		if is_chunk_mesh_ready(key):
-			if stream_layer_remaining > 0:
-				stream_layer_remaining -= 1
-		elif not chunk_build_set.has(key):
-			chunk_build_set[key] = true
-			chunk_build_queue.append(key)
-			var chunk := world.ensure_chunk(key)
-			chunk.mesh_state = ChunkData.MESH_STATE_PENDING
+	while budget > 0 and render_plane_index < render_plane_size:
+		var offset: Vector2i = render_spiral_offsets[render_plane_index]
+		render_plane_index += 1
 		stream_plane_index += 1
+		_queue_stream_offset(offset)
+		budget -= 1
+	while budget > 0 and buffer_plane_index < buffer_plane_size:
+		var offset: Vector2i = buffer_spiral_offsets[buffer_plane_index]
+		buffer_plane_index += 1
+		stream_plane_index += 1
+		_queue_stream_offset(offset)
+		budget -= 1
 #endregion
 
 
@@ -377,6 +394,34 @@ func build_spiral_offsets_2d(x_range: int, z_range: int) -> Array:
 	spiral_cache[cache_key] = offsets
 	return offsets
 #endregion
+
+
+func _partition_spiral_offsets(render_min_cx: int, render_max_cx: int, render_min_cz: int, render_max_cz: int) -> void:
+	render_spiral_offsets.clear()
+	buffer_spiral_offsets.clear()
+	render_plane_size = 0
+	buffer_plane_size = 0
+	for offset: Vector2i in stream_spiral_offsets:
+		var cx: int = stream_min_x + offset.x
+		var cz: int = stream_min_z + offset.y
+		if cx >= render_min_cx and cx <= render_max_cx and cz >= render_min_cz and cz <= render_max_cz:
+			render_spiral_offsets.append(offset)
+			render_plane_size += 1
+		else:
+			buffer_spiral_offsets.append(offset)
+			buffer_plane_size += 1
+
+
+func _queue_stream_offset(offset: Vector2i) -> void:
+	var key := Vector3i(stream_min_x + offset.x, stream_layer_y, stream_min_z + offset.y)
+	if is_chunk_mesh_ready(key):
+		if stream_layer_remaining > 0:
+			stream_layer_remaining -= 1
+	elif not chunk_build_set.has(key):
+		chunk_build_set[key] = true
+		chunk_build_queue.append(key)
+		var chunk := world.ensure_chunk(key)
+		chunk.mesh_state = ChunkData.MESH_STATE_PENDING
 
 
 func _unload_distant_chunks(center_cx: int, center_cz: int) -> void:

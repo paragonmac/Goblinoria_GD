@@ -28,6 +28,7 @@ const BLOCK_NOISE_DIV := 1023.0
 #region State
 var block_solid_table := PackedByteArray()
 var block_color_table := PackedColorArray()
+var block_ramp_table := PackedByteArray()
 #endregion
 
 
@@ -58,6 +59,7 @@ func build_chunk_mesh(world: World, cx: int, cy: int, cz: int) -> Dictionary:
 		"blocks": chunk.blocks,
 		"neighbors": neighbors,
 		"solid_table": block_solid_table,
+		"ramp_table": block_ramp_table,
 		"color_table": block_color_table,
 	}
 	var data := build_chunk_arrays_from_data(job)
@@ -97,6 +99,7 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 	var blocks: PackedByteArray = job["blocks"]
 	var neighbors: Dictionary = job["neighbors"]
 	var solid_table: PackedByteArray = job["solid_table"]
+	var ramp_table: PackedByteArray = job.get("ramp_table", PackedByteArray())
 	var color_table: PackedColorArray = job["color_table"]
 	var vertices := PackedVector3Array()
 	var normals := PackedVector3Array()
@@ -118,71 +121,110 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 
 				var base := Vector3(lx, ly, lz)
 				var block_center_y: float = float(wy)
-				var color := block_color_from_table(color_table, block_id, wx, wy, wz)
 
 				var above_id := air_id
 				if ly + 1 < chunk_size:
 					above_id = blocks[chunk_index(chunk_size, lx, ly + 1, lz)]
 				else:
 					above_id = neighbor_block(neighbors.get("y_pos", null), chunk_size, lx, 0, lz, air_id)
-				var above_solid := is_solid_id(above_id, solid_table)
-				var top_flag := 1.0 if above_solid else 0.0
-				add_face(vertices, normals, colors, uv2s, base, Vector3.UP, color, block_center_y, top_flag)
-				if above_solid:
-					occluded_faces += 1
-				else:
-					visible_faces += 1
 
 				var below_id := air_id
 				if ly - 1 >= 0:
 					below_id = blocks[chunk_index(chunk_size, lx, ly - 1, lz)]
 				else:
 					below_id = neighbor_block(neighbors.get("y_neg", null), chunk_size, lx, chunk_size - 1, lz, air_id)
-				if not is_solid_id(below_id, solid_table):
-					add_face(vertices, normals, colors, uv2s, base, Vector3.DOWN, color, block_center_y, 0.0)
-					visible_faces += 1
-				else:
-					occluded_faces += 1
+				var color_id := block_id
+				if is_ramp_id(block_id, ramp_table) and below_id != air_id:
+					color_id = below_id
+				var color := block_color_from_table(color_table, color_id, wx, wy, wz)
 
 				var forward_id := air_id
 				if lz + 1 < chunk_size:
 					forward_id = blocks[chunk_index(chunk_size, lx, ly, lz + 1)]
 				else:
 					forward_id = neighbor_block(neighbors.get("z_pos", null), chunk_size, lx, ly, 0, air_id)
-				if not is_solid_id(forward_id, solid_table):
-					add_face(vertices, normals, colors, uv2s, base, Vector3.FORWARD, color, block_center_y, 0.0)
-					visible_faces += 1
-				else:
-					occluded_faces += 1
 
 				var back_id := air_id
 				if lz - 1 >= 0:
 					back_id = blocks[chunk_index(chunk_size, lx, ly, lz - 1)]
 				else:
 					back_id = neighbor_block(neighbors.get("z_neg", null), chunk_size, lx, ly, chunk_size - 1, air_id)
-				if not is_solid_id(back_id, solid_table):
-					add_face(vertices, normals, colors, uv2s, base, Vector3.BACK, color, block_center_y, 0.0)
-					visible_faces += 1
-				else:
-					occluded_faces += 1
 
 				var right_id := air_id
 				if lx + 1 < chunk_size:
 					right_id = blocks[chunk_index(chunk_size, lx + 1, ly, lz)]
 				else:
 					right_id = neighbor_block(neighbors.get("x_pos", null), chunk_size, 0, ly, lz, air_id)
-				if not is_solid_id(right_id, solid_table):
-					add_face(vertices, normals, colors, uv2s, base, Vector3.RIGHT, color, block_center_y, 0.0)
-					visible_faces += 1
-				else:
-					occluded_faces += 1
 
 				var left_id := air_id
 				if lx - 1 >= 0:
 					left_id = blocks[chunk_index(chunk_size, lx - 1, ly, lz)]
 				else:
 					left_id = neighbor_block(neighbors.get("x_neg", null), chunk_size, chunk_size - 1, ly, lz, air_id)
-				if not is_solid_id(left_id, solid_table):
+				var above_occluding := is_solid_id(above_id, solid_table)
+				var below_occluding := is_solid_id(below_id, solid_table)
+				var forward_occluding_ramp := is_occluding_id(forward_id, solid_table, ramp_table)
+				var back_occluding_ramp := is_occluding_id(back_id, solid_table, ramp_table)
+				var right_occluding_ramp := is_occluding_id(right_id, solid_table, ramp_table)
+				var left_occluding_ramp := is_occluding_id(left_id, solid_table, ramp_table)
+				var forward_occluding_solid := is_solid_id(forward_id, solid_table)
+				var back_occluding_solid := is_solid_id(back_id, solid_table)
+				var right_occluding_solid := is_solid_id(right_id, solid_table)
+				var left_occluding_solid := is_solid_id(left_id, solid_table)
+
+				if is_ramp_id(block_id, ramp_table):
+					var counts := add_ramp_faces(
+						vertices,
+						normals,
+						colors,
+						uv2s,
+						base,
+						block_id,
+						color,
+						block_center_y,
+						above_occluding,
+						below_occluding,
+						back_occluding_ramp,
+						forward_occluding_ramp,
+						right_occluding_ramp,
+						left_occluding_ramp
+					)
+					visible_faces += int(counts.get("visible", 0))
+					occluded_faces += int(counts.get("occluded", 0))
+					continue
+
+				var top_flag := 1.0 if above_occluding else 0.0
+				add_face(vertices, normals, colors, uv2s, base, Vector3.UP, color, block_center_y, top_flag)
+				if above_occluding:
+					occluded_faces += 1
+				else:
+					visible_faces += 1
+
+				if not below_occluding:
+					add_face(vertices, normals, colors, uv2s, base, Vector3.DOWN, color, block_center_y, 0.0)
+					visible_faces += 1
+				else:
+					occluded_faces += 1
+
+				if not forward_occluding_solid:
+					add_face(vertices, normals, colors, uv2s, base, Vector3.FORWARD, color, block_center_y, 0.0)
+					visible_faces += 1
+				else:
+					occluded_faces += 1
+
+				if not back_occluding_solid:
+					add_face(vertices, normals, colors, uv2s, base, Vector3.BACK, color, block_center_y, 0.0)
+					visible_faces += 1
+				else:
+					occluded_faces += 1
+
+				if not right_occluding_solid:
+					add_face(vertices, normals, colors, uv2s, base, Vector3.RIGHT, color, block_center_y, 0.0)
+					visible_faces += 1
+				else:
+					occluded_faces += 1
+
+				if not left_occluding_solid:
 					add_face(vertices, normals, colors, uv2s, base, Vector3.LEFT, color, block_center_y, 0.0)
 					visible_faces += 1
 				else:
@@ -256,13 +298,17 @@ func _build_empty_mesh_result() -> Dictionary:
 func _ensure_block_tables(world: World) -> void:
 	if world == null:
 		return
-	if block_solid_table.size() == BlockRegistry.TABLE_SIZE and block_color_table.size() == BlockRegistry.TABLE_SIZE:
+	if block_solid_table.size() == BlockRegistry.TABLE_SIZE \
+		and block_color_table.size() == BlockRegistry.TABLE_SIZE \
+		and block_ramp_table.size() == BlockRegistry.TABLE_SIZE:
 		return
 	block_solid_table.resize(BlockRegistry.TABLE_SIZE)
 	block_color_table.resize(BlockRegistry.TABLE_SIZE)
+	block_ramp_table.resize(BlockRegistry.TABLE_SIZE)
 	for i in range(BlockRegistry.TABLE_SIZE):
 		block_solid_table[i] = 1 if world.is_block_solid_id(i) else 0
 		block_color_table[i] = world.get_block_color(i)
+		block_ramp_table[i] = 1 if world.is_ramp_block_id(i) else 0
 
 
 func _copy_neighbor_blocks(world: World, coord: Vector3i) -> Variant:
@@ -289,6 +335,18 @@ func is_solid_id(block_id: int, solid_table: PackedByteArray) -> bool:
 	if block_id < 0 or block_id >= solid_table.size():
 		return false
 	return solid_table[block_id] != 0
+
+
+func is_ramp_id(block_id: int, ramp_table: PackedByteArray) -> bool:
+	if block_id < 0 or block_id >= ramp_table.size():
+		return false
+	return ramp_table[block_id] != 0
+
+
+func is_occluding_id(block_id: int, solid_table: PackedByteArray, ramp_table: PackedByteArray) -> bool:
+	if is_ramp_id(block_id, ramp_table):
+		return false
+	return is_solid_id(block_id, solid_table)
 #endregion
 
 
@@ -339,6 +397,235 @@ func add_face(vertices: PackedVector3Array, normals: PackedVector3Array, colors:
 	normals.append_array([normal, normal, normal, normal, normal, normal])
 	colors.append_array([shaded, shaded, shaded, shaded, shaded, shaded])
 	uv2s.append_array([uv2, uv2, uv2, uv2, uv2, uv2])
+
+
+func add_quad_with_normal(
+	vertices: PackedVector3Array,
+	normals: PackedVector3Array,
+	colors: PackedColorArray,
+	uv2s: PackedVector2Array,
+	v1: Vector3,
+	v2: Vector3,
+	v3: Vector3,
+	v4: Vector3,
+	expected_normal: Vector3,
+	color: Color,
+	block_center_y: float,
+	top_flag: float
+) -> void:
+	var normal := (v2 - v1).cross(v3 - v1).normalized()
+	var reverse := normal.dot(expected_normal) < 0.0
+	if reverse:
+		normal = -normal
+	var shade := face_shade(normal)
+	var shaded := Color(color.r * shade, color.g * shade, color.b * shade, COLOR_MAX)
+	var uv2 := Vector2(block_center_y, top_flag)
+	if reverse:
+		vertices.append_array([v1, v2, v3, v1, v3, v4])
+	else:
+		vertices.append_array([v1, v3, v2, v1, v4, v3])
+	normals.append_array([normal, normal, normal, normal, normal, normal])
+	colors.append_array([shaded, shaded, shaded, shaded, shaded, shaded])
+	uv2s.append_array([uv2, uv2, uv2, uv2, uv2, uv2])
+
+
+func add_tri_with_normal(
+	vertices: PackedVector3Array,
+	normals: PackedVector3Array,
+	colors: PackedColorArray,
+	uv2s: PackedVector2Array,
+	v1: Vector3,
+	v2: Vector3,
+	v3: Vector3,
+	expected_normal: Vector3,
+	color: Color,
+	block_center_y: float,
+	top_flag: float,
+	flip_winding: bool = false
+) -> void:
+	var normal := (v2 - v1).cross(v3 - v1).normalized()
+	if normal.dot(expected_normal) < 0.0:
+		var swap := v2
+		v2 = v3
+		v3 = swap
+		normal = (v2 - v1).cross(v3 - v1).normalized()
+	if flip_winding:
+		# Flip cull side without changing lighting normal.
+		var swap := v2
+		v2 = v3
+		v3 = swap
+	var shade := face_shade(normal)
+	var shaded := Color(color.r * shade, color.g * shade, color.b * shade, COLOR_MAX)
+	var uv2 := Vector2(block_center_y, top_flag)
+	vertices.append_array([v1, v2, v3])
+	normals.append_array([normal, normal, normal])
+	colors.append_array([shaded, shaded, shaded])
+	uv2s.append_array([uv2, uv2, uv2])
+
+
+func add_ramp_faces(
+	vertices: PackedVector3Array,
+	normals: PackedVector3Array,
+	colors: PackedColorArray,
+	uv2s: PackedVector2Array,
+	base: Vector3,
+	block_id: int,
+	color: Color,
+	block_center_y: float,
+	above_occluding: bool,
+	below_occluding: bool,
+	north_occluding: bool,
+	south_occluding: bool,
+	east_occluding: bool,
+	west_occluding: bool
+) -> Dictionary:
+	var counts := {"visible": 0, "occluded": 0}
+	var h := FACE_HALF_SIZE
+	var heights := _ramp_corner_heights(block_id, h)
+	var y_nw: float = float(heights["nw"])
+	var y_ne: float = float(heights["ne"])
+	var y_se: float = float(heights["se"])
+	var y_sw: float = float(heights["sw"])
+	var nw := base + Vector3(-h, y_nw, -h)
+	var ne := base + Vector3(h, y_ne, -h)
+	var se := base + Vector3(h, y_se, h)
+	var sw := base + Vector3(-h, y_sw, h)
+	var bnw := base + Vector3(-h, -h, -h)
+	var bne := base + Vector3(h, -h, -h)
+	var bse := base + Vector3(h, -h, h)
+	var bsw := base + Vector3(-h, -h, h)
+
+	var top_flag := 1.0 if above_occluding else 0.0
+	# Check if this is an inner corner (non-planar quad with 3 corners at one height, 1 at another)
+	var is_inner_corner := _is_inner_corner_id(block_id)
+	if is_inner_corner:
+		# Split along the diagonal through the low corner so both tris slope.
+		var low_corner := _get_inner_corner_low_corner(block_id)
+		var flip_inner_winding := block_id == 108 or block_id == 109 or block_id == 111
+		match low_corner:
+			"sw":
+				add_tri_with_normal(vertices, normals, colors, uv2s, sw, nw, ne, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
+				add_tri_with_normal(vertices, normals, colors, uv2s, sw, ne, se, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
+			"se":
+				add_tri_with_normal(vertices, normals, colors, uv2s, se, ne, nw, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
+				add_tri_with_normal(vertices, normals, colors, uv2s, se, nw, sw, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
+			"nw":
+				add_tri_with_normal(vertices, normals, colors, uv2s, nw, ne, se, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
+				add_tri_with_normal(vertices, normals, colors, uv2s, nw, se, sw, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
+			"ne":
+				add_tri_with_normal(vertices, normals, colors, uv2s, ne, nw, sw, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
+				add_tri_with_normal(vertices, normals, colors, uv2s, ne, sw, se, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
+	else:
+		# Regular ramps use quad rendering, except ramp_se which needs flipped cull.
+		if block_id == 106:
+			add_tri_with_normal(vertices, normals, colors, uv2s, nw, se, sw, Vector3.UP, color, block_center_y, top_flag, true)
+			add_tri_with_normal(vertices, normals, colors, uv2s, nw, ne, se, Vector3.UP, color, block_center_y, top_flag, true)
+		else:
+			add_quad_with_normal(vertices, normals, colors, uv2s, nw, sw, se, ne, Vector3.UP, color, block_center_y, top_flag)
+	if above_occluding:
+		counts["occluded"] += 1
+	else:
+		counts["visible"] += 1
+
+	if below_occluding:
+		counts["occluded"] += 1
+	else:
+		add_quad_with_normal(vertices, normals, colors, uv2s, bnw, bne, bse, bsw, Vector3.DOWN, color, block_center_y, 0.0)
+		counts["visible"] += 1
+
+	var north_counts := _add_ramp_side(vertices, normals, colors, uv2s, Vector3.BACK, bnw, bne, nw, ne, color, block_center_y, north_occluding)
+	var south_counts := _add_ramp_side(vertices, normals, colors, uv2s, Vector3.FORWARD, bsw, bse, sw, se, color, block_center_y, south_occluding)
+	var east_counts := _add_ramp_side(vertices, normals, colors, uv2s, Vector3.RIGHT, bne, bse, ne, se, color, block_center_y, east_occluding)
+	var west_counts := _add_ramp_side(vertices, normals, colors, uv2s, Vector3.LEFT, bnw, bsw, nw, sw, color, block_center_y, west_occluding)
+
+	counts["visible"] += int(north_counts["visible"]) + int(south_counts["visible"]) + int(east_counts["visible"]) + int(west_counts["visible"])
+	counts["occluded"] += int(north_counts["occluded"]) + int(south_counts["occluded"]) + int(east_counts["occluded"]) + int(west_counts["occluded"])
+	return counts
+
+
+func _add_ramp_side(
+	vertices: PackedVector3Array,
+	normals: PackedVector3Array,
+	colors: PackedColorArray,
+	uv2s: PackedVector2Array,
+	expected_normal: Vector3,
+	bottom_a: Vector3,
+	bottom_b: Vector3,
+	top_a: Vector3,
+	top_b: Vector3,
+	color: Color,
+	block_center_y: float,
+	neighbor_occluding: bool
+) -> Dictionary:
+	var counts := {"visible": 0, "occluded": 0}
+	if neighbor_occluding:
+		counts["occluded"] = 1
+		return counts
+	var bottom_y := bottom_a.y
+	var top_a_flat := is_equal_approx(top_a.y, bottom_y)
+	var top_b_flat := is_equal_approx(top_b.y, bottom_y)
+	if top_a_flat and top_b_flat:
+		return counts
+	if top_a_flat and not top_b_flat:
+		add_tri_with_normal(vertices, normals, colors, uv2s, bottom_a, bottom_b, top_b, expected_normal, color, block_center_y, 0.0)
+		counts["visible"] = 1
+		return counts
+	if top_b_flat and not top_a_flat:
+		add_tri_with_normal(vertices, normals, colors, uv2s, bottom_a, bottom_b, top_a, expected_normal, color, block_center_y, 0.0)
+		counts["visible"] = 1
+		return counts
+	add_quad_with_normal(vertices, normals, colors, uv2s, bottom_a, bottom_b, top_b, top_a, expected_normal, color, block_center_y, 0.0)
+	counts["visible"] = 1
+	return counts
+
+
+func _ramp_corner_heights(block_id: int, h: float) -> Dictionary:
+	# Using literal IDs to avoid any const resolution issues
+	match block_id:
+		100:  # RAMP_NORTH
+			return {"nw": h, "ne": h, "se": -h, "sw": -h}
+		101:  # RAMP_SOUTH
+			return {"nw": -h, "ne": -h, "se": h, "sw": h}
+		102:  # RAMP_EAST
+			return {"nw": -h, "ne": h, "se": h, "sw": -h}
+		103:  # RAMP_WEST
+			return {"nw": h, "ne": -h, "se": -h, "sw": h}
+		104:  # RAMP_NORTHEAST - index 2: only NE high
+			return {"nw": -h, "ne": h, "se": -h, "sw": -h}
+		105:  # RAMP_NORTHWEST - index 1: only NW high
+			return {"nw": h, "ne": -h, "se": -h, "sw": -h}
+		106:  # RAMP_SOUTHEAST - index 8: only SE high
+			return {"nw": -h, "ne": -h, "se": h, "sw": -h}
+		107:  # RAMP_SOUTHWEST - index 4: only SW high
+			return {"nw": -h, "ne": -h, "se": -h, "sw": h}
+		108:  # INNER_SOUTHWEST
+			return {"nw": h, "ne": h, "se": h, "sw": -h}
+		109:  # INNER_SOUTHEAST
+			return {"nw": h, "ne": h, "se": -h, "sw": h}
+		110:  # INNER_NORTHWEST
+			return {"nw": -h, "ne": h, "se": h, "sw": h}
+		111:  # INNER_NORTHEAST
+			return {"nw": h, "ne": -h, "se": h, "sw": h}
+		_:
+			return {"nw": -h, "ne": -h, "se": -h, "sw": -h}
+
+
+func _is_inner_corner_id(block_id: int) -> bool:
+	return block_id == 108 or block_id == 109 or block_id == 110 or block_id == 111
+
+
+func _get_inner_corner_low_corner(block_id: int) -> String:
+	match block_id:
+		108:  # INNER_SOUTHWEST
+			return "sw"
+		109:  # INNER_SOUTHEAST
+			return "se"
+		110:  # INNER_NORTHWEST
+			return "nw"
+		111:  # INNER_NORTHEAST
+			return "ne"
+		_:
+			return ""
 
 
 func face_shade(normal: Vector3) -> float:

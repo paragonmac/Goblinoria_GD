@@ -33,6 +33,7 @@ var streaming_stats_label: Label
 #region Constants
 const DEBUG_TIMING_LINES := 12
 const STREAMING_CAPTURE_INTERVAL := 0.25
+const DEBUG_POLL_INTERVAL_SEC := 0.25
 #endregion
 
 #region Capture State
@@ -40,6 +41,9 @@ var streaming_capture_timer: float = 0.0
 var streaming_capture_start_ms: int = 0
 var streaming_capture_path := ""
 var streaming_capture_lines: Array = []
+var last_draw_burden_ms: int = 0
+var last_streaming_stats_ms: int = 0
+var last_debug_timings_ms: int = 0
 #endregion
 
 
@@ -168,6 +172,9 @@ func update_draw_burden() -> void:
 		return
 	if world == null or camera == null:
 		return
+	if not _poll_due(last_draw_burden_ms):
+		return
+	last_draw_burden_ms = Time.get_ticks_msec()
 	var stats: Dictionary = world.get_chunk_draw_stats()
 	var loaded: int = int(stats.get("loaded", 0))
 	var meshed: int = int(stats.get("meshed", 0))
@@ -188,6 +195,9 @@ func update_streaming_stats() -> void:
 		return
 	if streaming_stats_label == null or world == null:
 		return
+	if not _poll_due(last_streaming_stats_ms):
+		return
+	last_streaming_stats_ms = Time.get_ticks_msec()
 	var stats := _collect_streaming_stats()
 	streaming_stats_label.text = "Streaming chunks:%d build:%d pending:%s\nMesh q:%d res:%d act:%d pre:%d\nRadii s:%d r:%d u:%d\nBuffer %d (base %d max %d)" % [
 		int(stats["loaded_chunks"]),
@@ -458,6 +468,65 @@ func update_debug_timings_label() -> void:
 		return
 	if not show_debug_timings:
 		return
+	if not _poll_due(last_debug_timings_ms):
+		return
+	last_debug_timings_ms = Time.get_ticks_msec()
 	var lines: Array = debug_profiler.get_report_lines(DEBUG_TIMING_LINES)
 	debug_timings_label.text = "Debug Timings (ms)\n" + "\n".join(lines)
 #endregion
+
+
+func _poll_due(last_ms: int) -> bool:
+	var now_ms: int = Time.get_ticks_msec()
+	return float(now_ms - last_ms) >= DEBUG_POLL_INTERVAL_SEC * 1000.0
+
+
+func dump_ramp_counts() -> void:
+	if world == null:
+		return
+	var counts := {
+		World.INNER_SOUTHWEST_ID: 0,
+		World.INNER_SOUTHEAST_ID: 0,
+		World.INNER_NORTHWEST_ID: 0,
+		World.INNER_NORTHEAST_ID: 0,
+	}
+	var samples := {
+		World.INNER_SOUTHWEST_ID: [],
+		World.INNER_SOUTHEAST_ID: [],
+		World.INNER_NORTHWEST_ID: [],
+		World.INNER_NORTHEAST_ID: [],
+	}
+	var chunk_size: int = World.CHUNK_SIZE
+	for coord_key in world.chunks.keys():
+		var coord: Vector3i = coord_key
+		var chunk: ChunkData = world.chunks[coord]
+		if chunk == null or not chunk.generated:
+			continue
+		var blocks: PackedByteArray = chunk.blocks
+		for idx in range(blocks.size()):
+			var block_id: int = blocks[idx]
+			if not counts.has(block_id):
+				continue
+			counts[block_id] += 1
+			var list: Array = samples[block_id]
+			if list.size() < 3:
+				var lx: int = idx % chunk_size
+				var ly: int = floori(float(idx) / float(chunk_size)) % chunk_size
+				var lz: int = floori(float(idx) / float(chunk_size * chunk_size))
+				var wx: int = coord.x * chunk_size + lx
+				var wy: int = coord.y * chunk_size + ly
+				var wz: int = coord.z * chunk_size + lz
+				list.append(Vector3i(wx, wy, wz))
+				samples[block_id] = list
+	print("Inner ramps: sw=%d se=%d nw=%d ne=%d" % [
+		counts[World.INNER_SOUTHWEST_ID],
+		counts[World.INNER_SOUTHEAST_ID],
+		counts[World.INNER_NORTHWEST_ID],
+		counts[World.INNER_NORTHEAST_ID],
+	])
+	print("Inner ramp samples: sw=%s se=%s nw=%s ne=%s" % [
+		samples[World.INNER_SOUTHWEST_ID],
+		samples[World.INNER_SOUTHEAST_ID],
+		samples[World.INNER_NORTHWEST_ID],
+		samples[World.INNER_NORTHEAST_ID],
+	])

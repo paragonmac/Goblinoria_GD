@@ -7,6 +7,7 @@ const ChunkMesherScript = preload("res://scripts/rendering/chunk_mesher.gd")
 const ChunkCacheScript = preload("res://scripts/rendering/chunk_cache.gd")
 const OverlayRendererScript = preload("res://scripts/rendering/overlay_renderer.gd")
 const BlockTerrainShader = preload("res://scripts/rendering/block_terrain.gdshader")
+const BlockTerrainDebugShader = preload("res://scripts/rendering/block_terrain_debug.gdshader")
 #endregion
 
 #region Constants
@@ -27,6 +28,7 @@ var mesher_thread = ChunkMesherScript.new()
 var chunk_cache = ChunkCacheScript.new()
 var overlay_renderer = OverlayRendererScript.new()
 var block_material: Material
+var debug_normals_enabled: bool = false
 var chunk_face_stats: Dictionary = {}
 var total_visible_faces: int = 0
 var total_occluded_faces: int = 0
@@ -48,6 +50,7 @@ var mesh_prefetch_set: Dictionary = {}
 var render_zone_visible: Dictionary = {}
 var block_solid_table := PackedByteArray()
 var block_color_table := PackedColorArray()
+var block_ramp_table := PackedByteArray()
 #endregion
 
 
@@ -417,6 +420,7 @@ func _build_mesh_job(coord: Vector3i, revision: int, top_render_y: int, prefetch
 		"blocks": chunk.blocks.duplicate(),
 		"neighbors": neighbors,
 		"solid_table": block_solid_table,
+		"ramp_table": block_ramp_table,
 		"color_table": block_color_table,
 		"mesh_revision": revision,
 		"local_top": local_top,
@@ -480,13 +484,17 @@ func _stop_mesh_worker() -> void:
 func _ensure_block_tables() -> void:
 	if world == null:
 		return
-	if block_solid_table.size() == BlockRegistry.TABLE_SIZE and block_color_table.size() == BlockRegistry.TABLE_SIZE:
+	if block_solid_table.size() == BlockRegistry.TABLE_SIZE \
+		and block_color_table.size() == BlockRegistry.TABLE_SIZE \
+		and block_ramp_table.size() == BlockRegistry.TABLE_SIZE:
 		return
 	block_solid_table.resize(BlockRegistry.TABLE_SIZE)
 	block_color_table.resize(BlockRegistry.TABLE_SIZE)
+	block_ramp_table.resize(BlockRegistry.TABLE_SIZE)
 	for i in range(BlockRegistry.TABLE_SIZE):
 		block_solid_table[i] = 1 if world.is_block_solid_id(i) else 0
 		block_color_table[i] = world.get_block_color(i)
+		block_ramp_table[i] = 1 if world.is_ramp_block_id(i) else 0
 
 
 func _clear_mesh_jobs() -> void:
@@ -828,7 +836,7 @@ func _set_chunk_visibility(coord: Vector3i, visible: bool) -> void:
 func get_block_material() -> Material:
 	if block_material == null:
 		var shader_material := ShaderMaterial.new()
-		shader_material.shader = BlockTerrainShader
+		shader_material.shader = BlockTerrainDebugShader if debug_normals_enabled else BlockTerrainShader
 		if world != null:
 			shader_material.set_shader_parameter("top_render_y", float(world.top_render_y))
 		block_material = shader_material
@@ -842,6 +850,16 @@ func set_top_render_y(value: int) -> void:
 		shader_material.set_shader_parameter("top_render_y", float(value))
 	if overlay_renderer != null:
 		overlay_renderer.set_top_render_y(value)
+
+
+func toggle_debug_normals() -> void:
+	debug_normals_enabled = not debug_normals_enabled
+	var mat := get_block_material()
+	if mat is ShaderMaterial:
+		var shader_material := mat as ShaderMaterial
+		shader_material.shader = BlockTerrainDebugShader if debug_normals_enabled else BlockTerrainShader
+		if world != null:
+			shader_material.set_shader_parameter("top_render_y", float(world.top_render_y))
 #endregion
 
 

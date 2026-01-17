@@ -12,7 +12,6 @@ const IDLE_PAUSE := 0.5
 const DEFAULT_SPEED := 4.0
 const WANDER_WAIT_MIN := 3.0
 const WANDER_WAIT_MAX := 5.0
-const STAIR_BLOCK_ID := 100
 const WORKER_BOX_SIZE := Vector3(0.5, 0.8, 0.5)
 const WORKER_BOX_Y_OFFSET := -0.1
 const SHADOW_SIZE := Vector2(0.9, 0.9)

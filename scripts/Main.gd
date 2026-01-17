@@ -271,6 +271,11 @@ func _handle_debug_keys() -> void:
 		debug_overlay.toggle_streaming_stats()
 	if is_key_just_pressed(KEY_F6):
 		debug_overlay.toggle_streaming_capture()
+	if is_key_just_pressed(KEY_F7):
+		debug_overlay.dump_ramp_counts()
+	if is_key_just_pressed(KEY_F8):
+		if world != null and world.renderer != null:
+			world.renderer.toggle_debug_normals()
 
 
 func _handle_render_layer_keys() -> void:

@@ -32,8 +32,8 @@ This is the working plan for chunked storage, streaming, and persistence.
 - [x] Use seeded generator only from `(seed, chunk_coord)`.
 - [x] `generate_chunk(chunk_coord)` fills chunk data.
 - [x] Hook chunk access: generate if missing.
-- [ ] Test: same coord always generates identical blocks.
-- [ ] Verify terrain/noise works with negative coords.
+- [x] Test: same coord always generates identical blocks.
+- [x] Verify terrain/noise works with negative coords.
 - [x] Remove `seed_all_chunks()` full-world generation.
 
 ## Milestone 3: Chunk Serialization + Version Header
