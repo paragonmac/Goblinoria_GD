@@ -8,6 +8,7 @@ const ChunkCacheScript = preload("res://scripts/rendering/chunk_cache.gd")
 const OverlayRendererScript = preload("res://scripts/rendering/overlay_renderer.gd")
 const BlockTerrainShader = preload("res://scripts/rendering/block_terrain.gdshader")
 const BlockTerrainDebugShader = preload("res://scripts/rendering/block_terrain_debug.gdshader")
+const BLOCK_ATLAS_PATH := "res://assets/textures/atlas.png"
 #endregion
 
 #region Constants
@@ -28,6 +29,7 @@ var mesher_thread = ChunkMesherScript.new()
 var chunk_cache = ChunkCacheScript.new()
 var overlay_renderer = OverlayRendererScript.new()
 var block_material: Material
+var block_atlas_texture: Texture2D
 var debug_normals_enabled: bool = false
 var chunk_face_stats: Dictionary = {}
 var total_visible_faces: int = 0
@@ -292,6 +294,7 @@ func _apply_mesh_result(result: Dictionary) -> bool:
 	var vertices: PackedVector3Array = result["vertices"]
 	var normals: PackedVector3Array = result["normals"]
 	var colors: PackedColorArray = result["colors"]
+	var uvs: PackedVector2Array = result["uv"]
 	var uv2s: PackedVector2Array = result["uv2"]
 	var visible_faces: int = int(result["visible_faces"])
 	var occluded_faces: int = int(result["occluded_faces"])
@@ -304,6 +307,7 @@ func _apply_mesh_result(result: Dictionary) -> bool:
 		arrays[Mesh.ARRAY_VERTEX] = vertices
 		arrays[Mesh.ARRAY_NORMAL] = normals
 		arrays[Mesh.ARRAY_COLOR] = colors
+		arrays[Mesh.ARRAY_TEX_UV] = uvs
 		arrays[Mesh.ARRAY_TEX_UV2] = uv2s
 		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
@@ -837,10 +841,23 @@ func get_block_material() -> Material:
 	if block_material == null:
 		var shader_material := ShaderMaterial.new()
 		shader_material.shader = BlockTerrainDebugShader if debug_normals_enabled else BlockTerrainShader
+		shader_material.set_shader_parameter("atlas_texture", _get_block_atlas_texture())
 		if world != null:
 			shader_material.set_shader_parameter("top_render_y", float(world.top_render_y))
 		block_material = shader_material
 	return block_material
+
+
+func _get_block_atlas_texture() -> Texture2D:
+	if block_atlas_texture != null:
+		return block_atlas_texture
+	var image := Image.new()
+	var err := image.load(BLOCK_ATLAS_PATH)
+	if err != OK:
+		push_warning("Block atlas load failed: %s (%d)" % [BLOCK_ATLAS_PATH, err])
+		return null
+	block_atlas_texture = ImageTexture.create_from_image(image)
+	return block_atlas_texture
 
 
 func set_top_render_y(value: int) -> void:

@@ -160,6 +160,10 @@ func step_world(dt: float) -> void:
 		world.update_blocked_tasks(dt)
 		debug_profiler.end("World.update_blocked_tasks")
 
+		debug_profiler.begin("World.update_reassign_tasks")
+		world.update_reassign_tasks(dt)
+		debug_profiler.end("World.update_reassign_tasks")
+
 		debug_profiler.finish_frame()
 		update_debug_timings_label()
 	else:

@@ -477,6 +477,7 @@ func update_world(dt: float) -> void:
 	update_task_queue()
 	update_task_overlays_phase()
 	update_blocked_tasks(dt)
+	update_reassign_tasks(dt)
 
 
 func update_workers(dt: float) -> void:
@@ -506,6 +507,11 @@ func update_task_overlays_phase() -> void:
 func update_blocked_tasks(dt: float) -> void:
 	if task_manager != null:
 		task_manager.update_blocked_tasks(dt)
+
+
+func update_reassign_tasks(dt: float) -> void:
+	if task_manager != null:
+		task_manager.update_reassign_tasks(dt)
 
 
 func update_render_height_queue() -> void:

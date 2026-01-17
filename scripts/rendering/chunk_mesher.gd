@@ -23,6 +23,8 @@ const HASH_SHIFT := 13
 const HASH_MASK := 0x7fffffff
 const BLOCK_NOISE_MOD := 1024
 const BLOCK_NOISE_DIV := 1023.0
+const ATLAS_COLUMNS := 4
+const ATLAS_ROWS := 4
 #endregion
 
 #region State
@@ -66,6 +68,7 @@ func build_chunk_mesh(world: World, cx: int, cy: int, cz: int) -> Dictionary:
 	var vertices: PackedVector3Array = data["vertices"]
 	var normals: PackedVector3Array = data["normals"]
 	var colors: PackedColorArray = data["colors"]
+	var uvs: PackedVector2Array = data["uv"]
 	var uv2s: PackedVector2Array = data["uv2"]
 	var visible_faces: int = int(data["visible_faces"])
 	var occluded_faces: int = int(data["occluded_faces"])
@@ -77,6 +80,7 @@ func build_chunk_mesh(world: World, cx: int, cy: int, cz: int) -> Dictionary:
 		arrays[Mesh.ARRAY_VERTEX] = vertices
 		arrays[Mesh.ARRAY_NORMAL] = normals
 		arrays[Mesh.ARRAY_COLOR] = colors
+		arrays[Mesh.ARRAY_TEX_UV] = uvs
 		arrays[Mesh.ARRAY_TEX_UV2] = uv2s
 		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
@@ -101,9 +105,18 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 	var solid_table: PackedByteArray = job["solid_table"]
 	var ramp_table: PackedByteArray = job.get("ramp_table", PackedByteArray())
 	var color_table: PackedColorArray = job["color_table"]
+	var atlas_columns: int = int(job.get("atlas_columns", ATLAS_COLUMNS))
+	var atlas_rows: int = int(job.get("atlas_rows", ATLAS_ROWS))
+	if atlas_columns <= 0:
+		atlas_columns = 1
+	if atlas_rows <= 0:
+		atlas_rows = 1
+	var tile_scale := _atlas_tile_scale(atlas_columns, atlas_rows)
+	var tile_count := atlas_columns * atlas_rows
 	var vertices := PackedVector3Array()
 	var normals := PackedVector3Array()
 	var colors := PackedColorArray()
+	var uvs := PackedVector2Array()
 	var uv2s := PackedVector2Array()
 	var visible_faces := 0
 	var occluded_faces := 0
@@ -138,6 +151,9 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 					if not _is_inner_corner_id(block_id):
 						color_id = below_id
 				var color := block_color_from_table(color_table, color_id, wx, wy, wz)
+				var tile_id := color_id
+				var tile_index := _tile_index_for_id(tile_id, tile_count)
+				var tile_offset := _atlas_tile_offset(tile_index, atlas_columns, tile_scale)
 
 				var forward_id := air_id
 				if lz + 1 < chunk_size:
@@ -178,11 +194,14 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 						vertices,
 						normals,
 						colors,
+						uvs,
 						uv2s,
 						base,
 						block_id,
 						color,
 						block_center_y,
+						tile_offset,
+						tile_scale,
 						above_occluding,
 						below_occluding,
 						back_occluding_ramp,
@@ -195,38 +214,38 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 					continue
 
 				var top_flag := 1.0 if above_occluding else 0.0
-				add_face(vertices, normals, colors, uv2s, base, Vector3.UP, color, block_center_y, top_flag)
+				add_face(vertices, normals, colors, uvs, uv2s, base, Vector3.UP, color, block_center_y, top_flag, tile_offset, tile_scale)
 				if above_occluding:
 					occluded_faces += 1
 				else:
 					visible_faces += 1
 
 				if not below_occluding:
-					add_face(vertices, normals, colors, uv2s, base, Vector3.DOWN, color, block_center_y, 0.0)
+					add_face(vertices, normals, colors, uvs, uv2s, base, Vector3.DOWN, color, block_center_y, 0.0, tile_offset, tile_scale)
 					visible_faces += 1
 				else:
 					occluded_faces += 1
 
 				if not forward_occluding:
-					add_face(vertices, normals, colors, uv2s, base, Vector3.FORWARD, color, block_center_y, 0.0)
+					add_face(vertices, normals, colors, uvs, uv2s, base, Vector3.FORWARD, color, block_center_y, 0.0, tile_offset, tile_scale)
 					visible_faces += 1
 				else:
 					occluded_faces += 1
 
 				if not back_occluding:
-					add_face(vertices, normals, colors, uv2s, base, Vector3.BACK, color, block_center_y, 0.0)
+					add_face(vertices, normals, colors, uvs, uv2s, base, Vector3.BACK, color, block_center_y, 0.0, tile_offset, tile_scale)
 					visible_faces += 1
 				else:
 					occluded_faces += 1
 
 				if not right_occluding:
-					add_face(vertices, normals, colors, uv2s, base, Vector3.RIGHT, color, block_center_y, 0.0)
+					add_face(vertices, normals, colors, uvs, uv2s, base, Vector3.RIGHT, color, block_center_y, 0.0, tile_offset, tile_scale)
 					visible_faces += 1
 				else:
 					occluded_faces += 1
 
 				if not left_occluding:
-					add_face(vertices, normals, colors, uv2s, base, Vector3.LEFT, color, block_center_y, 0.0)
+					add_face(vertices, normals, colors, uvs, uv2s, base, Vector3.LEFT, color, block_center_y, 0.0, tile_offset, tile_scale)
 					visible_faces += 1
 				else:
 					occluded_faces += 1
@@ -236,6 +255,7 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 		"vertices": vertices,
 		"normals": normals,
 		"colors": colors,
+		"uv": uvs,
 		"uv2": uv2s,
 		"visible_faces": visible_faces,
 		"occluded_faces": occluded_faces,
@@ -376,11 +396,66 @@ func _ramp_side_is_full(block_id: int, side: Vector3) -> bool:
 	else:
 		return false
 	return a > 0.0 and b > 0.0
+
+
+func _atlas_tile_scale(columns: int, rows: int) -> Vector2:
+	return Vector2(1.0 / float(columns), 1.0 / float(rows))
+
+
+func _atlas_tile_offset(tile_index: int, columns: int, tile_scale: Vector2) -> Vector2:
+	var col := 0
+	var row := 0
+	if columns > 0:
+		col = tile_index % columns
+		row = int(tile_index / columns)
+	return Vector2(float(col) * tile_scale.x, float(row) * tile_scale.y)
+
+
+func _tile_index_for_id(block_id: int, tile_count: int) -> int:
+	if tile_count <= 0:
+		return 0
+	if block_id < 0:
+		return 0
+	return block_id % tile_count
+
+
+func _planar_uv(vertex: Vector3, base: Vector3, normal: Vector3) -> Vector2:
+	var local := vertex - base
+	var abs_normal := Vector3(abs(normal.x), abs(normal.y), abs(normal.z))
+	var u: float
+	var v: float
+	if abs_normal.y >= abs_normal.x and abs_normal.y >= abs_normal.z:
+		u = local.x + 0.5
+		v = local.z + 0.5
+	elif abs_normal.x >= abs_normal.z:
+		u = local.z + 0.5
+		v = local.y + 0.5
+	else:
+		u = local.x + 0.5
+		v = local.y + 0.5
+	return Vector2(u, v)
+
+
+func _atlas_uv(local_uv: Vector2, tile_offset: Vector2, tile_scale: Vector2) -> Vector2:
+	return tile_offset + Vector2(local_uv.x * tile_scale.x, local_uv.y * tile_scale.y)
 #endregion
 
 
 #region Face Generation
-func add_face(vertices: PackedVector3Array, normals: PackedVector3Array, colors: PackedColorArray, uv2s: PackedVector2Array, base: Vector3, normal: Vector3, color: Color, block_center_y: float, top_flag: float) -> void:
+func add_face(
+	vertices: PackedVector3Array,
+	normals: PackedVector3Array,
+	colors: PackedColorArray,
+	uvs: PackedVector2Array,
+	uv2s: PackedVector2Array,
+	base: Vector3,
+	normal: Vector3,
+	color: Color,
+	block_center_y: float,
+	top_flag: float,
+	tile_offset: Vector2,
+	tile_scale: Vector2
+) -> void:
 	var h := FACE_HALF_SIZE
 	var v1: Vector3
 	var v2: Vector3
@@ -421,10 +496,15 @@ func add_face(vertices: PackedVector3Array, normals: PackedVector3Array, colors:
 	var shade := face_shade(normal)
 	var shaded := Color(color.r * shade, color.g * shade, color.b * shade, COLOR_MAX)
 	var uv2 := Vector2(block_center_y, top_flag)
+	var uv1 := _atlas_uv(_planar_uv(v1, base, normal), tile_offset, tile_scale)
+	var uv2_local := _atlas_uv(_planar_uv(v2, base, normal), tile_offset, tile_scale)
+	var uv3 := _atlas_uv(_planar_uv(v3, base, normal), tile_offset, tile_scale)
+	var uv4 := _atlas_uv(_planar_uv(v4, base, normal), tile_offset, tile_scale)
 
 	vertices.append_array([v1, v3, v2, v1, v4, v3])
 	normals.append_array([normal, normal, normal, normal, normal, normal])
 	colors.append_array([shaded, shaded, shaded, shaded, shaded, shaded])
+	uvs.append_array([uv1, uv3, uv2_local, uv1, uv4, uv3])
 	uv2s.append_array([uv2, uv2, uv2, uv2, uv2, uv2])
 
 
@@ -432,7 +512,9 @@ func add_quad_with_normal(
 	vertices: PackedVector3Array,
 	normals: PackedVector3Array,
 	colors: PackedColorArray,
+	uvs: PackedVector2Array,
 	uv2s: PackedVector2Array,
+	base: Vector3,
 	v1: Vector3,
 	v2: Vector3,
 	v3: Vector3,
@@ -441,6 +523,8 @@ func add_quad_with_normal(
 	color: Color,
 	block_center_y: float,
 	top_flag: float,
+	tile_offset: Vector2,
+	tile_scale: Vector2,
 	flip_winding: bool = false
 ) -> void:
 	var normal := (v2 - v1).cross(v3 - v1).normalized()
@@ -452,10 +536,16 @@ func add_quad_with_normal(
 	var shade := face_shade(normal)
 	var shaded := Color(color.r * shade, color.g * shade, color.b * shade, COLOR_MAX)
 	var uv2 := Vector2(block_center_y, top_flag)
+	var uv1 := _atlas_uv(_planar_uv(v1, base, expected_normal), tile_offset, tile_scale)
+	var uv2_local := _atlas_uv(_planar_uv(v2, base, expected_normal), tile_offset, tile_scale)
+	var uv3 := _atlas_uv(_planar_uv(v3, base, expected_normal), tile_offset, tile_scale)
+	var uv4 := _atlas_uv(_planar_uv(v4, base, expected_normal), tile_offset, tile_scale)
 	if reverse:
 		vertices.append_array([v1, v2, v3, v1, v3, v4])
+		uvs.append_array([uv1, uv2_local, uv3, uv1, uv3, uv4])
 	else:
 		vertices.append_array([v1, v3, v2, v1, v4, v3])
+		uvs.append_array([uv1, uv3, uv2_local, uv1, uv4, uv3])
 	normals.append_array([normal, normal, normal, normal, normal, normal])
 	colors.append_array([shaded, shaded, shaded, shaded, shaded, shaded])
 	uv2s.append_array([uv2, uv2, uv2, uv2, uv2, uv2])
@@ -465,7 +555,9 @@ func add_tri_with_normal(
 	vertices: PackedVector3Array,
 	normals: PackedVector3Array,
 	colors: PackedColorArray,
+	uvs: PackedVector2Array,
 	uv2s: PackedVector2Array,
+	base: Vector3,
 	v1: Vector3,
 	v2: Vector3,
 	v3: Vector3,
@@ -473,6 +565,8 @@ func add_tri_with_normal(
 	color: Color,
 	block_center_y: float,
 	top_flag: float,
+	tile_offset: Vector2,
+	tile_scale: Vector2,
 	flip_winding: bool = false
 ) -> void:
 	var normal := (v2 - v1).cross(v3 - v1).normalized()
@@ -489,9 +583,13 @@ func add_tri_with_normal(
 	var shade := face_shade(normal)
 	var shaded := Color(color.r * shade, color.g * shade, color.b * shade, COLOR_MAX)
 	var uv2 := Vector2(block_center_y, top_flag)
+	var uv1 := _atlas_uv(_planar_uv(v1, base, expected_normal), tile_offset, tile_scale)
+	var uv2_local := _atlas_uv(_planar_uv(v2, base, expected_normal), tile_offset, tile_scale)
+	var uv3 := _atlas_uv(_planar_uv(v3, base, expected_normal), tile_offset, tile_scale)
 	vertices.append_array([v1, v2, v3])
 	normals.append_array([normal, normal, normal])
 	colors.append_array([shaded, shaded, shaded])
+	uvs.append_array([uv1, uv2_local, uv3])
 	uv2s.append_array([uv2, uv2, uv2])
 
 
@@ -499,7 +597,9 @@ func add_tri_double_sided(
 	vertices: PackedVector3Array,
 	normals: PackedVector3Array,
 	colors: PackedColorArray,
+	uvs: PackedVector2Array,
 	uv2s: PackedVector2Array,
+	base: Vector3,
 	v1: Vector3,
 	v2: Vector3,
 	v3: Vector3,
@@ -507,17 +607,21 @@ func add_tri_double_sided(
 	color: Color,
 	block_center_y: float,
 	top_flag: float,
+	tile_offset: Vector2,
+	tile_scale: Vector2,
 	flip_winding: bool = false
 ) -> void:
-	add_tri_with_normal(vertices, normals, colors, uv2s, v1, v2, v3, expected_normal, color, block_center_y, top_flag, flip_winding)
-	add_tri_with_normal(vertices, normals, colors, uv2s, v1, v2, v3, expected_normal, color, block_center_y, top_flag, not flip_winding)
+	add_tri_with_normal(vertices, normals, colors, uvs, uv2s, base, v1, v2, v3, expected_normal, color, block_center_y, top_flag, tile_offset, tile_scale, flip_winding)
+	add_tri_with_normal(vertices, normals, colors, uvs, uv2s, base, v1, v2, v3, expected_normal, color, block_center_y, top_flag, tile_offset, tile_scale, not flip_winding)
 
 
 func add_quad_double_sided(
 	vertices: PackedVector3Array,
 	normals: PackedVector3Array,
 	colors: PackedColorArray,
+	uvs: PackedVector2Array,
 	uv2s: PackedVector2Array,
+	base: Vector3,
 	v1: Vector3,
 	v2: Vector3,
 	v3: Vector3,
@@ -525,21 +629,26 @@ func add_quad_double_sided(
 	expected_normal: Vector3,
 	color: Color,
 	block_center_y: float,
-	top_flag: float
+	top_flag: float,
+	tile_offset: Vector2,
+	tile_scale: Vector2
 ) -> void:
-	add_quad_with_normal(vertices, normals, colors, uv2s, v1, v2, v3, v4, expected_normal, color, block_center_y, top_flag, false)
-	add_quad_with_normal(vertices, normals, colors, uv2s, v1, v2, v3, v4, expected_normal, color, block_center_y, top_flag, true)
+	add_quad_with_normal(vertices, normals, colors, uvs, uv2s, base, v1, v2, v3, v4, expected_normal, color, block_center_y, top_flag, tile_offset, tile_scale, false)
+	add_quad_with_normal(vertices, normals, colors, uvs, uv2s, base, v1, v2, v3, v4, expected_normal, color, block_center_y, top_flag, tile_offset, tile_scale, true)
 
 
 func add_ramp_faces(
 	vertices: PackedVector3Array,
 	normals: PackedVector3Array,
 	colors: PackedColorArray,
+	uvs: PackedVector2Array,
 	uv2s: PackedVector2Array,
 	base: Vector3,
 	block_id: int,
 	color: Color,
 	block_center_y: float,
+	tile_offset: Vector2,
+	tile_scale: Vector2,
 	above_occluding: bool,
 	below_occluding: bool,
 	north_occluding: bool,
@@ -572,24 +681,24 @@ func add_ramp_faces(
 		var flip_inner_winding := block_id == 108 or block_id == 109 or block_id == 111
 		match low_corner:
 			"sw":
-				add_tri_double_sided(vertices, normals, colors, uv2s, sw, nw, ne, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
-				add_tri_double_sided(vertices, normals, colors, uv2s, sw, ne, se, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
+				add_tri_double_sided(vertices, normals, colors, uvs, uv2s, base, sw, nw, ne, Vector3.UP, color, block_center_y, top_flag, tile_offset, tile_scale, flip_inner_winding)
+				add_tri_double_sided(vertices, normals, colors, uvs, uv2s, base, sw, ne, se, Vector3.UP, color, block_center_y, top_flag, tile_offset, tile_scale, flip_inner_winding)
 			"se":
-				add_tri_double_sided(vertices, normals, colors, uv2s, se, ne, nw, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
-				add_tri_double_sided(vertices, normals, colors, uv2s, se, nw, sw, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
+				add_tri_double_sided(vertices, normals, colors, uvs, uv2s, base, se, ne, nw, Vector3.UP, color, block_center_y, top_flag, tile_offset, tile_scale, flip_inner_winding)
+				add_tri_double_sided(vertices, normals, colors, uvs, uv2s, base, se, nw, sw, Vector3.UP, color, block_center_y, top_flag, tile_offset, tile_scale, flip_inner_winding)
 			"nw":
-				add_tri_double_sided(vertices, normals, colors, uv2s, nw, ne, se, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
-				add_tri_double_sided(vertices, normals, colors, uv2s, nw, se, sw, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
+				add_tri_double_sided(vertices, normals, colors, uvs, uv2s, base, nw, ne, se, Vector3.UP, color, block_center_y, top_flag, tile_offset, tile_scale, flip_inner_winding)
+				add_tri_double_sided(vertices, normals, colors, uvs, uv2s, base, nw, se, sw, Vector3.UP, color, block_center_y, top_flag, tile_offset, tile_scale, flip_inner_winding)
 			"ne":
-				add_tri_double_sided(vertices, normals, colors, uv2s, ne, nw, sw, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
-				add_tri_double_sided(vertices, normals, colors, uv2s, ne, sw, se, Vector3.UP, color, block_center_y, top_flag, flip_inner_winding)
+				add_tri_double_sided(vertices, normals, colors, uvs, uv2s, base, ne, nw, sw, Vector3.UP, color, block_center_y, top_flag, tile_offset, tile_scale, flip_inner_winding)
+				add_tri_double_sided(vertices, normals, colors, uvs, uv2s, base, ne, sw, se, Vector3.UP, color, block_center_y, top_flag, tile_offset, tile_scale, flip_inner_winding)
 	else:
 		# Regular ramps use quad rendering, except ramp_se which needs flipped cull.
 		if block_id == 106:
-			add_tri_double_sided(vertices, normals, colors, uv2s, nw, se, sw, Vector3.UP, color, block_center_y, top_flag, true)
-			add_tri_double_sided(vertices, normals, colors, uv2s, nw, ne, se, Vector3.UP, color, block_center_y, top_flag, true)
+			add_tri_double_sided(vertices, normals, colors, uvs, uv2s, base, nw, se, sw, Vector3.UP, color, block_center_y, top_flag, tile_offset, tile_scale, true)
+			add_tri_double_sided(vertices, normals, colors, uvs, uv2s, base, nw, ne, se, Vector3.UP, color, block_center_y, top_flag, tile_offset, tile_scale, true)
 		else:
-			add_quad_double_sided(vertices, normals, colors, uv2s, nw, sw, se, ne, Vector3.UP, color, block_center_y, top_flag)
+			add_quad_double_sided(vertices, normals, colors, uvs, uv2s, base, nw, sw, se, ne, Vector3.UP, color, block_center_y, top_flag, tile_offset, tile_scale)
 	if above_occluding:
 		counts["occluded"] += 2
 	else:
@@ -598,13 +707,13 @@ func add_ramp_faces(
 	if below_occluding:
 		counts["occluded"] += 2
 	else:
-		add_quad_double_sided(vertices, normals, colors, uv2s, bnw, bne, bse, bsw, Vector3.DOWN, color, block_center_y, 0.0)
+		add_quad_double_sided(vertices, normals, colors, uvs, uv2s, base, bnw, bne, bse, bsw, Vector3.DOWN, color, block_center_y, 0.0, tile_offset, tile_scale)
 		counts["visible"] += 2
 
-	var north_counts := _add_ramp_side(vertices, normals, colors, uv2s, Vector3.BACK, bnw, bne, nw, ne, color, block_center_y, north_occluding)
-	var south_counts := _add_ramp_side(vertices, normals, colors, uv2s, Vector3.FORWARD, bsw, bse, sw, se, color, block_center_y, south_occluding)
-	var east_counts := _add_ramp_side(vertices, normals, colors, uv2s, Vector3.RIGHT, bne, bse, ne, se, color, block_center_y, east_occluding)
-	var west_counts := _add_ramp_side(vertices, normals, colors, uv2s, Vector3.LEFT, bnw, bsw, nw, sw, color, block_center_y, west_occluding)
+	var north_counts := _add_ramp_side(vertices, normals, colors, uvs, uv2s, base, Vector3.BACK, bnw, bne, nw, ne, color, block_center_y, tile_offset, tile_scale, north_occluding)
+	var south_counts := _add_ramp_side(vertices, normals, colors, uvs, uv2s, base, Vector3.FORWARD, bsw, bse, sw, se, color, block_center_y, tile_offset, tile_scale, south_occluding)
+	var east_counts := _add_ramp_side(vertices, normals, colors, uvs, uv2s, base, Vector3.RIGHT, bne, bse, ne, se, color, block_center_y, tile_offset, tile_scale, east_occluding)
+	var west_counts := _add_ramp_side(vertices, normals, colors, uvs, uv2s, base, Vector3.LEFT, bnw, bsw, nw, sw, color, block_center_y, tile_offset, tile_scale, west_occluding)
 
 	counts["visible"] += int(north_counts["visible"]) + int(south_counts["visible"]) + int(east_counts["visible"]) + int(west_counts["visible"])
 	counts["occluded"] += int(north_counts["occluded"]) + int(south_counts["occluded"]) + int(east_counts["occluded"]) + int(west_counts["occluded"])
@@ -615,7 +724,9 @@ func _add_ramp_side(
 	vertices: PackedVector3Array,
 	normals: PackedVector3Array,
 	colors: PackedColorArray,
+	uvs: PackedVector2Array,
 	uv2s: PackedVector2Array,
+	base: Vector3,
 	expected_normal: Vector3,
 	bottom_a: Vector3,
 	bottom_b: Vector3,
@@ -623,6 +734,8 @@ func _add_ramp_side(
 	top_b: Vector3,
 	color: Color,
 	block_center_y: float,
+	tile_offset: Vector2,
+	tile_scale: Vector2,
 	neighbor_occluding: bool
 ) -> Dictionary:
 	var counts := {"visible": 0, "occluded": 0}
@@ -635,14 +748,14 @@ func _add_ramp_side(
 	if top_a_flat and top_b_flat:
 		return counts
 	if top_a_flat and not top_b_flat:
-		add_tri_double_sided(vertices, normals, colors, uv2s, bottom_a, bottom_b, top_b, expected_normal, color, block_center_y, 0.0)
+		add_tri_double_sided(vertices, normals, colors, uvs, uv2s, base, bottom_a, bottom_b, top_b, expected_normal, color, block_center_y, 0.0, tile_offset, tile_scale)
 		counts["visible"] = 2
 		return counts
 	if top_b_flat and not top_a_flat:
-		add_tri_double_sided(vertices, normals, colors, uv2s, bottom_a, bottom_b, top_a, expected_normal, color, block_center_y, 0.0)
+		add_tri_double_sided(vertices, normals, colors, uvs, uv2s, base, bottom_a, bottom_b, top_a, expected_normal, color, block_center_y, 0.0, tile_offset, tile_scale)
 		counts["visible"] = 2
 		return counts
-	add_quad_double_sided(vertices, normals, colors, uv2s, bottom_a, bottom_b, top_b, top_a, expected_normal, color, block_center_y, 0.0)
+	add_quad_double_sided(vertices, normals, colors, uvs, uv2s, base, bottom_a, bottom_b, top_b, top_a, expected_normal, color, block_center_y, 0.0, tile_offset, tile_scale)
 	counts["visible"] = 2
 	return counts
 

@@ -7,6 +7,8 @@ var world: World
 var task_queue: TaskQueue
 var blocked_tasks: Array = []
 var blocked_recheck_timer := 1.0
+var reassign_timer := 1.0
+const REASSIGN_INTERVAL := 1.0
 #endregion
 
 
@@ -27,6 +29,13 @@ func update_blocked_tasks(dt: float) -> void:
 	if blocked_recheck_timer <= 0.0:
 		recheck_blocked_tasks()
 		blocked_recheck_timer = 0.5
+
+
+func update_reassign_tasks(dt: float) -> void:
+	reassign_timer -= dt
+	if reassign_timer <= 0.0:
+		reassess_waiting_tasks()
+		reassign_timer = REASSIGN_INTERVAL
 
 
 func reassess_waiting_tasks() -> void:
