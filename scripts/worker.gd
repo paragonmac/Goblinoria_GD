@@ -116,7 +116,7 @@ func update_worker(dt: float, world, task_queue, pathfinder) -> void:
         WorkerState.IDLE:
             update_idle(dt, world, task_queue, pathfinder)
         WorkerState.MOVING:
-            update_moving(dt, task_queue)
+            update_moving(dt, world, task_queue)
         WorkerState.WORKING:
             update_working(dt, world, task_queue)
         WorkerState.WAITING:
@@ -140,7 +140,7 @@ func update_idle(dt: float, world, task_queue, pathfinder) -> void:
         current_task_id = task.id
         path = maybe_path
         path_index = 0
-        set_target_from_path()
+        set_target_from_path(world)
         set_state(WorkerState.MOVING)
         return
 
@@ -197,13 +197,17 @@ func can_work_task(task) -> bool:
 
 
 #region Movement
-func set_target_from_path() -> void:
+func set_target_from_path(world) -> void:
     if path_index < path.size():
         var node: Vector3i = path[path_index]
         target_pos = Vector3(node.x, node.y, node.z)
+        if world != null:
+            var block_id: int = world.get_block(node.x, node.y, node.z)
+            if world.is_ramp_block_id(block_id):
+                target_pos.y += _ramp_center_offset(block_id)
 
 
-func update_moving(dt: float, task_queue) -> void:
+func update_moving(dt: float, world, task_queue) -> void:
     var delta := target_pos - position
     var dist := delta.length()
     if dist < MOVE_TARGET_EPSILON:
@@ -223,7 +227,7 @@ func update_moving(dt: float, task_queue) -> void:
                 set_state(WorkerState.IDLE)
                 wander_wait = rng.randf_range(WANDER_WAIT_MIN, WANDER_WAIT_MAX)
             return
-        set_target_from_path()
+        set_target_from_path(world)
         return
 
     var move_dist := move_speed * dt
@@ -231,6 +235,15 @@ func update_moving(dt: float, task_queue) -> void:
         position = target_pos
     else:
         position += delta.normalized() * move_dist
+
+func _ramp_center_offset(block_id: int) -> float:
+    match block_id:
+        104, 105, 106, 107:
+            return 0.25
+        108, 109, 110, 111:
+            return 0.75
+        _:
+            return 0.5
 #endregion
 
 
@@ -286,7 +299,7 @@ func update_waiting(_dt: float, world, task_queue, pathfinder) -> void:
     if maybe_path.size() > 0:
         path = maybe_path
         path_index = 0
-        set_target_from_path()
+        set_target_from_path(world)
         set_state(WorkerState.MOVING)
         return
 
@@ -317,7 +330,7 @@ func update_wander(dt: float, world, pathfinder) -> void:
         if found.size() > 0:
             path = found
             path_index = 0
-            set_target_from_path()
+            set_target_from_path(world)
             set_state(WorkerState.MOVING)
             return
 
