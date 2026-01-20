@@ -1,31 +1,14 @@
 extends Node3D
 ## Main game controller handling camera, input, menu, and game state.
 
-#region Constants - Engine & General
-const ENGINE_MAX_FPS := 1000
-const MOVE_EPSILON := 0.0001
-const SCREEN_CENTER_FACTOR := 0.5
-const DRAG_CLICK_THRESHOLD := 5.0
-const ROUND_HALF := 0.5
-const DUMMY_FLOAT := 666.0
+#region Preloads
+const MainCameraControllerScript = preload("res://scripts/main_camera_controller.gd")
+const MainSelectionControllerScript = preload("res://scripts/main_selection_controller.gd")
+const MainHudControllerScript = preload("res://scripts/main_hud_controller.gd")
 #endregion
 
-#region Constants - Camera
-const CAMERA_OFFSET := Vector3(0.0, 60.0, 60.0)
-const CAMERA_ORTHO_SIZE_MULT := 0.5
-const CAMERA_ORTHO_SIZE_DEFAULT := 40.0
-const CAMERA_ZOOM_MAX_MULT := 0.4
-const CAMERA_RAYCAST_DISTANCE := 500.0
-const CAM_SPEED_DEFAULT := 20.0
-const CAM_FAST_MULTIPLIER_DEFAULT := 3.0
-const CAM_MOUSE_SENSITIVITY_DEFAULT := 0.2
-const CAM_PAN_SPEED_DEFAULT := 1.0
-const CAM_ZOOM_MIN_DEFAULT := 5.0
-const CAM_ZOOM_STEP_DEFAULT := 1.15
-const ISO_PITCH_DEG := -35.0
-const ISO_YAW_DEG := 45.0
-const MOVE_VERTICAL_UNIT := 1.0
-const PLACE_HEIGHT_OFFSET := 1.0
+#region Constants - Engine & General
+const ENGINE_MAX_FPS := 1000
 #endregion
 
 #region Constants - Save System
@@ -46,47 +29,28 @@ const SAVE_PATH := "user://saves/world.save"
 @onready var menu_status_label: Label = $Menu/Panel/VBox/StatusLabel
 #endregion
 
-#region Camera State
-var cam_speed := CAM_SPEED_DEFAULT
-var cam_fast_multiplier := CAM_FAST_MULTIPLIER_DEFAULT
-var cam_mouse_sensitivity := CAM_MOUSE_SENSITIVITY_DEFAULT
-var cam_pan_speed := CAM_PAN_SPEED_DEFAULT
-var cam_pitch := ISO_PITCH_DEG
-var cam_yaw := ISO_YAW_DEG
-var cam_zoom_min := CAM_ZOOM_MIN_DEFAULT
-var cam_zoom_max := DUMMY_FLOAT
-var cam_zoom_step := CAM_ZOOM_STEP_DEFAULT
+#region Controllers
+var camera_controller: MainCameraController
+var selection_controller: MainSelectionController
+var hud_controller: MainHudController
 #endregion
 
 #region Input State
 var key_state: Dictionary = {}
-var prev_mouse_down := false
-var right_mouse_down := false
-var prev_mouse_pos := Vector2.ZERO
-#endregion
-
-#region Drag State
-var is_dragging := false
-var drag_start: Vector2
-var drag_plane_y: float
 #endregion
 
 #region Game State
 var debug_overlay: DebugOverlay
-var info_block_id: int = -1
-var info_block_pos := Vector3i(-1, -1, -1)
 var menu_open := false
 var world_started := false
 var last_render_height_queued: int = 0
-var y_level_label: Label
-var gen_status_label: Label
-var render_level_base_y: int = 0
 #endregion
 
 
 #region Lifecycle
 func _ready() -> void:
 	Engine.max_fps = ENGINE_MAX_FPS
+	_initialize_controllers()
 	_setup_camera()
 	_setup_hud()
 	_setup_debug_overlay()
@@ -109,129 +73,38 @@ func _input(event: InputEvent) -> void:
 #endregion
 
 
+#region Controllers
+func _initialize_controllers() -> void:
+	var viewport := get_viewport()
+	camera_controller = MainCameraControllerScript.new()
+	camera_controller.initialize(camera, viewport)
+	selection_controller = MainSelectionControllerScript.new()
+	selection_controller.initialize(world, camera, viewport, camera_controller)
+	hud_controller = MainHudControllerScript.new()
+#endregion
+
+
 #region Camera Setup & Updates
 func _setup_camera() -> void:
-	var center := Vector3(0.0, world.top_render_y, 0.0)
-	camera.position = center + CAMERA_OFFSET
-	camera.projection = Camera3D.PROJECTION_ORTHOGONAL
-	camera.current = true
-	camera.size = CAMERA_ORTHO_SIZE_DEFAULT
-	var base_radius := 8
-	if world.streaming != null:
-		base_radius = world.streaming.stream_radius_base
-	var base_span := float(base_radius * World.CHUNK_SIZE * 2 + World.CHUNK_SIZE)
-	cam_zoom_max = max(CAMERA_ORTHO_SIZE_DEFAULT, base_span * CAMERA_ORTHO_SIZE_MULT * CAMERA_ZOOM_MAX_MULT)
-	_apply_isometric_rotation()
-
-
-func _apply_isometric_rotation() -> void:
-	cam_pitch = ISO_PITCH_DEG
-	cam_yaw = ISO_YAW_DEG
-	camera.rotation = Vector3(deg_to_rad(cam_pitch), deg_to_rad(cam_yaw), 0.0)
+	if camera_controller != null:
+		camera_controller.setup_camera(world)
 
 
 func update_camera(dt: float) -> void:
-	_apply_isometric_rotation()
-	_update_camera_pan()
-	_update_camera_keyboard_movement(dt)
-
-
-func _update_camera_pan() -> void:
-	var down := Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT)
-
-	if down and not right_mouse_down:
-		prev_mouse_pos = get_viewport().get_mouse_position()
-
-	if down:
-		var mouse_pos := get_viewport().get_mouse_position()
-		var delta := mouse_pos - prev_mouse_pos
-		_apply_camera_pan(delta)
-		prev_mouse_pos = mouse_pos
-
-	right_mouse_down = down
-
-
-func _apply_camera_pan(delta: Vector2) -> void:
-	var viewport_height := float(get_viewport().get_visible_rect().size.y)
-	if viewport_height <= 0.0:
-		return
-
-	var units_per_pixel := camera.size / viewport_height
-	var right := _get_camera_right_flat()
-	var forward := _get_camera_forward_flat()
-	var pan := (right * -delta.x + forward * delta.y) * units_per_pixel * cam_pan_speed
-	camera.position += pan
-
-
-func _update_camera_keyboard_movement(dt: float) -> void:
-	var move_dir := _get_keyboard_movement_direction()
-	if move_dir.length_squared() <= MOVE_EPSILON:
-		return
-
-	var speed := cam_speed
-	if Input.is_key_pressed(KEY_SHIFT):
-		speed *= cam_fast_multiplier
-	camera.position += move_dir.normalized() * speed * dt
-
-
-func _get_keyboard_movement_direction() -> Vector3:
-	var move_dir := Vector3.ZERO
-	var forward := _get_camera_forward_flat()
-	var right := _get_camera_right_flat()
-
-	if Input.is_key_pressed(KEY_E) or Input.is_key_pressed(KEY_UP):
-		move_dir += forward
-	if Input.is_key_pressed(KEY_D) or Input.is_key_pressed(KEY_DOWN):
-		move_dir -= forward
-	if Input.is_key_pressed(KEY_F) or Input.is_key_pressed(KEY_RIGHT):
-		move_dir += right
-	if Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_LEFT):
-		move_dir -= right
-	if Input.is_key_pressed(KEY_R) or Input.is_key_pressed(KEY_PAGEUP):
-		move_dir.y += MOVE_VERTICAL_UNIT
-	if Input.is_key_pressed(KEY_Q) or Input.is_key_pressed(KEY_PAGEDOWN):
-		move_dir.y -= MOVE_VERTICAL_UNIT
-
-	return move_dir
-
-
-func _get_camera_forward_flat() -> Vector3:
-	var forward := -camera.global_transform.basis.z
-	forward.y = 0.0
-	return forward.normalized() if forward.length_squared() > MOVE_EPSILON else Vector3.ZERO
-
-
-func _get_camera_right_flat() -> Vector3:
-	var right := camera.global_transform.basis.x
-	right.y = 0.0
-	return right.normalized() if right.length_squared() > MOVE_EPSILON else Vector3.ZERO
+	if camera_controller != null:
+		camera_controller.update_camera(dt)
 
 
 func get_stream_view_rect() -> Rect2:
-	var viewport_size := get_viewport().get_visible_rect().size
-	var plane_y: float = float(world.top_render_y)
-	var points: Array = [
-		_raycast_to_plane(Vector2(0.0, 0.0), plane_y),
-		_raycast_to_plane(Vector2(viewport_size.x, 0.0), plane_y),
-		_raycast_to_plane(Vector2(viewport_size.x, viewport_size.y), plane_y),
-		_raycast_to_plane(Vector2(0.0, viewport_size.y), plane_y),
-	]
-	var min_x: float = 1e20
-	var max_x: float = -1e20
-	var min_z: float = 1e20
-	var max_z: float = -1e20
-	for point: Vector3 in points:
-		min_x = minf(min_x, point.x)
-		max_x = maxf(max_x, point.x)
-		min_z = minf(min_z, point.z)
-		max_z = maxf(max_z, point.z)
-	return Rect2(Vector2(min_x, min_z), Vector2(max_x - min_x, max_z - min_z))
+	if camera_controller == null or world == null:
+		return Rect2()
+	return camera_controller.get_stream_view_rect(float(world.top_render_y))
 
 
 func get_stream_target() -> Vector3:
-	var rect: Rect2 = get_stream_view_rect()
-	var center_2d: Vector2 = rect.position + rect.size * 0.5
-	return Vector3(center_2d.x, float(world.top_render_y), center_2d.y)
+	if camera_controller == null or world == null:
+		return Vector3.ZERO
+	return camera_controller.get_stream_target(float(world.top_render_y))
 #endregion
 
 
@@ -307,15 +180,8 @@ func _log_render_height_queue(delta: int) -> void:
 
 
 func _handle_zoom_input(event: InputEvent) -> void:
-	if not event is InputEventMouseButton:
-		return
-
-	var mouse_event := event as InputEventMouseButton
-	match mouse_event.button_index:
-		MOUSE_BUTTON_WHEEL_UP:
-			camera.size = clamp(camera.size / cam_zoom_step, cam_zoom_min, cam_zoom_max)
-		MOUSE_BUTTON_WHEEL_DOWN:
-			camera.size = clamp(camera.size * cam_zoom_step, cam_zoom_min, cam_zoom_max)
+	if camera_controller != null:
+		camera_controller.handle_zoom_input(event)
 
 
 func is_key_just_pressed(keycode: int) -> bool:
@@ -364,213 +230,18 @@ func _run_direct_updates(dt: float) -> void:
 
 #region Mouse Interaction
 func handle_mouse() -> void:
-	var mouse_down := Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
-	var just_pressed := mouse_down and not prev_mouse_down
-	var just_released := not mouse_down and prev_mouse_down
-	prev_mouse_down = mouse_down
-
-	if just_pressed and not is_dragging:
-		_start_drag()
-
-	if just_released and is_dragging:
-		_end_drag()
-		return
-
-	if is_dragging:
-		_update_drag_preview()
-
-
-func _start_drag() -> void:
-	drag_start = get_viewport().get_mouse_position()
-	is_dragging = true
-	drag_plane_y = _get_drag_plane_y(drag_start)
-
-
-func _end_drag() -> void:
-	var drag_end := get_viewport().get_mouse_position()
-	var drag_rect := _get_drag_rect(drag_start, drag_end, drag_plane_y)
-	_commit_selection(drag_start, drag_end, drag_rect)
-	is_dragging = false
-	world.clear_drag_preview()
-
-
-func _update_drag_preview() -> void:
-	var drag_now := get_viewport().get_mouse_position()
-	var drag_rect := _get_drag_rect(drag_start, drag_now, drag_plane_y)
-	world.set_drag_preview(drag_rect, world.player_mode)
+	if selection_controller != null:
+		selection_controller.handle_mouse()
 
 
 func update_hover_preview() -> void:
-	if is_dragging:
-		return
-	if world.player_mode != World.PlayerMode.STAIRS:
-		world.clear_drag_preview()
-		return
-
-	var hit := _raycast_block_at_mouse()
-	if not hit.get("hit", false):
-		world.clear_drag_preview()
-		return
-
-	var pos: Vector3i = hit["pos"]
-	if not world.can_place_stairs_at(pos.x, pos.y, pos.z):
-		world.clear_drag_preview()
-		return
-
-	var rect := {"min_x": pos.x, "max_x": pos.x, "min_z": pos.z, "max_z": pos.z, "y": pos.y}
-	world.set_drag_preview(rect, world.player_mode)
+	if selection_controller != null:
+		selection_controller.update_hover_preview()
 
 
 func update_info_hover() -> void:
-	if world.player_mode != World.PlayerMode.INFORMATION:
-		info_block_id = -1
-		return
-
-	var hit := _raycast_block_at_mouse()
-	if not hit.get("hit", false):
-		info_block_id = -1
-		return
-
-	var pos: Vector3i = hit["pos"]
-	info_block_id = world.get_block(pos.x, pos.y, pos.z)
-	info_block_pos = pos
-#endregion
-
-
-#region Raycast Utilities
-func _raycast_block_at_mouse() -> Dictionary:
-	var mouse_pos := get_viewport().get_mouse_position()
-	var ray_origin := camera.project_ray_origin(mouse_pos)
-	var ray_dir := camera.project_ray_normal(mouse_pos)
-	return world.raycast_block(ray_origin, ray_dir, CAMERA_RAYCAST_DISTANCE)
-
-
-func _raycast_to_plane(screen_pos: Vector2, plane_y: float) -> Vector3:
-	var ray_origin := camera.project_ray_origin(screen_pos)
-	var ray_dir := camera.project_ray_normal(screen_pos)
-
-	if abs(ray_dir.y) < MOVE_EPSILON:
-		return Vector3(ray_origin.x, plane_y, ray_origin.z)
-
-	var t := (plane_y - ray_origin.y) / ray_dir.y
-	if t < 0.0:
-		return Vector3(ray_origin.x, plane_y, ray_origin.z)
-
-	var hit := ray_origin + ray_dir * t
-	return Vector3(hit.x, plane_y, hit.z)
-
-
-func _screen_to_plane(screen_pos: Vector2, plane_y: float) -> Variant:
-	var ray_origin := camera.project_ray_origin(screen_pos)
-	var ray_dir := camera.project_ray_normal(screen_pos)
-
-	if abs(ray_dir.y) < MOVE_EPSILON:
-		return null
-
-	var t := (plane_y - ray_origin.y) / ray_dir.y
-	if t < 0:
-		return null
-
-	return ray_origin + ray_dir * t
-
-
-func _get_drag_plane_y(screen_pos: Vector2) -> float:
-	var ray_origin := camera.project_ray_origin(screen_pos)
-	var ray_dir := camera.project_ray_normal(screen_pos)
-	var hit := world.raycast_block(ray_origin, ray_dir, CAMERA_RAYCAST_DISTANCE)
-
-	if hit.get("hit", false):
-		var hit_pos: Vector3i = hit["pos"]
-		var base_y := float(hit_pos.y)
-		if world.player_mode == World.PlayerMode.PLACE:
-			base_y += PLACE_HEIGHT_OFFSET
-		return base_y
-
-	return float(world.top_render_y)
-
-
-func _get_drag_rect(start: Vector2, end: Vector2, plane_y: float) -> Dictionary:
-	var a: Variant = _screen_to_plane(start, plane_y)
-	var b: Variant = _screen_to_plane(end, plane_y)
-
-	if a == null or b == null:
-		return {}
-
-	var a_pos: Vector3 = a
-	var b_pos: Vector3 = b
-	return {
-		"min_x": min(a_pos.x, b_pos.x),
-		"max_x": max(a_pos.x, b_pos.x),
-		"min_z": min(a_pos.z, b_pos.z),
-		"max_z": max(a_pos.z, b_pos.z),
-		"y": plane_y,
-	}
-#endregion
-
-
-#region Selection & Tasks
-func _commit_selection(start: Vector2, end: Vector2, rect: Dictionary) -> void:
-	var is_click := _is_click(start, end)
-
-	if is_click:
-		_handle_click(start)
-		return
-
-	if rect.is_empty():
-		return
-
-	_enqueue_rect_tasks(rect)
-
-
-func _is_click(start: Vector2, end: Vector2) -> bool:
-	return abs(end.x - start.x) < DRAG_CLICK_THRESHOLD and abs(end.y - start.y) < DRAG_CLICK_THRESHOLD
-
-
-func _enqueue_rect_tasks(rect: Dictionary) -> void:
-	var min_x := int(floor(float(rect["min_x"]) + ROUND_HALF))
-	var max_x := int(floor(float(rect["max_x"]) + ROUND_HALF))
-	var min_z := int(floor(float(rect["min_z"]) + ROUND_HALF))
-	var max_z := int(floor(float(rect["max_z"]) + ROUND_HALF))
-	var y := int(rect["y"])
-
-	for x in range(min_x, max_x + 1):
-		for z in range(min_z, max_z + 1):
-			_enqueue_task_at(x, y, z)
-
-
-func _handle_click(screen_pos: Vector2) -> void:
-	var ray_origin := camera.project_ray_origin(screen_pos)
-	var ray_dir := camera.project_ray_normal(screen_pos)
-	var hit := world.raycast_block(ray_origin, ray_dir, CAMERA_RAYCAST_DISTANCE)
-
-	if not hit.get("hit", false):
-		return
-
-	var pos: Vector3i = hit["pos"]
-	if world.player_mode == World.PlayerMode.PLACE:
-		pos.y += 1
-
-	_enqueue_task_at(pos.x, pos.y, pos.z)
-
-
-func _enqueue_task_at(x: int, y: int, z: int) -> void:
-	if not _is_valid_position(x, y, z):
-		return
-
-	match world.player_mode:
-		World.PlayerMode.DIG:
-			if world.is_diggable_at(x, y, z):
-				world.queue_task_request(TaskQueue.TaskType.DIG, Vector3i(x, y, z), 0)
-		World.PlayerMode.PLACE:
-			if world.is_empty(x, y, z):
-				world.queue_task_request(TaskQueue.TaskType.PLACE, Vector3i(x, y, z), 8)
-		World.PlayerMode.STAIRS:
-			if world.can_place_stairs_at(x, y, z):
-				world.queue_task_request(TaskQueue.TaskType.STAIRS, Vector3i(x, y, z), World.STAIR_BLOCK_ID)
-
-
-func _is_valid_position(x: int, y: int, z: int) -> bool:
-	return y >= 0 and y < world.world_size_y
+	if selection_controller != null:
+		selection_controller.update_info_hover()
 #endregion
 
 
@@ -599,8 +270,12 @@ func open_menu() -> void:
 		menu_layer.visible = true
 	if menu_status_label:
 		menu_status_label.text = ""
-	is_dragging = false
-	world.clear_drag_preview()
+	if camera_controller != null:
+		camera_controller.reset_mouse_state()
+	if selection_controller != null:
+		selection_controller.cancel_drag_and_clear_preview()
+	elif world != null:
+		world.clear_drag_preview()
 
 
 func close_menu() -> void:
@@ -662,81 +337,22 @@ func _setup_debug_overlay() -> void:
 
 #region HUD
 func _setup_hud() -> void:
-	if hud_layer == null:
-		return
-	y_level_label = Label.new()
-	y_level_label.name = "YLevelLabel"
-	y_level_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	y_level_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	y_level_label.anchor_left = 1.0
-	y_level_label.anchor_right = 1.0
-	y_level_label.anchor_top = 1.0
-	y_level_label.anchor_bottom = 1.0
-	y_level_label.offset_left = -160.0
-	y_level_label.offset_top = -30.0
-	y_level_label.offset_right = -10.0
-	y_level_label.offset_bottom = -10.0
-	y_level_label.text = ""
-	hud_layer.add_child(y_level_label)
-	gen_status_label = Label.new()
-	gen_status_label.name = "GenStatusLabel"
-	gen_status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	gen_status_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	gen_status_label.anchor_left = 1.0
-	gen_status_label.anchor_right = 1.0
-	gen_status_label.anchor_top = 1.0
-	gen_status_label.anchor_bottom = 1.0
-	gen_status_label.offset_left = -240.0
-	gen_status_label.offset_top = -50.0
-	gen_status_label.offset_right = -10.0
-	gen_status_label.offset_bottom = -30.0
-	gen_status_label.text = ""
-	hud_layer.add_child(gen_status_label)
+	if hud_controller != null:
+		hud_controller.setup(hud_layer)
 
 
 func update_hud() -> void:
-	var mode_name := _get_mode_display_name()
-	var info_text := _get_info_display_text()
-	var task_count := world.task_queue.active_count()
-	hud_label.text = "Mode: %s%s | Tasks: %d" % [mode_name, info_text, task_count]
-	if y_level_label != null:
-		y_level_label.text = "Level: %d" % (world.top_render_y - render_level_base_y)
-	if gen_status_label != null:
-		var stats := world.get_generation_stats()
-		var queued: int = int(stats.get("queued", 0))
-		var active: int = int(stats.get("active", 0))
-		var results: int = int(stats.get("results", 0))
-		gen_status_label.text = "Gen q:%d act:%d res:%d" % [queued, active, results]
-
-
-func _get_mode_display_name() -> String:
-	match world.player_mode:
-		World.PlayerMode.INFORMATION:
-			return "Info"
-		World.PlayerMode.DIG:
-			return "Dig"
-		World.PlayerMode.PLACE:
-			return "Place"
-		World.PlayerMode.STAIRS:
-			return "Stairs"
-		_:
-			return "?"
-
-
-func _get_info_display_text() -> String:
-	if world.player_mode != World.PlayerMode.INFORMATION or info_block_id < 0:
-		return ""
-
-	var block_name := world.get_block_name(info_block_id)
-	return " | %s (%d) @ %d,%d,%d" % [
-		block_name,
-		info_block_id,
-		info_block_pos.x,
-		info_block_pos.y,
-		info_block_pos.z,
-	]
+	if hud_controller == null:
+		return
+	var info_id := -1
+	var info_pos := Vector3i(-1, -1, -1)
+	if selection_controller != null:
+		info_id = selection_controller.info_block_id
+		info_pos = selection_controller.info_block_pos
+	hud_controller.update_hud(world, hud_label, info_id, info_pos)
 #endregion
 
 
 func _set_render_level_base() -> void:
-	render_level_base_y = world.top_render_y
+	if hud_controller != null:
+		hud_controller.set_render_level_base(world)

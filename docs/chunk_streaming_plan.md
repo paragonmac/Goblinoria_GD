@@ -59,7 +59,7 @@ This is the working plan for chunked storage, streaming, and persistence.
 ## Milestone 5: Load/Stream Scheduling (Priority Queue)
 - [x] Chunk load queue with priority by distance to camera target (center-spiral order).
 - [x] Process N loads per frame (configurable).
-- [ ] Prioritize render zone loads before buffer zone loads.
+- [x] Prioritize render zone loads before buffer zone loads.
 - [ ] Prevent starvation (age bump).
 - [x] Cancel queued loads for chunks that leave range (queue reset on range change).
 - [x] Remove clampi/bounds logic in `world_streaming.gd` and `world.gd` for X/Z.

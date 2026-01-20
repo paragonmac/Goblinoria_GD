@@ -183,10 +183,10 @@ func update_draw_burden() -> void:
 	var stats: Dictionary = world.get_chunk_draw_stats()
 	var loaded: int = int(stats.get("loaded", 0))
 	var meshed: int = int(stats.get("meshed", 0))
-	var visible: int = int(stats.get("visible", 0))
+	var visible_count: int = int(stats.get("visible", 0))
 	var zone: int = int(stats.get("zone", 0))
 	draw_burden_label.text = "Chunks Loaded/Meshed: %d/%d" % [loaded, meshed]
-	draw_rendered_label.text = "Chunks Visible/Zone: %d/%d" % [visible, zone]
+	draw_rendered_label.text = "Chunks Visible/Zone: %d/%d" % [visible_count, zone]
 
 	var static_mem: float = float(Performance.get_monitor(Performance.MEMORY_STATIC))
 	draw_memory_label.text = "Memory: static %.1f MB" % [

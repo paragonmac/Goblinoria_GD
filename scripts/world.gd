@@ -51,8 +51,6 @@ const RAMP_BLOCK_IDS := [
 	INNER_SOUTHEAST_ID,
 	INNER_NORTHWEST_ID,
 	INNER_NORTHEAST_ID,
-	106,  # RAMP_SOUTHEAST literal
-	111,  # INNER_NORTHEAST literal
 ]
 const DEFAULT_MATERIAL := BLOCK_ID_GRANITE
 # Marching squares lookup: index = nw_high*1 + ne_high*2 + sw_high*4 + se_high*8
@@ -101,12 +99,9 @@ const DUMMY_INT := 666
 #endregion
 
 #region World State
-var world_size_x := CHUNK_SIZE * WORLD_CHUNKS_X
 var world_size_y := CHUNK_SIZE * WORLD_CHUNKS_Y
-var world_size_z := CHUNK_SIZE * WORLD_CHUNKS_Z
 var sea_level := DUMMY_INT
 var top_render_y := DUMMY_INT
-var vertical_scroll := DUMMY_INT
 var world_seed: int = 0
 var spawn_coord := Vector3i.ZERO
 #endregion
@@ -638,21 +633,21 @@ func get_render_height_bounds() -> Dictionary:
 			if render_min_x <= render_max_x and render_min_z <= render_max_z:
 				return {"min_x": render_min_x, "max_x": render_max_x, "min_z": render_min_z, "max_z": render_max_z}
 		if streaming.stream_min_x <= streaming.stream_max_x and streaming.stream_min_z <= streaming.stream_max_z:
-			var min_x := streaming.stream_min_x
-			var max_x := streaming.stream_max_x
-			var min_z := streaming.stream_min_z
-			var max_z := streaming.stream_max_z
-			return {"min_x": min_x, "max_x": max_x, "min_z": min_z, "max_z": max_z}
+			var stream_min_x := streaming.stream_min_x
+			var stream_max_x := streaming.stream_max_x
+			var stream_min_z := streaming.stream_min_z
+			var stream_max_z := streaming.stream_max_z
+			return {"min_x": stream_min_x, "max_x": stream_max_x, "min_z": stream_min_z, "max_z": stream_max_z}
 	var anchor := get_render_height_anchor()
 	var radius := 8
 	if streaming != null:
 		radius = streaming.stream_radius_base
 	var anchor_coord := world_to_chunk_coords(int(floor(anchor.x)), top_render_y, int(floor(anchor.z)))
-	var min_x := anchor_coord.x - radius
-	var max_x := anchor_coord.x + radius
-	var min_z := anchor_coord.z - radius
-	var max_z := anchor_coord.z + radius
-	return {"min_x": min_x, "max_x": max_x, "min_z": min_z, "max_z": max_z}
+	var anchor_min_x := anchor_coord.x - radius
+	var anchor_max_x := anchor_coord.x + radius
+	var anchor_min_z := anchor_coord.z - radius
+	var anchor_max_z := anchor_coord.z + radius
+	return {"min_x": anchor_min_x, "max_x": anchor_max_x, "min_z": anchor_min_z, "max_z": anchor_max_z}
 
 
 func get_render_height_anchor() -> Vector3:

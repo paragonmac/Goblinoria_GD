@@ -407,7 +407,7 @@ func _atlas_tile_offset(tile_index: int, columns: int, tile_scale: Vector2) -> V
 	var row := 0
 	if columns > 0:
 		col = tile_index % columns
-		row = int(tile_index / columns)
+		row = int(floor(float(tile_index) / float(columns)))
 	return Vector2(float(col) * tile_scale.x, float(row) * tile_scale.y)
 
 

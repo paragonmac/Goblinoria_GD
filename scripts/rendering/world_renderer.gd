@@ -6,6 +6,7 @@ class_name WorldRenderer
 const ChunkMesherScript = preload("res://scripts/rendering/chunk_mesher.gd")
 const ChunkCacheScript = preload("res://scripts/rendering/chunk_cache.gd")
 const OverlayRendererScript = preload("res://scripts/rendering/overlay_renderer.gd")
+const FrustumCullerScript = preload("res://scripts/rendering/frustum_culler.gd")
 const BlockTerrainShader = preload("res://scripts/rendering/block_terrain.gdshader")
 const BlockTerrainDebugShader = preload("res://scripts/rendering/block_terrain_debug.gdshader")
 const BLOCK_ATLAS_PATH := "res://assets/textures/atlas.png"
@@ -28,6 +29,7 @@ var mesher = ChunkMesherScript.new()
 var mesher_thread = ChunkMesherScript.new()
 var chunk_cache = ChunkCacheScript.new()
 var overlay_renderer = OverlayRendererScript.new()
+var frustum_culler = FrustumCullerScript.new()
 var block_material: Material
 var block_atlas_texture: Texture2D
 var debug_normals_enabled: bool = false
@@ -822,11 +824,11 @@ func _is_chunk_in_current_render_zone(coord: Vector3i) -> bool:
 	return render_zone_visible.has(coord)
 
 
-func _set_chunk_visibility(coord: Vector3i, visible: bool) -> void:
+func _set_chunk_visibility(coord: Vector3i, is_visible: bool) -> void:
 	var mesh_instance: MeshInstance3D = chunk_cache.get_chunk(coord)
 	if mesh_instance == null:
 		return
-	if not visible:
+	if not is_visible:
 		mesh_instance.visible = false
 		return
 	if mesh_instance.mesh == null:
@@ -897,7 +899,7 @@ func get_chunk_draw_stats() -> Dictionary:
 		loaded = world.chunks.size()
 	var keys: Array = chunk_cache.get_keys()
 	var meshed: int = keys.size()
-	var visible: int = 0
+	var visible_count: int = 0
 	for key in keys:
 		var mesh_instance: MeshInstance3D = chunk_cache.get_chunk(key)
 		if mesh_instance == null:
@@ -905,9 +907,9 @@ func get_chunk_draw_stats() -> Dictionary:
 		if mesh_instance.mesh == null:
 			continue
 		if mesh_instance.visible:
-			visible += 1
+			visible_count += 1
 	var zone: int = render_zone_visible.size()
-	return {"loaded": loaded, "meshed": meshed, "visible": visible, "zone": zone}
+	return {"loaded": loaded, "meshed": meshed, "visible": visible_count, "zone": zone}
 
 
 func get_mesh_work_stats() -> Dictionary:
@@ -930,20 +932,16 @@ func get_mesh_work_stats() -> Dictionary:
 func get_camera_tris_rendered(camera: Camera3D) -> Dictionary:
 	if camera == null:
 		return {"rendered": 0, "total": 0, "percent": 0.0}
-	var frustum: Array = camera.get_frustum()
-	var near_sample: float = max(camera.near + NEAR_SAMPLE_OFFSET, NEAR_SAMPLE_MIN)
-	var inside_point: Vector3 = camera.global_transform.origin + (-camera.global_transform.basis.z) * near_sample
+	var chunk_size: int = World.CHUNK_SIZE
 	var planes: Array = []
-	for plane in frustum:
-		var p: Plane = plane
-		var inside_positive: bool = p.distance_to(inside_point) >= 0.0
-		planes.append({"plane": p, "inside_positive": inside_positive})
+	if frustum_culler != null:
+		planes = frustum_culler.build_planes(camera, NEAR_SAMPLE_OFFSET, NEAR_SAMPLE_MIN)
 	var rendered_faces := 0
 	for key in chunk_face_stats.keys():
 		var counts: Vector2i = chunk_face_stats[key]
 		if counts.x == 0:
 			continue
-		if is_chunk_in_view(planes, key):
+		if frustum_culler != null and frustum_culler.is_chunk_in_view(planes, key, chunk_size):
 			rendered_faces += counts.x
 	var rendered_tris: int = rendered_faces * TRIS_PER_FACE
 	var total_tris: int = total_visible_faces * TRIS_PER_FACE
@@ -951,37 +949,6 @@ func get_camera_tris_rendered(camera: Camera3D) -> Dictionary:
 	if total_tris > 0:
 		percent = float(rendered_tris) / float(total_tris) * PERCENT_FACTOR
 	return {"rendered": rendered_tris, "total": total_tris, "percent": percent}
-
-
-func is_chunk_in_view(planes: Array, key: Vector3i) -> bool:
-	var chunk_size: int = World.CHUNK_SIZE
-	var min_corner := Vector3(
-		key.x * chunk_size,
-		key.y * chunk_size,
-		key.z * chunk_size
-	)
-	var max_corner := min_corner + Vector3(chunk_size, chunk_size, chunk_size)
-	for entry in planes:
-		var p: Plane = entry["plane"]
-		var inside_positive: bool = entry["inside_positive"]
-		var v: Vector3
-		if inside_positive:
-			v = Vector3(
-				max_corner.x if p.normal.x >= 0.0 else min_corner.x,
-				max_corner.y if p.normal.y >= 0.0 else min_corner.y,
-				max_corner.z if p.normal.z >= 0.0 else min_corner.z
-			)
-			if p.distance_to(v) < 0.0:
-				return false
-		else:
-			v = Vector3(
-				min_corner.x if p.normal.x >= 0.0 else max_corner.x,
-				min_corner.y if p.normal.y >= 0.0 else max_corner.y,
-				min_corner.z if p.normal.z >= 0.0 else max_corner.z
-			)
-			if p.distance_to(v) > 0.0:
-				return false
-	return true
 #endregion
 
 
