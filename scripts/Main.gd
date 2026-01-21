@@ -43,7 +43,6 @@ var key_state: Dictionary = {}
 var debug_overlay: DebugOverlay
 var menu_open := false
 var world_started := false
-var last_render_height_queued: int = 0
 #endregion
 
 
@@ -169,14 +168,14 @@ func _handle_render_layer_change(delta: int) -> void:
 
 
 func _apply_render_layer(delta: int) -> void:
-	last_render_height_queued = world.set_top_render_y(world.top_render_y + delta)
+	world.set_top_render_y(world.top_render_y + delta)
 
 
 func _log_render_height_queue(delta: int) -> void:
 	if debug_overlay == null or not debug_overlay.show_debug_timings:
 		return
 	var direction := "down" if delta < 0 else "up"
-	print("Render height %s: y=%d queued_chunks=%d" % [direction, world.top_render_y, last_render_height_queued])
+	print("Render height %s: y=%d" % [direction, world.top_render_y])
 
 
 func _handle_zoom_input(event: InputEvent) -> void:

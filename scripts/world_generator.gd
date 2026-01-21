@@ -329,6 +329,11 @@ func _height_at(wx: int, wz: int) -> int:
 	return _height_at_with_noise(wx, wz, world.sea_level, world.world_size_y, height_noise_flat, height_noise_small, height_noise_large, height_noise_macro)
 
 
+func get_surface_y(wx: int, wz: int) -> int:
+	_ensure_height_noise()
+	return _height_at(wx, wz)
+
+
 ## Marching squares ramp selection using 4 corner heights.
 ## Returns {"ramp_id": int, "ramp_y": int} where ramp_y is placement height.
 ## Corners: NW=(wx,wz), NE=(wx+1,wz), SW=(wx,wz+1), SE=(wx+1,wz+1)

@@ -153,6 +153,10 @@ func _ready() -> void:
 
 #region World Initialization
 func init_world(seed_world_flag: bool = true) -> void:
+	clear_tasks()
+	clear_workers()
+	if renderer != null:
+		renderer.clear_chunks()
 	chunks.clear()
 	chunk_access_tick = 0
 	sea_level = max(world_size_y - SEA_LEVEL_DEPTH, SEA_LEVEL_MIN)
@@ -164,7 +168,6 @@ func init_world(seed_world_flag: bool = true) -> void:
 		renderer.reset_stats()
 		renderer.set_top_render_y(top_render_y)
 	reset_streaming_state()
-	worker_chunk_cache.clear()
 	if seed_world_flag:
 		if world_seed == 0:
 			world_seed = generator.generate_world_seed()
@@ -189,6 +192,8 @@ func save_world(path: String) -> bool:
 
 func load_world(path: String) -> bool:
 	var ok := save_load.load_world(path)
+	if ok:
+		clear_tasks()
 	if ok and renderer != null:
 		renderer.set_top_render_y(top_render_y)
 	if ok and generator != null:
@@ -241,6 +246,7 @@ func ensure_chunk_generated(coord: Vector3i) -> ChunkDataType:
 	if chunk.generated:
 		return chunk
 	if save_load != null and save_load.load_chunk_into(coord, chunk):
+		touch_chunk(chunk)
 		return chunk
 	generator.generate_chunk(coord, chunk)
 	return chunk
@@ -358,7 +364,7 @@ func set_block(x: int, y: int, z: int, value: int) -> void:
 	set_block_raw(x, y, z, value, true)
 	if renderer != null:
 		var coord := world_to_chunk_coords(x, y, z)
-		renderer.queue_chunk_mesh_build(coord, -1, false, true, true)
+		renderer.queue_chunk_mesh_build(coord, -1, false, true)
 		var local := chunk_to_local_coords(x, y, z)
 		_queue_neighbor_mesh_updates(coord, local)
 
@@ -435,7 +441,7 @@ func _queue_mesh_if_loaded(coord: Vector3i) -> void:
 	chunk.mesh_revision += 1
 	if renderer != null:
 		renderer.invalidate_chunk_mesh_cache(coord)
-		renderer.queue_chunk_mesh_build(coord, -1, false, true, true)
+		renderer.queue_chunk_mesh_build(coord, -1, false, true)
 
 
 #region Rendering Stats
@@ -513,7 +519,7 @@ func update_render_height_queue() -> void:
 	if renderer == null:
 		return
 	renderer.process_render_height_queue(RENDER_HEIGHT_CHUNKS_PER_FRAME)
-	renderer.process_mesh_results(renderer.MESH_APPLY_BUDGET)
+	renderer.process_mesh_results_time_budget(renderer.MESH_WORK_BUDGET_MS)
 
 
 func process_generation_results() -> void:
@@ -558,7 +564,7 @@ func prewarm_render_cache(view_rect: Rect2, plane_y: float) -> void:
 	if streaming == null or renderer == null:
 		return
 	streaming.warmup_streaming(view_rect, plane_y)
-	renderer.flush_mesh_jobs(true)
+	renderer.flush_mesh_jobs(true, renderer.MESH_WORK_BUDGET_MS)
 #endregion
 
 
@@ -581,17 +587,34 @@ func spawn_initial_workers() -> void:
 		workers.append(worker)
 
 
-func find_surface_y(_x: int, _z: int) -> int:
+func find_surface_y(x: int, z: int) -> int:
+	if generator != null:
+		return generator.get_surface_y(x, z)
 	return clampi(sea_level, 0, world_size_y - 1)
 
 
 func clear_and_respawn_workers() -> void:
+	clear_workers()
+	spawn_initial_workers()
+#endregion
+
+
+func clear_tasks() -> void:
+	selected_blocks.clear()
+	if task_queue != null:
+		task_queue.tasks.clear()
+		task_queue.next_id = 1
+	if task_manager != null:
+		task_manager.blocked_tasks.clear()
+		task_manager.blocked_recheck_timer = 1.0
+		task_manager.reassign_timer = 1.0
+
+
+func clear_workers() -> void:
 	for worker in workers:
 		worker.queue_free()
 	workers.clear()
 	worker_chunk_cache.clear()
-	spawn_initial_workers()
-#endregion
 
 
 #region Drag Preview
@@ -607,11 +630,11 @@ func clear_drag_preview() -> void:
 
 
 #region Render Height
-func set_top_render_y(new_y: int) -> int:
+func set_top_render_y(new_y: int) -> void:
 	var old_y: int = top_render_y
-	top_render_y = clamp(new_y, 0, world_size_y - 1)
+	top_render_y = clampi(new_y, 0, world_size_y - 1)
 	if top_render_y == old_y:
-		return 0
+		return
 	if streaming != null and streaming.last_stream_target_valid:
 		var target_x: int = int(floor(streaming.last_stream_target.x))
 		var target_z: int = int(floor(streaming.last_stream_target.z))
@@ -620,7 +643,7 @@ func set_top_render_y(new_y: int) -> int:
 	if renderer != null:
 		renderer.set_top_render_y(top_render_y)
 		renderer.clear_render_height_queue()
-	return 0
+	return
 
 
 func get_render_height_bounds() -> Dictionary:

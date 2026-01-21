@@ -19,6 +19,9 @@ const NEAR_SAMPLE_OFFSET := 0.1
 const NEAR_SAMPLE_MIN := 0.1
 const MESH_BUILD_LOG_THRESHOLD_MS := 5.0
 const MESH_APPLY_BUDGET := 8
+const MESH_WORK_BUDGET_MS := 40.0
+const MESH_RESULT_BACKLOG_MAX := 32
+const MESH_RESULT_BACKLOG_SLEEP_USEC := 500
 const MESH_CACHE_RADIUS := 0
 const MESH_PREFETCH_BELOW_ONLY := true
 #endregion
@@ -179,6 +182,8 @@ func queue_chunk_mesh_build(coord: Vector3i, top_render_y: int = -1, respect_top
 	var queued_rev: int = int(mesh_job_set.get(coord, -1))
 	if queued_rev >= revision and chunk.mesh_state == ChunkData.MESH_STATE_PENDING and not respect_top:
 		return
+	if queued_rev >= 0 and queued_rev < revision:
+		_cancel_chunk_jobs(coord)
 	chunk.mesh_state = ChunkData.MESH_STATE_PENDING
 	var job := _build_mesh_job(coord, revision, top_render_y, false, respect_top)
 	if job.is_empty():
@@ -261,10 +266,51 @@ func process_mesh_results(budget: int) -> int:
 	return applied
 
 
-func flush_mesh_jobs(include_prefetch: bool = true) -> void:
+func process_mesh_results_time_budget(max_ms: float, max_count: int = -1) -> int:
+	if max_ms <= 0.0:
+		return 0
+	var start_usec := Time.get_ticks_usec()
+	var applied := 0
+	var build_ms_sum := 0.0
+	while true:
+		if max_count >= 0 and applied >= max_count:
+			break
+		var elapsed_ms := float(Time.get_ticks_usec() - start_usec) / 1000.0
+		if elapsed_ms >= max_ms:
+			break
+		if build_ms_sum >= max_ms:
+			break
+		mesh_result_mutex.lock()
+		if mesh_result_queue.is_empty():
+			mesh_result_mutex.unlock()
+			break
+		var next_build_ms := float(mesh_result_queue[0].get("build_ms", 0.0))
+		if build_ms_sum > 0.0 and build_ms_sum + next_build_ms > max_ms:
+			mesh_result_mutex.unlock()
+			break
+		var result: Dictionary = mesh_result_queue.pop_front()
+		mesh_result_mutex.unlock()
+		build_ms_sum += next_build_ms
+		if _apply_mesh_result(result):
+			applied += 1
+	return applied
+
+
+func flush_mesh_jobs(include_prefetch: bool = true, max_ms: float = -1.0) -> void:
+	var start_usec := Time.get_ticks_usec()
 	var safety := 0
 	while has_pending_mesh_work(include_prefetch):
-		process_mesh_results(MESH_APPLY_BUDGET * 8)
+		var applied := 0
+		if max_ms > 0.0:
+			var elapsed_ms := float(Time.get_ticks_usec() - start_usec) / 1000.0
+			var remaining_ms := max_ms - elapsed_ms
+			if remaining_ms <= 0.0:
+				break
+			applied = process_mesh_results_time_budget(remaining_ms)
+		else:
+			applied = process_mesh_results(MESH_APPLY_BUDGET * 8)
+		if applied <= 0:
+			OS.delay_usec(500)
 		safety += 1
 		if safety > 100000:
 			break
@@ -456,6 +502,16 @@ func _mesh_worker_loop() -> void:
 		mesh_job_mutex.unlock()
 		if job.is_empty():
 			continue
+		if MESH_RESULT_BACKLOG_MAX > 0:
+			var backlog := 0
+			mesh_result_mutex.lock()
+			backlog = mesh_result_queue.size()
+			mesh_result_mutex.unlock()
+			while backlog >= MESH_RESULT_BACKLOG_MAX and mesh_thread_running:
+				OS.delay_usec(MESH_RESULT_BACKLOG_SLEEP_USEC)
+				mesh_result_mutex.lock()
+				backlog = mesh_result_queue.size()
+				mesh_result_mutex.unlock()
 		var build_start := Time.get_ticks_usec()
 		var result: Dictionary = mesher_thread.build_chunk_arrays_from_data(job)
 		result["coord"] = job["coord"]
