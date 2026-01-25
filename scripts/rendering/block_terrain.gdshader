@@ -1,5 +1,5 @@
 shader_type spatial;
-render_mode cull_back, depth_prepass_alpha;
+render_mode cull_back, depth_draw_opaque;
 
 uniform float top_render_y = 0.0;
 uniform sampler2D atlas_texture;
@@ -16,5 +16,4 @@ void fragment() {
 	float height_shade = clamp(1.0 - (top_render_y - UV2.x) * HEIGHT_SHADE_FACTOR, HEIGHT_SHADE_MIN, 1.0);
 	vec3 tex = texture(atlas_texture, UV).rgb;
 	ALBEDO = tex * COLOR.rgb * height_shade;
-	ALPHA = COLOR.a;
 }

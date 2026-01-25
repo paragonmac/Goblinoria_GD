@@ -112,6 +112,27 @@ func add_sample(label: String, ms: float) -> void:
 
 
 #region Reporting
+func get_report_entries(limit: int = 8) -> Array:
+	var entries: Array = []
+	var labels: Array = []
+	for label in order:
+		if stats.has(label):
+			labels.append(label)
+	var count: int = labels.size() if limit <= 0 else min(limit, labels.size())
+	for i in range(count):
+		var label: String = labels[i]
+		var entry: Dictionary = stats[label]
+		var display_ms: float = float(entry.get("hold", entry.get("last", 0.0)))
+		entries.append({
+			"label": label,
+			"display_ms": display_ms,
+			"avg": float(entry.get("avg", 0.0)),
+			"peak": float(entry.get("peak", 0.0)),
+			"last": float(entry.get("last", 0.0)),
+		})
+	return entries
+
+
 func get_report_lines(limit: int = 8) -> Array:
 	var lines: Array = []
 	var labels: Array = []
@@ -143,9 +164,14 @@ func get_report_lines(limit: int = 8) -> Array:
 
 
 func _color_hex_for_value(value: float, min_val: float, max_val: float) -> String:
-	var t := 0.0
-	if max_val > min_val:
-		t = clamp((value - min_val) / (max_val - min_val), 0.0, 1.0)
-	var color := Color(0.0, 1.0, 0.0).lerp(Color(1.0, 0.0, 0.0), t)
-	return "%02x%02x%02x" % [int(color.r * 255.0), int(color.g * 255.0), int(color.b * 255.0)]
+	# Discrete thresholds so colors don't depend on the current min/max frame spread.
+	# < 15ms: green, 15-20ms: yellow, 20-30ms: orange, >= 30ms: red
+	# (min_val/max_val kept for signature compatibility)
+	if value >= 30.0:
+		return "ff4040"
+	if value >= 20.0:
+		return "ff8c00"
+	if value >= 15.0:
+		return "ffd000"
+	return "00ff00"
 #endregion

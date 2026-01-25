@@ -59,8 +59,10 @@ func setup_camera(world: World) -> void:
 	camera.size = CAMERA_ORTHO_SIZE_DEFAULT
 
 	var base_radius := 8
-	if world != null and world.streaming != null:
-		base_radius = world.streaming.stream_radius_base
+	if world != null:
+		var streaming_obj: Object = world.get("streaming") as Object
+		if streaming_obj != null:
+			base_radius = int(streaming_obj.get("stream_radius_base"))
 	var base_span := float(base_radius * World.CHUNK_SIZE * 2 + World.CHUNK_SIZE)
 	cam_zoom_max = max(CAMERA_ORTHO_SIZE_DEFAULT, base_span * CAMERA_ORTHO_SIZE_MULT * CAMERA_ZOOM_MAX_MULT)
 	_apply_isometric_rotation()

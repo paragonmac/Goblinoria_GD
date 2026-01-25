@@ -150,6 +150,8 @@ func _handle_debug_keys() -> void:
 			world.renderer.toggle_debug_normals()
 	if is_key_just_pressed(KEY_F9):
 		debug_overlay.export_map_snapshot()
+	if is_key_just_pressed(KEY_F10):
+		debug_overlay.toggle_debug_timings_log()
 
 
 func _handle_render_layer_keys() -> void:

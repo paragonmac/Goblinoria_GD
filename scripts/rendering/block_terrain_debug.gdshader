@@ -1,5 +1,5 @@
 shader_type spatial;
-render_mode unshaded, cull_disabled, depth_prepass_alpha;
+render_mode unshaded, cull_disabled, depth_draw_opaque;
 
 uniform float top_render_y = 0.0;
 uniform sampler2D atlas_texture;
@@ -12,5 +12,4 @@ void fragment() {
 		discard;
 	}
 	ALBEDO = NORMAL * 0.5 + vec3(0.5);
-	ALPHA = 1.0;
 }

@@ -83,6 +83,7 @@ const SEA_LEVEL_MIN := 8
 
 #region Constants - Workers
 const WORKER_SPAWN_HEIGHT_OFFSET := 1.0
+const WORKER_ACTIVITY_GRACE_SEC := 0.75
 const WORKER_SPAWN_OFFSETS := [
 	Vector2i(-10, -10),
 	Vector2i(10, -10),
@@ -95,6 +96,9 @@ const WORKER_SPAWN_OFFSETS := [
 const VISIBILITY_Y_OFFSET := 1.0
 const RENDER_HEIGHT_CHUNKS_PER_FRAME := 16
 const GENERATION_APPLY_BUDGET := 8
+const PREWARM_SYNC_RADIUS_CHUNKS_MIN := 6
+const PREWARM_SYNC_RADIUS_CHUNKS_MAX := 16
+const PREWARM_SYNC_LAYERS := 2
 const DUMMY_INT := 666
 #endregion
 
@@ -127,6 +131,7 @@ var debug_profiler: DebugProfiler
 #region Worker State
 var workers: Array = []
 var worker_chunk_cache: Dictionary = {}
+var worker_activity_timer: float = 0.0
 #endregion
 
 #region Player State
@@ -482,6 +487,7 @@ func update_world(dt: float) -> void:
 
 
 func update_workers(dt: float) -> void:
+	worker_activity_timer = max(0.0, worker_activity_timer - dt)
 	for worker in workers:
 		worker.update_worker(dt, self, task_queue, pathfinder)
 		worker.visible = is_visible_at_level(worker.position.y)
@@ -489,6 +495,7 @@ func update_workers(dt: float) -> void:
 		var last_coord: Vector3i = worker_chunk_cache.get(worker, Vector3i(-DUMMY_INT, -DUMMY_INT, -DUMMY_INT))
 		if coord != last_coord:
 			worker_chunk_cache[worker] = coord
+			worker_activity_timer = WORKER_ACTIVITY_GRACE_SEC
 			ensure_chunk_buffer_for_pos(coord)
 
 
@@ -518,19 +525,36 @@ func update_reassign_tasks(dt: float) -> void:
 func update_render_height_queue() -> void:
 	if renderer == null:
 		return
-	renderer.process_render_height_queue(RENDER_HEIGHT_CHUNKS_PER_FRAME)
-	renderer.process_mesh_results_time_budget(renderer.MESH_WORK_BUDGET_MS)
+	var render_budget := RENDER_HEIGHT_CHUNKS_PER_FRAME
+	var mesh_budget_ms := renderer.MESH_WORK_BUDGET_MS
+	if streaming != null and streaming.is_throttling():
+		render_budget = max(1, int(floor(float(RENDER_HEIGHT_CHUNKS_PER_FRAME) * 0.25)))
+		mesh_budget_ms = renderer.MESH_WORK_BUDGET_MS * 0.25
+	renderer.process_render_height_queue(render_budget)
+	renderer.process_mesh_results_time_budget(mesh_budget_ms)
 
 
 func process_generation_results() -> void:
 	if generator != null:
-		generator.process_generation_results(GENERATION_APPLY_BUDGET)
+		var budget := GENERATION_APPLY_BUDGET
+		if streaming != null:
+			if streaming.is_throttling():
+				budget = 1
+			elif streaming.is_slow_moving():
+				budget = 2
+			elif streaming.is_moving():
+				budget = 4
+		generator.process_generation_results(budget)
 
 
 func is_render_height_busy() -> bool:
 	if renderer == null:
 		return false
 	return renderer.has_pending_render_height_work()
+
+
+func has_recent_worker_activity() -> bool:
+	return worker_activity_timer > 0.0
 
 
 func reassess_waiting_tasks() -> void:
@@ -563,8 +587,37 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
 func prewarm_render_cache(view_rect: Rect2, plane_y: float) -> void:
 	if streaming == null or renderer == null:
 		return
+	_prewarm_sync_chunks(view_rect, plane_y)
 	streaming.warmup_streaming(view_rect, plane_y)
 	renderer.flush_mesh_jobs(true, renderer.MESH_WORK_BUDGET_MS)
+
+
+func _prewarm_sync_chunks(view_rect: Rect2, plane_y: float) -> void:
+	if renderer == null:
+		return
+	if PREWARM_SYNC_LAYERS <= 0:
+		return
+	if view_rect.size.x <= 0.0 or view_rect.size.y <= 0.0:
+		return
+	var half_span_world: float = maxf(view_rect.size.x, view_rect.size.y) * 0.5
+	var desired_radius: int = int(ceil(half_span_world / float(CHUNK_SIZE))) + 2
+	if streaming != null:
+		desired_radius = maxi(desired_radius, streaming.stream_radius_base)
+	var radius_chunks: int = clampi(desired_radius, PREWARM_SYNC_RADIUS_CHUNKS_MIN, PREWARM_SYNC_RADIUS_CHUNKS_MAX)
+	var center_x: float = view_rect.position.x + view_rect.size.x * 0.5
+	var center_z: float = view_rect.position.y + view_rect.size.y * 0.5
+	var anchor := world_to_chunk_coords(int(floor(center_x)), int(floor(plane_y)), int(floor(center_z)))
+	for layer in range(PREWARM_SYNC_LAYERS):
+		var cy: int = anchor.y - layer
+		if cy < 0:
+			continue
+		for dx in range(-radius_chunks, radius_chunks + 1):
+			for dz in range(-radius_chunks, radius_chunks + 1):
+				var coord := Vector3i(anchor.x + dx, cy, anchor.z + dz)
+				if not is_chunk_coord_valid(coord):
+					continue
+				ensure_chunk_generated(coord)
+				renderer.queue_chunk_mesh_build(coord, -1, false, true, true)
 #endregion
 
 
@@ -648,18 +701,18 @@ func set_top_render_y(new_y: int) -> void:
 
 func get_render_height_bounds() -> Dictionary:
 	if streaming != null:
-		var render_min_x := streaming.last_render_zone_min_cx
-		var render_max_x := streaming.last_render_zone_max_cx
-		var render_min_z := streaming.last_render_zone_min_cz
-		var render_max_z := streaming.last_render_zone_max_cz
+		var render_min_x: int = streaming.last_render_zone_min_cx
+		var render_max_x: int = streaming.last_render_zone_max_cx
+		var render_min_z: int = streaming.last_render_zone_min_cz
+		var render_max_z: int = streaming.last_render_zone_max_cz
 		if render_min_x != streaming.DUMMY_INT and render_max_x != -streaming.DUMMY_INT:
 			if render_min_x <= render_max_x and render_min_z <= render_max_z:
 				return {"min_x": render_min_x, "max_x": render_max_x, "min_z": render_min_z, "max_z": render_max_z}
 		if streaming.stream_min_x <= streaming.stream_max_x and streaming.stream_min_z <= streaming.stream_max_z:
-			var stream_min_x := streaming.stream_min_x
-			var stream_max_x := streaming.stream_max_x
-			var stream_min_z := streaming.stream_min_z
-			var stream_max_z := streaming.stream_max_z
+			var stream_min_x: int = streaming.stream_min_x
+			var stream_max_x: int = streaming.stream_max_x
+			var stream_min_z: int = streaming.stream_min_z
+			var stream_max_z: int = streaming.stream_max_z
 			return {"min_x": stream_min_x, "max_x": stream_max_x, "min_z": stream_min_z, "max_z": stream_max_z}
 	var anchor := get_render_height_anchor()
 	var radius := 8

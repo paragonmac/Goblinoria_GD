@@ -18,6 +18,7 @@ var show_draw_burden: bool = false
 var show_debug_timings: bool = false
 var show_streaming_stats: bool = false
 var streaming_capture_enabled: bool = false
+var debug_timings_log_enabled: bool = false
 #endregion
 
 #region UI Elements
@@ -34,6 +35,7 @@ var streaming_stats_label: Label
 const DEBUG_TIMING_LINES := 12
 const STREAMING_CAPTURE_INTERVAL := 0.25
 const DEBUG_POLL_INTERVAL_SEC := 0.25
+const DEBUG_TIMINGS_LOG_INTERVAL_SEC := 0.5
 const MAP_EXPORT_RADIUS := 64
 #endregion
 
@@ -42,6 +44,8 @@ var streaming_capture_timer: float = 0.0
 var streaming_capture_start_ms: int = 0
 var streaming_capture_path := ""
 var streaming_capture_lines: Array = []
+var debug_timings_log_path := ""
+var last_debug_timings_log_ms: int = 0
 var last_draw_burden_ms: int = 0
 var last_streaming_stats_ms: int = 0
 var last_debug_timings_ms: int = 0
@@ -103,6 +107,15 @@ func toggle_debug_timings() -> void:
 		debug_profiler.enabled = true
 	else:
 		debug_profiler.enabled = false
+		_stop_debug_timings_log()
+
+
+func toggle_debug_timings_log() -> void:
+	debug_timings_log_enabled = not debug_timings_log_enabled
+	if debug_timings_log_enabled:
+		_start_debug_timings_log()
+	else:
+		_stop_debug_timings_log()
 
 
 func toggle_streaming_stats() -> void:
@@ -478,7 +491,87 @@ func update_debug_timings_label() -> void:
 	last_debug_timings_ms = Time.get_ticks_msec()
 	var lines: Array = debug_profiler.get_report_lines(DEBUG_TIMING_LINES)
 	debug_timings_label.text = "Debug Timings (ms)\n" + "\n".join(lines)
+	_maybe_append_debug_timings_log()
 #endregion
+
+
+func _start_debug_timings_log() -> void:
+	if debug_profiler == null:
+		debug_timings_log_enabled = false
+		return
+	if not show_debug_timings:
+		toggle_debug_timings()
+	if not show_debug_timings:
+		debug_timings_log_enabled = false
+		return
+	last_debug_timings_log_ms = 0
+	var stamp := Time.get_datetime_string_from_system().replace(":", "-").replace(" ", "_")
+	debug_timings_log_path = "user://debug_timings_%s.csv" % stamp
+	_append_line(debug_timings_log_path, "t_ms,datetime,label,display_ms,last_ms,avg_ms,peak_ms")
+	print("Debug timings log enabled:", debug_timings_log_path)
+
+
+func _stop_debug_timings_log() -> void:
+	debug_timings_log_enabled = false
+	debug_timings_log_path = ""
+	last_debug_timings_log_ms = 0
+
+
+func _maybe_append_debug_timings_log() -> void:
+	if not debug_timings_log_enabled:
+		return
+	if debug_profiler == null or not debug_profiler.enabled:
+		return
+	if debug_timings_log_path.is_empty():
+		return
+
+	var now_ms: int = Time.get_ticks_msec()
+	if last_debug_timings_log_ms != 0 and float(now_ms - last_debug_timings_log_ms) < DEBUG_TIMINGS_LOG_INTERVAL_SEC * 1000.0:
+		return
+	last_debug_timings_log_ms = now_ms
+
+	var now_dt := Time.get_datetime_string_from_system()
+	var entries: Array = debug_profiler.get_report_entries(0)
+	var total_last_ms := 0.0
+	for e in entries:
+		total_last_ms += float(e.get("last", 0.0))
+	_append_line(debug_timings_log_path, "%d,%s,%s,%.3f,%.3f,%.3f,%.3f" % [
+		now_ms,
+		now_dt,
+		"__TOTAL__",
+		total_last_ms,
+		total_last_ms,
+		0.0,
+		0.0,
+	])
+	for e in entries:
+		var label := String(e.get("label", ""))
+		var display_ms := float(e.get("display_ms", 0.0))
+		var last_ms := float(e.get("last", 0.0))
+		var avg_ms := float(e.get("avg", 0.0))
+		var peak_ms := float(e.get("peak", 0.0))
+		_append_line(debug_timings_log_path, "%d,%s,%s,%.3f,%.3f,%.3f,%.3f" % [
+			now_ms,
+			now_dt,
+			label,
+			display_ms,
+			last_ms,
+			avg_ms,
+			peak_ms,
+		])
+
+
+func _append_line(path: String, line: String) -> void:
+	var file: FileAccess
+	if FileAccess.file_exists(path):
+		file = FileAccess.open(path, FileAccess.READ_WRITE)
+		if file != null:
+			file.seek_end()
+	else:
+		file = FileAccess.open(path, FileAccess.WRITE)
+	if file == null:
+		return
+	file.store_line(line)
 
 
 func _poll_due(last_ms: int) -> bool:
