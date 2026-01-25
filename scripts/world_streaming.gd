@@ -94,6 +94,7 @@ var last_render_zone_max_cy: int = -DUMMY_INT
 
 var chunk_build_queue: Array = []
 var chunk_build_set: Dictionary = {}
+var chunk_build_priority: Dictionary = {}
 var spiral_cache: Dictionary = {}  # Key: Vector2i(x_range, z_range) -> Array of offsets
 
 var throttle_has_prev: bool = false
@@ -120,6 +121,7 @@ func _init(world_ref) -> void:
 func reset_state() -> void:
 	chunk_build_queue.clear()
 	chunk_build_set.clear()
+	chunk_build_priority.clear()
 	spiral_cache.clear()
 	stream_radius_chunks = stream_radius_base
 	last_stream_chunk = Vector2i(-DUMMY_INT, -DUMMY_INT)
@@ -222,6 +224,10 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
 	var min_cy: int = 0
 	if stream_height_chunks > 0:
 		min_cy = maxi(0, max_cy - stream_height_chunks + 1)
+	if world != null and world.has_method("get_min_render_y"):
+		var min_render_y: int = int(world.call("get_min_render_y"))
+		var min_cy_limit: int = maxi(0, int(floor(float(min_render_y) / float(chunk_size))))
+		min_cy = maxi(min_cy, min_cy_limit)
 
 	var render_pad: float = float(render_radius_chunks * chunk_size)
 	var render_scale: float = float(max(render_view_scale, 0.0))
@@ -283,6 +289,7 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
 		stream_max_y = max_cy
 		chunk_build_queue.clear()
 		chunk_build_set.clear()
+		chunk_build_priority.clear()
 		var x_range: int = stream_max_x - stream_min_x + 1
 		var z_range: int = stream_max_z - stream_min_z + 1
 		var y_range: int = stream_max_y - stream_min_y + 1
@@ -366,9 +373,13 @@ func process_chunk_queue() -> void:
 	for _i in range(build_count):
 		var key: Vector3i = chunk_build_queue.pop_front()
 		chunk_build_set.erase(key)
-		var ready: bool = bool(world.request_chunk_generation_async(key))
+		var high_priority: bool = false
+		if chunk_build_priority.has(key):
+			high_priority = bool(chunk_build_priority[key])
+		chunk_build_priority.erase(key)
+		var ready: bool = bool(world.request_chunk_generation_async(key, high_priority))
 		if ready:
-			world.renderer.queue_chunk_mesh_build(key)
+			world.renderer.queue_chunk_mesh_build(key, -1, false, high_priority)
 		if stream_pending and key.y == stream_layer_y and stream_layer_remaining > 0:
 			stream_layer_remaining -= 1
 
@@ -416,7 +427,7 @@ func enqueue_stream_chunks() -> void:
 		var offset: Vector2i = render_spiral_offsets[render_plane_index]
 		render_plane_index += 1
 		stream_plane_index += 1
-		_queue_stream_offset(offset)
+		_queue_stream_offset(offset, true)
 		budget -= 1
 	if (throttled or slow_moving) and render_plane_index >= render_plane_size:
 		if throttle_frame_ms > THROTTLE_ALLOW_BUFFER_FRAME_MS:
@@ -426,7 +437,7 @@ func enqueue_stream_chunks() -> void:
 		var offset: Vector2i = buffer_spiral_offsets[buffer_plane_index]
 		buffer_plane_index += 1
 		stream_plane_index += 1
-		_queue_stream_offset(offset)
+		_queue_stream_offset(offset, false)
 		budget -= 1
 #endregion
 
@@ -520,10 +531,14 @@ func _partition_spiral_offsets(render_min_cx: int, render_max_cx: int, render_mi
 			buffer_plane_size += 1
 
 
-func _queue_stream_offset(offset: Vector2i) -> void:
+func _queue_stream_offset(offset: Vector2i, high_priority: bool) -> void:
 	var key := Vector3i(stream_min_x + offset.x, stream_layer_y, stream_min_z + offset.y)
 	var existing: ChunkData = world.get_chunk(key)
 	if existing != null and existing.mesh_state == ChunkData.MESH_STATE_PENDING:
+		if high_priority:
+			var ready: bool = bool(world.request_chunk_generation_async(key, true))
+			if ready and world.renderer != null:
+				world.renderer.queue_chunk_mesh_build(key, -1, false, true)
 		if stream_layer_remaining > 0:
 			stream_layer_remaining -= 1
 		return
@@ -532,6 +547,7 @@ func _queue_stream_offset(offset: Vector2i) -> void:
 			stream_layer_remaining -= 1
 	elif not chunk_build_set.has(key):
 		chunk_build_set[key] = true
+		chunk_build_priority[key] = high_priority
 		chunk_build_queue.append(key)
 		var chunk: ChunkData = existing if existing != null else world.ensure_chunk(key)
 		chunk.mesh_state = ChunkData.MESH_STATE_PENDING
@@ -557,4 +573,5 @@ func _unload_distant_chunks(center_cx: int, center_cz: int) -> void:
 		if chunk_build_set.erase(coord):
 			# Only search queue if it was in the set (avoids O(N) scan)
 			chunk_build_queue.erase(coord)
+		chunk_build_priority.erase(coord)
 		world.unload_chunk(coord)

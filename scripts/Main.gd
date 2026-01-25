@@ -27,6 +27,7 @@ const SAVE_PATH := "user://saves/world.save"
 @onready var load_button: Button = $Menu/Panel/VBox/LoadButton
 @onready var quit_button: Button = $Menu/Panel/VBox/QuitButton
 @onready var menu_status_label: Label = $Menu/Panel/VBox/StatusLabel
+@onready var world_environment: WorldEnvironment = $WorldEnvironment
 #endregion
 
 #region Controllers
@@ -43,6 +44,8 @@ var key_state: Dictionary = {}
 var debug_overlay: DebugOverlay
 var menu_open := false
 var world_started := false
+var default_bg_mode: int = -1
+var default_bg_color: Color = Color.BLACK
 #endregion
 
 
@@ -54,6 +57,7 @@ func _ready() -> void:
 	_setup_hud()
 	_setup_debug_overlay()
 	_setup_menu()
+	_cache_environment_defaults()
 	open_menu()
 
 
@@ -214,6 +218,7 @@ func _run_timed_updates(dt: float) -> void:
 	debug_overlay.update_streaming_stats()
 	debug_overlay.update_streaming_capture(dt)
 	debug_overlay.step_world(dt)
+	_update_depth_limit_background()
 
 
 func _run_direct_updates(dt: float) -> void:
@@ -226,7 +231,29 @@ func _run_direct_updates(dt: float) -> void:
 	update_info_hover()
 	update_hud()
 	world.update_world(dt)
+	_update_depth_limit_background()
 #endregion
+
+
+func _cache_environment_defaults() -> void:
+	if world_environment == null or world_environment.environment == null:
+		return
+	default_bg_mode = world_environment.environment.background_mode
+	default_bg_color = world_environment.environment.background_color
+
+
+func _update_depth_limit_background() -> void:
+	if world_environment == null or world_environment.environment == null or world == null:
+		return
+	var min_y: int = world.get_min_render_y()
+	var restricted: bool = world.top_render_y < min_y
+	if restricted:
+		world_environment.environment.background_mode = Environment.BG_COLOR
+		world_environment.environment.background_color = Color(0.0, 0.0, 0.0, 1.0)
+	else:
+		if default_bg_mode >= 0:
+			world_environment.environment.background_mode = default_bg_mode
+		world_environment.environment.background_color = default_bg_color
 
 
 #region Mouse Interaction

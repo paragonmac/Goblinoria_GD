@@ -98,7 +98,8 @@ const RENDER_HEIGHT_CHUNKS_PER_FRAME := 16
 const GENERATION_APPLY_BUDGET := 8
 const PREWARM_SYNC_RADIUS_CHUNKS_MIN := 6
 const PREWARM_SYNC_RADIUS_CHUNKS_MAX := 16
-const PREWARM_SYNC_LAYERS := 2
+const PREWARM_SYNC_LAYERS := 1
+const DEPTH_VISIBILITY_PADDING := 1
 const DUMMY_INT := 666
 #endregion
 
@@ -140,6 +141,10 @@ var player_mode := PlayerMode.DIG
 var selected_blocks: Dictionary = {}
 #endregion
 
+#region Depth Visibility
+var deepest_structure_y: int = DUMMY_INT
+#endregion
+
 
 #region Lifecycle
 func _ready() -> void:
@@ -167,11 +172,13 @@ func init_world(seed_world_flag: bool = true) -> void:
 	sea_level = max(world_size_y - SEA_LEVEL_DEPTH, SEA_LEVEL_MIN)
 	top_render_y = sea_level
 	spawn_coord = Vector3i(0, sea_level, 0)
+	deepest_structure_y = sea_level
 	if generator != null:
 		generator.reset_generation_jobs()
 	if renderer != null:
 		renderer.reset_stats()
 		renderer.set_top_render_y(top_render_y)
+		renderer.set_min_render_y(get_min_render_y())
 	reset_streaming_state()
 	if seed_world_flag:
 		if world_seed == 0:
@@ -257,7 +264,7 @@ func ensure_chunk_generated(coord: Vector3i) -> ChunkDataType:
 	return chunk
 
 
-func request_chunk_generation_async(coord: Vector3i) -> bool:
+func request_chunk_generation_async(coord: Vector3i, high_priority: bool = false) -> bool:
 	if not is_chunk_coord_valid(coord):
 		return false
 	var chunk := ensure_chunk(coord)
@@ -267,7 +274,7 @@ func request_chunk_generation_async(coord: Vector3i) -> bool:
 		touch_chunk(chunk)
 		return true
 	if generator != null:
-		generator.queue_chunk_generation(coord)
+		generator.queue_chunk_generation(coord, high_priority)
 	return false
 
 
@@ -327,7 +334,12 @@ func set_block_raw(x: int, y: int, z: int, value: int, mark_dirty: bool) -> void
 	var coord := world_to_chunk_coords(x, y, z)
 	var local := chunk_to_local_coords(x, y, z)
 	var chunk: ChunkDataType = ensure_chunk(coord)
-	chunk.blocks[chunk_index(local.x, local.y, local.z)] = value
+	var idx := chunk_index(local.x, local.y, local.z)
+	var prev := int(chunk.blocks[idx])
+	if prev == value:
+		touch_chunk(chunk)
+		return
+	chunk.blocks[idx] = value
 	if mark_dirty:
 		chunk.dirty = true
 		chunk.generated = true
@@ -335,6 +347,7 @@ func set_block_raw(x: int, y: int, z: int, value: int, mark_dirty: bool) -> void
 		chunk.mesh_revision += 1
 		if renderer != null:
 			renderer.invalidate_chunk_mesh_cache(coord)
+		_update_depth_visibility_from_change(y)
 	touch_chunk(chunk)
 #endregion
 
@@ -545,6 +558,20 @@ func process_generation_results() -> void:
 			elif streaming.is_moving():
 				budget = 4
 		generator.process_generation_results(budget)
+
+
+func get_min_render_y() -> int:
+	var base_y := sea_level
+	if deepest_structure_y != DUMMY_INT:
+		base_y = deepest_structure_y
+	return clampi(base_y - DEPTH_VISIBILITY_PADDING, 0, world_size_y - 1)
+
+
+func _update_depth_visibility_from_change(y: int) -> void:
+	if deepest_structure_y == DUMMY_INT or y < deepest_structure_y:
+		deepest_structure_y = y
+		if renderer != null:
+			renderer.set_min_render_y(get_min_render_y())
 
 
 func is_render_height_busy() -> bool:

@@ -181,6 +181,8 @@ func queue_chunk_mesh_build(coord: Vector3i, top_render_y: int = -1, respect_top
 	var revision: int = chunk.mesh_revision
 	var queued_rev: int = int(mesh_job_set.get(coord, -1))
 	if queued_rev >= revision and chunk.mesh_state == ChunkData.MESH_STATE_PENDING and not respect_top:
+		if high_priority:
+			_reprioritize_mesh_job(coord)
 		return
 	if queued_rev >= 0 and queued_rev < revision:
 		_cancel_chunk_jobs(coord)
@@ -202,6 +204,19 @@ func queue_chunk_mesh_build(coord: Vector3i, top_render_y: int = -1, respect_top
 		mesh_job_queue.insert(insert_index, job)
 	mesh_job_mutex.unlock()
 	mesh_job_semaphore.post()
+
+
+func _reprioritize_mesh_job(coord: Vector3i) -> void:
+	mesh_job_mutex.lock()
+	for i in range(mesh_job_queue.size()):
+		var job: Dictionary = mesh_job_queue[i]
+		var job_coord: Vector3i = job.get("coord", Vector3i.ZERO)
+		if job_coord != coord:
+			continue
+		mesh_job_queue.remove_at(i)
+		mesh_job_queue.insert(0, job)
+		break
+	mesh_job_mutex.unlock()
 
 
 func _queue_prefetch_layers(coord: Vector3i, local_top: int) -> void:
@@ -902,6 +917,7 @@ func get_block_material() -> Material:
 		shader_material.set_shader_parameter("atlas_texture", _get_block_atlas_texture())
 		if world != null:
 			shader_material.set_shader_parameter("top_render_y", float(world.top_render_y))
+			shader_material.set_shader_parameter("min_render_y", float(world.get_min_render_y()))
 		block_material = shader_material
 	return block_material
 
@@ -923,8 +939,17 @@ func set_top_render_y(value: int) -> void:
 	if mat is ShaderMaterial:
 		var shader_material := mat as ShaderMaterial
 		shader_material.set_shader_parameter("top_render_y", float(value))
+		if world != null:
+			shader_material.set_shader_parameter("min_render_y", float(world.get_min_render_y()))
 	if overlay_renderer != null:
 		overlay_renderer.set_top_render_y(value)
+
+
+func set_min_render_y(value: int) -> void:
+	var mat := get_block_material()
+	if mat is ShaderMaterial:
+		var shader_material := mat as ShaderMaterial
+		shader_material.set_shader_parameter("min_render_y", float(value))
 
 
 func toggle_debug_normals() -> void:
@@ -935,6 +960,7 @@ func toggle_debug_normals() -> void:
 		shader_material.shader = BlockTerrainDebugShader if debug_normals_enabled else BlockTerrainShader
 		if world != null:
 			shader_material.set_shader_parameter("top_render_y", float(world.top_render_y))
+			shader_material.set_shader_parameter("min_render_y", float(world.get_min_render_y()))
 #endregion
 
 

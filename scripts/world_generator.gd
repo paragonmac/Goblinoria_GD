@@ -123,8 +123,24 @@ func prime_spawn_chunks() -> void:
 
 
 #region Async Generation
-func queue_chunk_generation(coord: Vector3i) -> bool:
+func queue_chunk_generation(coord: Vector3i, high_priority: bool = false) -> bool:
+	generation_mutex.lock()
 	if generation_job_set.has(coord):
+		var existing_prio: int = int(generation_job_set.get(coord, 0))
+		if high_priority and existing_prio < 2:
+			generation_job_set[coord] = 2
+			for i in range(generation_job_queue.size()):
+				var job: Dictionary = generation_job_queue[i]
+				var job_coord: Vector3i = job.get("coord", Vector3i.ZERO)
+				if job_coord == coord:
+					job["high_priority"] = true
+					generation_job_queue.remove_at(i)
+					generation_job_queue.insert(0, job)
+					break
+			generation_mutex.unlock()
+			generation_semaphore.post()
+			return true
+		generation_mutex.unlock()
 		return false
 	if not generation_thread_running:
 		_start_generation_thread()
@@ -139,10 +155,13 @@ func queue_chunk_generation(coord: Vector3i) -> bool:
 		"block_id_default": World.DEFAULT_MATERIAL,
 		"block_id_grass": World.BLOCK_ID_GRASS,
 		"block_id_dirt": World.BLOCK_ID_DIRT,
+		"high_priority": high_priority,
 	}
-	generation_mutex.lock()
-	generation_job_set[coord] = true
-	generation_job_queue.append(job)
+	generation_job_set[coord] = 2 if high_priority else 1
+	if high_priority:
+		generation_job_queue.insert(0, job)
+	else:
+		generation_job_queue.append(job)
 	generation_mutex.unlock()
 	generation_semaphore.post()
 	return true
@@ -178,7 +197,8 @@ func process_generation_results(budget: int) -> int:
 		chunk.mesh_state = ChunkData.MESH_STATE_NONE
 		world.touch_chunk(chunk)
 		if world.renderer != null:
-			world.renderer.queue_chunk_mesh_build(coord)
+			var high_priority: bool = bool(result.get("high_priority", false))
+			world.renderer.queue_chunk_mesh_build(coord, -1, false, high_priority)
 		_clear_generation_job(coord)
 		applied += 1
 	return applied
@@ -249,6 +269,7 @@ func _generation_thread_main() -> void:
 			"coord": job.get("coord", Vector3i.ZERO),
 			"blocks": blocks,
 			"epoch": job.get("epoch", 0),
+			"high_priority": bool(job.get("high_priority", false)),
 		}
 		generation_mutex.lock()
 		generation_active -= 1
