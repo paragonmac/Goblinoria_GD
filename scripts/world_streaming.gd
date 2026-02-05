@@ -9,7 +9,6 @@ const STREAM_RADIUS_DEFAULT := 12
 const RENDER_RADIUS_DEFAULT := 0
 const RENDER_VIEW_SCALE_DEFAULT := 0.5
 const STREAM_HEIGHT_DEFAULT := 4
-const STREAM_FULL_WORLD_DEFAULT := false
 const STREAM_LEAD_TIME_DEFAULT := 0.4
 const STREAM_BASE_BUFFER_CHUNKS_DEFAULT := 32
 const STREAM_MAX_BUFFER_CHUNKS_DEFAULT := 128
@@ -19,7 +18,7 @@ const UNLOAD_BUDGET_DEFAULT := 8
 const UNLOAD_INTERVAL_DEFAULT := 0.25
 const UNLOAD_HYSTERESIS_DEFAULT := 4
 const RENDER_ZONE_INTERVAL_DEFAULT := 0.1
-const DUMMY_INT := 666
+const DUMMY_INT := 999_999
 const THROTTLE_IDLE_SEC := 1.0
 const THROTTLE_VIEW_CENTER_EPS := 0.25
 const THROTTLE_PLANE_Y_EPS := 0.1
@@ -34,7 +33,7 @@ const THROTTLE_ALLOW_BUFFER_FRAME_MS := 12.0
 #endregion
 
 #region State
-var world
+var world  # World — not typed to avoid circular preload dependency
 var world_chunk_size: int = 1
 
 var chunks_per_frame: int = CHUNKS_PER_FRAME_DEFAULT
@@ -43,7 +42,6 @@ var stream_radius_base: int = STREAM_RADIUS_DEFAULT
 var stream_radius_chunks: int = STREAM_RADIUS_DEFAULT
 var render_radius_chunks: int = RENDER_RADIUS_DEFAULT
 var render_view_scale: float = RENDER_VIEW_SCALE_DEFAULT
-var stream_full_world_xz: bool = STREAM_FULL_WORLD_DEFAULT
 var stream_height_chunks: int = STREAM_HEIGHT_DEFAULT
 var stream_lead_time: float = STREAM_LEAD_TIME_DEFAULT
 var stream_base_buffer_chunks: int = STREAM_BASE_BUFFER_CHUNKS_DEFAULT
@@ -95,6 +93,7 @@ var last_render_zone_max_cy: int = -DUMMY_INT
 var chunk_build_queue: Array = []
 var chunk_build_set: Dictionary = {}
 var chunk_build_priority: Dictionary = {}
+var queue_head: int = 0
 var spiral_cache: Dictionary = {}  # Key: Vector2i(x_range, z_range) -> Array of offsets
 
 var throttle_has_prev: bool = false
@@ -122,6 +121,7 @@ func reset_state() -> void:
 	chunk_build_queue.clear()
 	chunk_build_set.clear()
 	chunk_build_priority.clear()
+	queue_head = 0
 	spiral_cache.clear()
 	stream_radius_chunks = stream_radius_base
 	last_stream_chunk = Vector2i(-DUMMY_INT, -DUMMY_INT)
@@ -166,14 +166,7 @@ func reset_state() -> void:
 
 
 #region Update
-func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
-	if world.renderer == null:
-		return
-	var rect: Rect2 = view_rect.abs()
-	var center_x: float = rect.position.x + rect.size.x * 0.5
-	var center_z: float = rect.position.y + rect.size.y * 0.5
-	throttle_frame_ms = dt * 1000.0
-	var view_center_2d := Vector2(center_x, center_z)
+func _update_idle_tracking(view_center_2d: Vector2, plane_y: float, dt: float) -> void:
 	if not throttle_has_prev:
 		throttle_has_prev = true
 		throttle_last_view_center = view_center_2d
@@ -184,13 +177,15 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
 		var dz := view_center_2d.y - throttle_last_view_center.y
 		var dist_sq := dx * dx + dz * dz
 		var eps_sq := THROTTLE_VIEW_CENTER_EPS * THROTTLE_VIEW_CENTER_EPS
-		if dist_sq <= eps_sq and abs(plane_y - throttle_last_plane_y) <= THROTTLE_PLANE_Y_EPS:
+		if dist_sq <= eps_sq and absf(plane_y - throttle_last_plane_y) <= THROTTLE_PLANE_Y_EPS:
 			throttle_idle_sec += dt
 		else:
 			throttle_idle_sec = 0.0
 			throttle_last_view_center = view_center_2d
 			throttle_last_plane_y = plane_y
-	var view_center := Vector3(center_x, plane_y, center_z)
+
+
+func _compute_motion(view_center: Vector3, dt: float) -> Vector3:
 	var velocity := Vector3.ZERO
 	if last_stream_target_valid and dt > 0.0:
 		velocity = (view_center - last_stream_target) / dt
@@ -203,6 +198,39 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
 		speed_chunks_per_sec = speed
 	moving = speed_chunks_per_sec > 0.05
 	slow_moving = moving and speed_chunks_per_sec <= SLOW_MOVE_SPEED_CHUNKS_PER_SEC
+	return velocity
+
+
+func _should_allow_stream_work(dt: float, render_plane_complete: bool) -> bool:
+	throttled = throttle_idle_sec >= THROTTLE_IDLE_SEC and render_plane_complete
+	if throttled:
+		throttle_stream_step_accum += dt
+		if throttle_stream_step_accum < THROTTLE_STREAM_STEP_SEC:
+			return false
+		throttle_stream_step_accum = 0.0
+	elif slow_moving:
+		throttle_stream_step_accum += dt
+		if throttle_stream_step_accum < SLOW_MOVE_STREAM_STEP_SEC:
+			return false
+		throttle_stream_step_accum = 0.0
+	else:
+		throttle_stream_step_accum = 0.0
+	return true
+
+
+func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
+	if world.renderer == null:
+		return
+	var rect: Rect2 = view_rect.abs()
+	var center_x: float = rect.position.x + rect.size.x * 0.5
+	var center_z: float = rect.position.y + rect.size.y * 0.5
+	throttle_frame_ms = dt * 1000.0
+	_update_idle_tracking(Vector2(center_x, center_z), plane_y, dt)
+	var view_center := Vector3(center_x, plane_y, center_z)
+	var velocity := _compute_motion(view_center, dt)
+
+	# Compute buffer region
+	var speed: float = Vector2(velocity.x, velocity.z).length()
 	var speed_buffer_chunks: int = 0
 	if stream_lead_time > 0.0 and speed > 0.0:
 		speed_buffer_chunks = int(ceil((speed * stream_lead_time) / float(world_chunk_size)))
@@ -211,31 +239,33 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
 	var buffer_chunks: int = maxi(base_buffer, speed_buffer_chunks)
 	last_speed_buffer_chunks = speed_buffer_chunks
 	var chunk_size: int = world_chunk_size
-	var view_scale: float = float(max(stream_buffer_view_scale, 0.0))
+	var view_scale: float = maxf(stream_buffer_view_scale, 0.0)
 	var buffer_world_x: float = float(buffer_chunks * chunk_size)
 	var buffer_world_z: float = buffer_world_x
 	if view_scale > 0.0:
-		buffer_world_x = max(buffer_world_x, rect.size.x * view_scale)
-		buffer_world_z = max(buffer_world_z, rect.size.y * view_scale)
-	last_buffer_chunks = int(ceil(max(buffer_world_x, buffer_world_z) / float(chunk_size)))
+		buffer_world_x = maxf(buffer_world_x, rect.size.x * view_scale)
+		buffer_world_z = maxf(buffer_world_z, rect.size.y * view_scale)
+	last_buffer_chunks = int(ceil(maxf(buffer_world_x, buffer_world_z) / float(chunk_size)))
+
+	# Compute Y range
 	var max_cy: int = int(floor(float(world.top_render_y) / float(chunk_size)))
 	if max_cy < 0:
 		return
 	var min_cy: int = 0
 	if stream_height_chunks > 0:
 		min_cy = maxi(0, max_cy - stream_height_chunks + 1)
-	if world != null and world.has_method("get_min_render_y"):
-		var min_render_y: int = int(world.call("get_min_render_y"))
-		var min_cy_limit: int = maxi(0, int(floor(float(min_render_y) / float(chunk_size))))
-		min_cy = maxi(min_cy, min_cy_limit)
+	var min_render_y: int = world.get_min_render_y()
+	var min_cy_limit: int = maxi(0, int(floor(float(min_render_y) / float(chunk_size))))
+	min_cy = maxi(min_cy, min_cy_limit)
 
+	# Compute render zone bounds
 	var render_pad: float = float(render_radius_chunks * chunk_size)
-	var render_scale: float = float(max(render_view_scale, 0.0))
+	var render_scale: float = maxf(render_view_scale, 0.0)
 	var render_buffer_x: float = render_pad
 	var render_buffer_z: float = render_pad
 	if render_scale > 0.0:
-		render_buffer_x = max(render_buffer_x, rect.size.x * render_scale)
-		render_buffer_z = max(render_buffer_z, rect.size.y * render_scale)
+		render_buffer_x = maxf(render_buffer_x, rect.size.x * render_scale)
+		render_buffer_z = maxf(render_buffer_z, rect.size.y * render_scale)
 	var render_min_x: float = rect.position.x - render_buffer_x
 	var render_max_x: float = rect.position.x + rect.size.x + render_buffer_x
 	var render_min_z: float = rect.position.y - render_buffer_z
@@ -245,21 +275,17 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
 	var render_min_cz: int = _chunk_coord_from_world(render_min_z, chunk_size)
 	var render_max_cz: int = _chunk_coord_from_world(render_max_z, chunk_size)
 
+	# Compute stream region with velocity lead offset
 	var lead_offset: Vector2 = Vector2(velocity.x, velocity.z) * stream_lead_time
 	var stream_pos_2d: Vector2 = rect.position + lead_offset
 	var stream_size_2d: Vector2 = rect.size
 	if buffer_world_x > 0.0 or buffer_world_z > 0.0:
 		stream_pos_2d -= Vector2(buffer_world_x, buffer_world_z)
 		stream_size_2d += Vector2(buffer_world_x * 2.0, buffer_world_z * 2.0)
-	var stream_min_x_f: float = stream_pos_2d.x
-	var stream_max_x_f: float = stream_pos_2d.x + stream_size_2d.x
-	var stream_min_z_f: float = stream_pos_2d.y
-	var stream_max_z_f: float = stream_pos_2d.y + stream_size_2d.y
-
-	var min_cx: int = _chunk_coord_from_world(stream_min_x_f, chunk_size)
-	var max_cx: int = _chunk_coord_from_world(stream_max_x_f, chunk_size)
-	var min_cz: int = _chunk_coord_from_world(stream_min_z_f, chunk_size)
-	var max_cz: int = _chunk_coord_from_world(stream_max_z_f, chunk_size)
+	var min_cx: int = _chunk_coord_from_world(stream_pos_2d.x, chunk_size)
+	var max_cx: int = _chunk_coord_from_world(stream_pos_2d.x + stream_size_2d.x, chunk_size)
+	var min_cz: int = _chunk_coord_from_world(stream_pos_2d.y, chunk_size)
+	var max_cz: int = _chunk_coord_from_world(stream_pos_2d.y + stream_size_2d.y, chunk_size)
 	var stream_center_x: float = stream_pos_2d.x + stream_size_2d.x * 0.5
 	var stream_center_z: float = stream_pos_2d.y + stream_size_2d.y * 0.5
 	var anchor_cx: int = _chunk_coord_from_world(stream_center_x, chunk_size)
@@ -268,6 +294,8 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
 		maxi(absi(max_cx - anchor_cx), absi(anchor_cx - min_cx)),
 		maxi(absi(max_cz - anchor_cz), absi(anchor_cz - min_cz))
 	)
+
+	# Rebuild streaming queues on anchor change
 	var anchor_changed: bool = (
 		anchor_cx != last_stream_chunk.x
 		or anchor_cz != last_stream_chunk.y
@@ -290,6 +318,7 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
 		chunk_build_queue.clear()
 		chunk_build_set.clear()
 		chunk_build_priority.clear()
+		queue_head = 0
 		var x_range: int = stream_max_x - stream_min_x + 1
 		var z_range: int = stream_max_z - stream_min_z + 1
 		var y_range: int = stream_max_y - stream_min_y + 1
@@ -313,32 +342,19 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
 		throttle_idle_sec = 0.0
 		throttled = false
 
+	# Throttle / stream work gate
 	var render_plane_complete := render_plane_index >= render_plane_size
-	throttled = throttle_idle_sec >= THROTTLE_IDLE_SEC and render_plane_complete
-
-	var allow_stream_work := true
-	if throttled:
-		throttle_stream_step_accum += dt
-		if throttle_stream_step_accum < THROTTLE_STREAM_STEP_SEC:
-			allow_stream_work = false
-		else:
-			throttle_stream_step_accum = 0.0
-	elif slow_moving:
-		throttle_stream_step_accum += dt
-		if throttle_stream_step_accum < SLOW_MOVE_STREAM_STEP_SEC:
-			allow_stream_work = false
-		else:
-			throttle_stream_step_accum = 0.0
-	else:
-		throttle_stream_step_accum = 0.0
-
-	if allow_stream_work:
+	if _should_allow_stream_work(dt, render_plane_complete):
 		enqueue_stream_chunks()
 		process_chunk_queue()
+
+	# Periodic unloading
 	unload_timer += dt
 	if unload_timer >= unload_interval:
 		_unload_distant_chunks(anchor_cx, anchor_cz)
 		unload_timer = 0.0
+
+	# Periodic render zone update
 	render_zone_timer += dt
 	var render_zone_changed: bool = (
 		render_min_cx != last_render_zone_min_cx
@@ -361,36 +377,39 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
 
 
 #region Queue Processing
-func process_chunk_queue() -> void:
+func process_chunk_queue(override_limit: int = -1) -> void:
 	if world.renderer == null:
 		return
-	var effective_chunks_per_frame: int = chunks_per_frame
-	if throttled:
-		effective_chunks_per_frame = THROTTLED_CHUNKS_PER_FRAME
+	var effective_limit: int
+	if override_limit >= 0:
+		effective_limit = override_limit
+	elif throttled:
+		effective_limit = THROTTLED_CHUNKS_PER_FRAME
 	elif slow_moving:
-		effective_chunks_per_frame = min(SLOW_MOVE_CHUNKS_PER_FRAME, chunks_per_frame)
-	var build_count: int = min(effective_chunks_per_frame, chunk_build_queue.size())
-	for _i in range(build_count):
-		var key: Vector3i = chunk_build_queue.pop_front()
+		effective_limit = mini(SLOW_MOVE_CHUNKS_PER_FRAME, chunks_per_frame)
+	else:
+		effective_limit = chunks_per_frame
+	var built: int = 0
+	while built < effective_limit and queue_head < chunk_build_queue.size():
+		var key: Vector3i = chunk_build_queue[queue_head]
+		queue_head += 1
+		if not chunk_build_set.has(key):
+			continue
 		chunk_build_set.erase(key)
-		var high_priority: bool = false
-		if chunk_build_priority.has(key):
-			high_priority = bool(chunk_build_priority[key])
+		var high_priority: bool = chunk_build_priority.get(key, false)
 		chunk_build_priority.erase(key)
 		var ready: bool = bool(world.request_chunk_generation_async(key, high_priority))
 		if ready:
 			world.renderer.queue_chunk_mesh_build(key, -1, false, high_priority)
-		if stream_pending and key.y == stream_layer_y and stream_layer_remaining > 0:
-			stream_layer_remaining -= 1
+		_decrement_stream_layer(key.y)
+		built += 1
+	if queue_head > 0 and (queue_head >= chunk_build_queue.size() or queue_head > 256):
+		chunk_build_queue = chunk_build_queue.slice(queue_head)
+		queue_head = 0
 
 
 func process_chunk_queue_full() -> void:
-	if world.renderer == null:
-		return
-	var original := chunks_per_frame
-	chunks_per_frame = chunk_build_queue.size()
-	process_chunk_queue()
-	chunks_per_frame = original
+	process_chunk_queue(chunk_build_queue.size() - queue_head)
 
 
 func enqueue_stream_chunks() -> void:
@@ -443,6 +462,11 @@ func enqueue_stream_chunks() -> void:
 
 
 #region Helpers
+func _decrement_stream_layer(chunk_y: int) -> void:
+	if stream_pending and chunk_y == stream_layer_y and stream_layer_remaining > 0:
+		stream_layer_remaining -= 1
+
+
 func is_chunk_mesh_ready(coord: Vector3i) -> bool:
 	var chunk: ChunkData = world.get_chunk(coord)
 	return chunk != null and chunk.mesh_state == ChunkData.MESH_STATE_READY
@@ -539,12 +563,10 @@ func _queue_stream_offset(offset: Vector2i, high_priority: bool) -> void:
 			var ready: bool = bool(world.request_chunk_generation_async(key, true))
 			if ready and world.renderer != null:
 				world.renderer.queue_chunk_mesh_build(key, -1, false, true)
-		if stream_layer_remaining > 0:
-			stream_layer_remaining -= 1
+		_decrement_stream_layer(stream_layer_y)
 		return
 	if is_chunk_mesh_ready(key):
-		if stream_layer_remaining > 0:
-			stream_layer_remaining -= 1
+		_decrement_stream_layer(stream_layer_y)
 	elif not chunk_build_set.has(key):
 		chunk_build_set[key] = true
 		chunk_build_priority[key] = high_priority
@@ -554,9 +576,7 @@ func _queue_stream_offset(offset: Vector2i, high_priority: bool) -> void:
 
 
 func _unload_distant_chunks(center_cx: int, center_cz: int) -> void:
-	if unload_budget <= 0:
-		return
-	if unload_radius_chunks <= 0:
+	if unload_budget <= 0 or unload_radius_chunks <= 0:
 		return
 	var effective_unload: int = maxi(unload_radius_chunks, stream_radius_chunks + unload_hysteresis)
 	var candidates: Array = []
@@ -565,13 +585,18 @@ func _unload_distant_chunks(center_cx: int, center_cz: int) -> void:
 		var dist: int = maxi(absi(coord.x - center_cx), absi(coord.z - center_cz))
 		if dist > effective_unload:
 			candidates.append(coord)
-			if candidates.size() >= unload_budget:
-				break
 	if candidates.is_empty():
 		return
-	for coord in candidates:
-		if chunk_build_set.erase(coord):
-			# Only search queue if it was in the set (avoids O(N) scan)
-			chunk_build_queue.erase(coord)
+	# Sort farthest first so the most distant chunks are unloaded within budget
+	candidates.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
+		var da: int = maxi(absi(a.x - center_cx), absi(a.z - center_cz))
+		var db: int = maxi(absi(b.x - center_cx), absi(b.z - center_cz))
+		return da > db
+	)
+	var count: int = mini(unload_budget, candidates.size())
+	for i in range(count):
+		var coord: Vector3i = candidates[i]
+		# Lazy deletion: remove from set so stale queue entries are skipped during processing
+		chunk_build_set.erase(coord)
 		chunk_build_priority.erase(coord)
 		world.unload_chunk(coord)
