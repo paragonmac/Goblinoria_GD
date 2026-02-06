@@ -24,7 +24,15 @@ const WORLD_CHUNKS_Z := 32
 const BLOCK_ID_AIR := 0
 const BLOCK_ID_GRANITE := 1
 const BLOCK_ID_DIRT := 2
+const BLOCK_ID_CLAY := 3
+const BLOCK_ID_SANDSTONE := 4
+const BLOCK_ID_LIMESTONE := 5
+const BLOCK_ID_BASALT := 6
+const BLOCK_ID_SLATE := 7
+const BLOCK_ID_IRON_ORE := 8
+const BLOCK_ID_COAL := 9
 const BLOCK_ID_GRASS := 10
+const PLACE_MATERIAL_ID := BLOCK_ID_IRON_ORE
 const RAMP_NORTH_ID := 100
 const RAMP_SOUTH_ID := 101
 const RAMP_EAST_ID := 102
@@ -100,13 +108,13 @@ const PREWARM_SYNC_RADIUS_CHUNKS_MIN := 6
 const PREWARM_SYNC_RADIUS_CHUNKS_MAX := 16
 const PREWARM_SYNC_LAYERS := 1
 const DEPTH_VISIBILITY_PADDING := 1
-const DUMMY_INT := 666
+const UNINITIALIZED_Y := -1
 #endregion
 
 #region World State
 var world_size_y := CHUNK_SIZE * WORLD_CHUNKS_Y
-var sea_level := DUMMY_INT
-var top_render_y := DUMMY_INT
+var sea_level := UNINITIALIZED_Y
+var top_render_y := UNINITIALIZED_Y
 var world_seed: int = 0
 var spawn_coord := Vector3i.ZERO
 #endregion
@@ -142,12 +150,17 @@ var selected_blocks: Dictionary = {}
 #endregion
 
 #region Depth Visibility
-var deepest_structure_y: int = DUMMY_INT
+var deepest_structure_y: int = UNINITIALIZED_Y
+#endregion
+
+#region Ramp Lookup Table
+var _ramp_lookup := PackedByteArray()
 #endregion
 
 
 #region Lifecycle
 func _ready() -> void:
+	_init_ramp_lookup()
 	block_registry.load_from_csv(BLOCK_DATA_PATH)
 	task_manager = TaskManager.new(self, task_queue)
 	generator = WorldGeneratorScript.new(self)
@@ -421,7 +434,17 @@ func is_stairs_at(x: int, y: int, z: int) -> bool:
 
 
 func is_ramp_block_id(block_id: int) -> bool:
-	return RAMP_BLOCK_IDS.has(block_id)
+	if block_id < 0 or block_id >= _ramp_lookup.size():
+		return false
+	return _ramp_lookup[block_id] != 0
+
+
+func _init_ramp_lookup() -> void:
+	_ramp_lookup.resize(BlockRegistryScript.TABLE_SIZE)
+	_ramp_lookup.fill(0)
+	for ramp_id in RAMP_BLOCK_IDS:
+		if ramp_id >= 0 and ramp_id < _ramp_lookup.size():
+			_ramp_lookup[ramp_id] = 1
 
 
 func get_block_color(block_id: int) -> Color:
@@ -505,7 +528,7 @@ func update_workers(dt: float) -> void:
 		worker.update_worker(dt, self, task_queue, pathfinder)
 		worker.visible = is_visible_at_level(worker.position.y)
 		var coord: Vector3i = worker.get_block_coord()
-		var last_coord: Vector3i = worker_chunk_cache.get(worker, Vector3i(-DUMMY_INT, -DUMMY_INT, -DUMMY_INT))
+		var last_coord: Vector3i = worker_chunk_cache.get(worker, Vector3i(-999999, -999999, -999999))
 		if coord != last_coord:
 			worker_chunk_cache[worker] = coord
 			worker_activity_timer = WORKER_ACTIVITY_GRACE_SEC
@@ -562,13 +585,13 @@ func process_generation_results() -> void:
 
 func get_min_render_y() -> int:
 	var base_y := sea_level
-	if deepest_structure_y != DUMMY_INT:
+	if deepest_structure_y != UNINITIALIZED_Y:
 		base_y = deepest_structure_y
 	return clampi(base_y - DEPTH_VISIBILITY_PADDING, 0, world_size_y - 1)
 
 
 func _update_depth_visibility_from_change(y: int) -> void:
-	if deepest_structure_y == DUMMY_INT or y < deepest_structure_y:
+	if deepest_structure_y == UNINITIALIZED_Y or y < deepest_structure_y:
 		deepest_structure_y = y
 		if renderer != null:
 			renderer.set_min_render_y(get_min_render_y())
@@ -723,7 +746,6 @@ func set_top_render_y(new_y: int) -> void:
 	if renderer != null:
 		renderer.set_top_render_y(top_render_y)
 		renderer.clear_render_height_queue()
-	return
 
 
 func get_render_height_bounds() -> Dictionary:

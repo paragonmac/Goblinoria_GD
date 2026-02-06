@@ -7,7 +7,7 @@ const DRAG_CLICK_THRESHOLD := 5.0
 const ROUND_HALF := 0.5
 const CAMERA_RAYCAST_DISTANCE := 500.0
 const PLACE_HEIGHT_OFFSET := 1.0
-const PLACE_MATERIAL_ID := 8
+const PLACE_MATERIAL_ID := World.PLACE_MATERIAL_ID
 #endregion
 
 #region Refs

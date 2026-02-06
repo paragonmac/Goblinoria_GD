@@ -561,17 +561,10 @@ func _stop_mesh_worker() -> void:
 func _ensure_block_tables() -> void:
 	if world == null:
 		return
-	if block_solid_table.size() == BlockRegistry.TABLE_SIZE \
-		and block_color_table.size() == BlockRegistry.TABLE_SIZE \
-		and block_ramp_table.size() == BlockRegistry.TABLE_SIZE:
-		return
-	block_solid_table.resize(BlockRegistry.TABLE_SIZE)
-	block_color_table.resize(BlockRegistry.TABLE_SIZE)
-	block_ramp_table.resize(BlockRegistry.TABLE_SIZE)
-	for i in range(BlockRegistry.TABLE_SIZE):
-		block_solid_table[i] = 1 if world.is_block_solid_id(i) else 0
-		block_color_table[i] = world.get_block_color(i)
-		block_ramp_table[i] = 1 if world.is_ramp_block_id(i) else 0
+	mesher._ensure_block_tables(world)
+	block_solid_table = mesher.block_solid_table
+	block_color_table = mesher.block_color_table
+	block_ramp_table = mesher.block_ramp_table
 
 
 func _clear_mesh_jobs() -> void:

@@ -457,26 +457,26 @@ func _get_work_duration(world, task) -> float:
 
 
 func _get_dig_duration_for_block_id(block_id: int) -> float:
-	if block_id >= 100 and block_id <= 111:
+	if World.RAMP_BLOCK_IDS.has(block_id):
 		return DIG_DURATION_SANDSTONE
 	match block_id:
 		World.BLOCK_ID_GRASS:
 			return DIG_DURATION_GRASS
 		World.BLOCK_ID_DIRT:
 			return DIG_DURATION_DIRT
-		3:
+		World.BLOCK_ID_CLAY:
 			return DIG_DURATION_CLAY
-		4:
+		World.BLOCK_ID_SANDSTONE:
 			return DIG_DURATION_SANDSTONE
-		5:
+		World.BLOCK_ID_LIMESTONE:
 			return DIG_DURATION_LIMESTONE
-		6:
+		World.BLOCK_ID_BASALT:
 			return DIG_DURATION_BASALT
-		7:
+		World.BLOCK_ID_SLATE:
 			return DIG_DURATION_SLATE
-		8:
+		World.BLOCK_ID_IRON_ORE:
 			return DIG_DURATION_IRON_ORE
-		9:
+		World.BLOCK_ID_COAL:
 			return DIG_DURATION_COAL
 		World.BLOCK_ID_GRANITE:
 			return DIG_DURATION_GRANITE

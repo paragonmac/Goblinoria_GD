@@ -9,6 +9,7 @@ var blocked_tasks: Array = []
 var blocked_recheck_timer := 1.0
 var reassign_timer := 1.0
 const REASSIGN_INTERVAL := 1.0
+const BLOCKED_RECHECK_BUDGET := 8
 #endregion
 
 
@@ -59,10 +60,11 @@ func reassess_waiting_tasks() -> void:
 func queue_task_request(task_type: int, pos: Vector3i, material: int) -> void:
 	if is_task_already_queued(task_type, pos):
 		return
-	if is_task_accessible(task_type, pos):
-		add_task_to_queue(task_type, pos, material)
-	else:
-		blocked_tasks.append({"type": task_type, "pos": pos, "material": material})
+	# Queue task immediately without blocking pathfinding check.
+	# Workers will find pathable tasks during their idle update.
+	# Unreachable tasks are naturally handled: workers skip them,
+	# and blocked_tasks recheck picks them up periodically.
+	add_task_to_queue(task_type, pos, material)
 
 
 func add_task_to_queue(task_type: int, pos: Vector3i, material: int) -> void:
@@ -78,11 +80,13 @@ func add_task_to_queue(task_type: int, pos: Vector3i, material: int) -> void:
 
 #region Blocked Task Handling
 func recheck_blocked_tasks() -> void:
+	var checked := 0
 	var i := 0
-	while i < blocked_tasks.size():
+	while i < blocked_tasks.size() and checked < BLOCKED_RECHECK_BUDGET:
 		var task = blocked_tasks[i]
 		var task_type: int = task["type"]
 		var pos: Vector3i = task["pos"]
+		checked += 1
 		if is_task_accessible(task_type, pos):
 			add_task_to_queue(task_type, pos, task["material"])
 			blocked_tasks.remove_at(i)
@@ -108,11 +112,8 @@ func is_task_accessible(task_type: int, pos: Vector3i) -> bool:
 
 
 func is_task_already_queued(task_type: int, pos: Vector3i) -> bool:
-	for task in task_queue.tasks:
-		if task.status == TaskQueue.TaskStatus.COMPLETED:
-			continue
-		if task.type == task_type and task.pos == pos:
-			return true
+	if task_queue.has_active_task_at(pos, task_type):
+		return true
 	for task in blocked_tasks:
 		if task["type"] == task_type and task["pos"] == pos:
 			return true

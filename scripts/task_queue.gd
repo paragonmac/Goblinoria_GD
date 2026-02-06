@@ -29,17 +29,25 @@ class Task:
 #region State
 var tasks: Array = []
 var next_id: int = 1
+var _tasks_by_id: Dictionary = {}      # int -> Task
+var _tasks_by_pos: Dictionary = {}     # Vector3i -> Array[Task]
 #endregion
 
 
 #region Task Creation
 func add_task(pos: Vector3i, task_type: int, material: int) -> int:
-	for task in tasks:
-		if task.pos == pos and task.type == task_type and task.status != TaskStatus.COMPLETED:
+	var pos_tasks: Array = _tasks_by_pos.get(pos, [])
+	for task in pos_tasks:
+		if task.type == task_type and task.status != TaskStatus.COMPLETED:
 			return task.id
 	var task_id = next_id
 	next_id += 1
-	tasks.append(Task.new(task_id, pos, task_type, material))
+	var task := Task.new(task_id, pos, task_type, material)
+	tasks.append(task)
+	_tasks_by_id[task_id] = task
+	if not _tasks_by_pos.has(pos):
+		_tasks_by_pos[pos] = []
+	_tasks_by_pos[pos].append(task)
 	return task_id
 
 
@@ -58,10 +66,15 @@ func add_stairs_task(pos: Vector3i, stair_material: int) -> int:
 
 #region Task Lookup
 func get_task(task_id: int) -> Task:
-	for task in tasks:
-		if task.id == task_id:
-			return task
-	return null
+	return _tasks_by_id.get(task_id, null)
+
+
+func has_active_task_at(pos: Vector3i, task_type: int) -> bool:
+	var pos_tasks: Array = _tasks_by_pos.get(pos, [])
+	for task in pos_tasks:
+		if task.type == task_type and task.status != TaskStatus.COMPLETED:
+			return true
+	return false
 
 
 func find_nearest(task_type: int, from_pos: Vector3) -> Task:
@@ -112,6 +125,12 @@ func cleanup_completed() -> void:
 	var i := 0
 	while i < tasks.size():
 		if tasks[i].status == TaskStatus.COMPLETED:
+			var task: Task = tasks[i]
+			_tasks_by_id.erase(task.id)
+			var pos_tasks: Array = _tasks_by_pos.get(task.pos, [])
+			pos_tasks.erase(task)
+			if pos_tasks.is_empty():
+				_tasks_by_pos.erase(task.pos)
 			tasks.remove_at(i)
 		else:
 			i += 1

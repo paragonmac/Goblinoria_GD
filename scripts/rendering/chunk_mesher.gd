@@ -265,22 +265,6 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 
 
 #region Block Colors
-func block_color(world: World, block_id: int, wx: int, wy: int, wz: int) -> Color:
-	var base: Color = world.get_block_color(block_id)
-	base = Color(base.r * BLOCK_ALBEDO_MULT, base.g * BLOCK_ALBEDO_MULT, base.b * BLOCK_ALBEDO_MULT, base.a)
-
-	var n1 := block_noise(wx, wy, wz)
-	var n2 := block_noise(wx + BLOCK_NOISE_OFFSET_2.x, wy + BLOCK_NOISE_OFFSET_2.y, wz + BLOCK_NOISE_OFFSET_2.z)
-	var n3 := block_noise(wx + BLOCK_NOISE_OFFSET_3.x, wy + BLOCK_NOISE_OFFSET_3.y, wz + BLOCK_NOISE_OFFSET_3.z)
-	var jitter := BLOCK_JITTER
-	return Color(
-		clamp(base.r + (n1 - NOISE_CENTER) * jitter, COLOR_MIN, COLOR_MAX),
-		clamp(base.g + (n2 - NOISE_CENTER) * jitter, COLOR_MIN, COLOR_MAX),
-		clamp(base.b + (n3 - NOISE_CENTER) * jitter, COLOR_MIN, COLOR_MAX),
-		base.a
-	)
-
-
 func block_color_from_table(color_table: PackedColorArray, block_id: int, wx: int, wy: int, wz: int) -> Color:
 	var base := Color(1.0, 1.0, 1.0, 1.0)
 	if block_id >= 0 and block_id < color_table.size():
@@ -300,7 +284,7 @@ func block_color_from_table(color_table: PackedColorArray, block_id: int, wx: in
 
 
 func block_noise(wx: int, wy: int, wz: int) -> float:
-	var h: int = wx * HASH_X ^ wy * HASH_Y ^ wz * HASH_Z
+	var h: int = ((wx * HASH_X) & HASH_MASK) ^ ((wy * HASH_Y) & HASH_MASK) ^ ((wz * HASH_Z) & HASH_MASK)
 	h = (h ^ (h >> HASH_SHIFT)) & HASH_MASK
 	return float(h % BLOCK_NOISE_MOD) / BLOCK_NOISE_DIV
 #endregion
@@ -338,7 +322,7 @@ func _copy_neighbor_blocks(world: World, coord: Vector3i) -> Variant:
 	var chunk: ChunkData = world.get_chunk(coord)
 	if chunk == null or not chunk.generated:
 		return null
-	return chunk.blocks
+	return chunk.blocks.duplicate()
 
 
 func chunk_index(chunk_size: int, lx: int, ly: int, lz: int) -> int:
