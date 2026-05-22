@@ -73,11 +73,11 @@ Raw mesh-cache entries store packed arrays and metrics, not `ArrayMesh` resource
 
 ## Save/Load Data
 
-`WorldSaveLoad` orchestrates persistence, with metadata and inventory file handling split into small helpers:
+`WorldSaveLoad` orchestrates persistence, with metadata, inventory, and persistent mesh-cache file handling split into small helpers:
 
 - `world_meta.dat`: seed, spawn, top render Y, world dimensions, chunk size, block table hash, save version. Handled by `WorldMetadataSaveLoad`.
 - `world_blocks.dat`: finite-world bulk chunk block data with fill/raw/ZSTD entries.
-- `world_mesh_cache.dat`: optional raw mesh-cache acceleration data.
+- `world_mesh_cache.dat`: optional raw mesh-cache acceleration data. Handled by `WorldMeshCacheSaveLoad`.
 - `inventory.dat`: inventory state. Handled by `WorldInventorySaveLoad`.
 
 Current save formats are not changed by housekeeping refactors unless explicitly planned.
@@ -95,7 +95,7 @@ The largest coupling hotspots are:
 - `Main.gd`: new-world/load-world flow, menu UI, and frame orchestration still share one file.
 - `WorldRenderer`: render-zone visibility, materials, overlays, and stats still share one class. Mesh-cache data contracts are split into `WorldRendererMeshCache`, runtime mesh queue/thread ownership is split into `WorldRendererMeshScheduler`, and render-height queue ownership is split into `WorldRendererRenderLevel`.
 - `ChunkMesher`: greedy cube meshing, ramp meshing, and mesh resource fallback still share one class. Padded-buffer/index helpers, UV helpers, and color/noise/shading helpers are split into `ChunkMesherPaddedBuffer`, `ChunkMesherUv`, and `ChunkMesherVisuals`.
-- `WorldSaveLoad`: bulk block data, persistent mesh cache, legacy chunk files, hashing, and migration checks still share one class. Metadata and inventory are split out.
+- `WorldSaveLoad`: bulk block data, legacy chunk files, block-table hashing, and migration checks still share one class. Metadata, inventory, and persistent mesh-cache file handling are split out.
 - `DebugOverlay`: live HUD stats, CSV captures, timing logs, map exports, and ramp debug tools share one class.
 
 Housekeeping should split these by responsibility while preserving the current external APIs and runtime behavior.

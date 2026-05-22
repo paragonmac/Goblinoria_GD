@@ -5,18 +5,16 @@ class_name WorldSaveLoad
 #region Preloads
 const WorldInventorySaveLoadScript = preload("res://scripts/world_inventory_save_load.gd")
 const WorldMetadataSaveLoadScript = preload("res://scripts/world_metadata_save_load.gd")
+const WorldMeshCacheSaveLoadScript = preload("res://scripts/world_mesh_cache_save_load.gd")
 #endregion
 
 #region Constants
 const CHUNK_MAGIC := 0x43484B53
 const BULK_CHUNKS_MAGIC := 0x474D4150
-const MESH_CACHE_MAGIC := 0x474D4553
 const SAVE_VERSION := 3
 const BULK_CHUNKS_VERSION := 2
 const BULK_CHUNKS_LEGACY_RAW_VERSION := 3
-const MESH_CACHE_VERSION := 1
 const BULK_CHUNKS_FILE_NAME := "world_blocks.dat"
-const MESH_CACHE_FILE_NAME := "world_mesh_cache.dat"
 const CHUNK_DIR_NAME := "chunks"
 const CHUNK_FILE_EXT := ".chunk"
 const COMPRESSION_NONE := 0
@@ -24,7 +22,6 @@ const COMPRESSION_ZSTD := FileAccess.COMPRESSION_ZSTD
 const BULK_ENTRY_RAW := 0
 const BULK_ENTRY_FILL := 1
 const BULK_ENTRY_COMPRESSED := 2
-const STARTUP_MESH_CACHE_BAND_RADIUS := 1
 #endregion
 
 #region State
@@ -33,11 +30,10 @@ var current_world_dir := ""
 var warned_missing_world_dir: bool = false
 var bulk_chunk_blocks: Dictionary = {}
 var bulk_chunks_loaded: bool = false
-var pending_mesh_cache_entries: Dictionary = {}
 var last_load_metrics: Dictionary = {}
-var mesh_cache_stats: Dictionary = {}
 var inventory_save_load = WorldInventorySaveLoadScript.new()
 var metadata_save_load = WorldMetadataSaveLoadScript.new()
+var mesh_cache_save_load = WorldMeshCacheSaveLoadScript.new()
 #endregion
 
 
@@ -427,230 +423,28 @@ func _clear_bulk_chunk_cache() -> void:
 
 
 func _save_mesh_cache(world_dir: String) -> bool:
-	if world == null or world.renderer == null:
-		return true
-	var path := world_dir.path_join(MESH_CACHE_FILE_NAME)
-	var file := FileAccess.open(path, FileAccess.WRITE)
-	if file == null:
-		push_warning("Mesh cache save skipped: %s" % path)
-		return false
-	file.store_32(MESH_CACHE_MAGIC)
-	file.store_16(MESH_CACHE_VERSION)
-	file.store_16(WorldRenderer.MESHER_CACHE_VERSION)
-	file.store_16(World.CHUNK_SIZE)
-	file.store_16(World.WORLD_CHUNKS_X)
-	file.store_16(World.WORLD_CHUNKS_Y)
-	file.store_16(World.WORLD_CHUNKS_Z)
-	file.store_32(_get_block_table_hash())
-	var count_pos: int = file.get_position()
-	file.store_32(0)
-	var entries_written := 0
-	for coord in _build_persistent_mesh_cache_coords():
-		var blocks: PackedByteArray = _get_blocks_for_coord(coord)
-		if blocks.size() != World.CHUNK_VOLUME:
-			continue
-		var mesh_entry: Dictionary = _persistent_mesh_cache_entry_for_coord(coord, blocks)
-		if mesh_entry.is_empty():
-			continue
-		file.store_var(mesh_entry, false)
-		entries_written += 1
-	var end_pos: int = file.get_position()
-	file.seek(count_pos)
-	file.store_32(entries_written)
-	file.seek(end_pos)
-	file.flush()
-	mesh_cache_stats["entries_saved"] = entries_written
-	return true
+	return mesh_cache_save_load.save_mesh_cache(world, world_dir, bulk_chunk_blocks, _get_block_table_hash())
 
 
 func _load_mesh_cache(world_dir: String) -> bool:
-	_clear_mesh_cache_entries()
-	var path := world_dir.path_join(MESH_CACHE_FILE_NAME)
-	if not FileAccess.file_exists(path):
-		return true
-	var file := FileAccess.open(path, FileAccess.READ)
-	if file == null:
-		push_warning("Mesh cache ignored: cannot open %s" % path)
-		return true
-	if file.get_32() != MESH_CACHE_MAGIC:
-		push_warning("Mesh cache ignored: bad magic")
-		return true
-	if file.get_16() != MESH_CACHE_VERSION:
-		push_warning("Mesh cache ignored: version mismatch")
-		return true
-	if file.get_16() != WorldRenderer.MESHER_CACHE_VERSION:
-		push_warning("Mesh cache ignored: mesher version mismatch")
-		return true
-	if file.get_16() != World.CHUNK_SIZE:
-		push_warning("Mesh cache ignored: chunk size mismatch")
-		return true
-	var chunks_x: int = file.get_16()
-	var chunks_y: int = file.get_16()
-	var chunks_z: int = file.get_16()
-	if chunks_x != World.WORLD_CHUNKS_X or chunks_y != World.WORLD_CHUNKS_Y or chunks_z != World.WORLD_CHUNKS_Z:
-		push_warning("Mesh cache ignored: world dimensions mismatch")
-		return true
-	var block_table_hash: int = file.get_32()
-	if block_table_hash != _get_block_table_hash():
-		push_warning("Mesh cache ignored: block table hash mismatch")
-		return true
-	var count: int = file.get_32()
-	mesh_cache_stats["entries_read"] = count
-	for _i in range(count):
-		var loaded_entry: Variant = file.get_var(false)
-		if typeof(loaded_entry) != TYPE_DICTIONARY:
-			push_warning("Mesh cache ignored: malformed entry")
-			_clear_mesh_cache_entries()
-			return true
-		var entry = loaded_entry
-		if not _is_mesh_cache_entry_shape_valid(entry):
-			mesh_cache_stats["entries_rejected"] = int(mesh_cache_stats.get("entries_rejected", 0)) + 1
-			continue
-		var coord := Vector3i(int(entry["cx"]), int(entry["cy"]), int(entry["cz"]))
-		if not world.is_chunk_coord_valid(coord):
-			mesh_cache_stats["entries_rejected"] = int(mesh_cache_stats.get("entries_rejected", 0)) + 1
-			continue
-		pending_mesh_cache_entries[coord] = entry
-		mesh_cache_stats["entries_pending"] = int(mesh_cache_stats.get("entries_pending", 0)) + 1
-	return true
+	return mesh_cache_save_load.load_mesh_cache(world, world_dir, _get_block_table_hash())
 
 
 func _try_import_mesh_cache_for_loaded_chunk(coord: Vector3i, chunk: ChunkData) -> void:
-	if not pending_mesh_cache_entries.has(coord):
-		return
-	var entry = pending_mesh_cache_entries[coord]
-	pending_mesh_cache_entries.erase(coord)
-	if not _is_mesh_cache_entry_valid_for_chunk(coord, chunk, entry):
-		mesh_cache_stats["entries_rejected"] = int(mesh_cache_stats.get("entries_rejected", 0)) + 1
-		return
-	if world.renderer == null:
-		return
-	if world.renderer.import_persistent_mesh_cache_entry(coord, entry):
-		mesh_cache_stats["entries_imported"] = int(mesh_cache_stats.get("entries_imported", 0)) + 1
-	else:
-		mesh_cache_stats["entries_rejected"] = int(mesh_cache_stats.get("entries_rejected", 0)) + 1
-
-
-func _build_persistent_mesh_cache_coords() -> Array[Vector3i]:
-	var coords: Array[Vector3i] = []
-	for cy: int in range(World.WORLD_CHUNKS_Y):
-		for cx: int in range(World.WORLD_MIN_CHUNK_X, World.WORLD_MAX_CHUNK_X + 1):
-			for cz: int in range(World.WORLD_MIN_CHUNK_Z, World.WORLD_MAX_CHUNK_Z + 1):
-				var coord := Vector3i(cx, cy, cz)
-				if world.is_chunk_coord_valid(coord):
-					coords.append(coord)
-	return coords
-
-
-func _persistent_mesh_cache_entry_for_coord(coord: Vector3i, blocks: PackedByteArray) -> Dictionary:
-	var mesh_entry: Dictionary = world.renderer.export_persistent_mesh_cache_entry(coord, _mesh_cache_full_local_top())
-	if mesh_entry.is_empty() and pending_mesh_cache_entries.has(coord):
-		var pending_entry = pending_mesh_cache_entries[coord]
-		if typeof(pending_entry) == TYPE_DICTIONARY and _is_mesh_cache_entry_shape_valid(pending_entry) and _is_mesh_cache_entry_valid_for_blocks(coord, blocks, pending_entry):
-			mesh_entry = pending_entry.duplicate(true)
-	if mesh_entry.is_empty():
-		return {}
-	mesh_entry["cx"] = coord.x
-	mesh_entry["cy"] = coord.y
-	mesh_entry["cz"] = coord.z
-	mesh_entry["block_hash"] = _hash_block_buffer(blocks)
-	mesh_entry["neighbor_hashes"] = _build_neighbor_hashes(coord)
-	return mesh_entry
-
-
-func _mesh_cache_full_local_top() -> int:
-	return World.CHUNK_SIZE - 1
-
-
-func _is_mesh_cache_entry_shape_valid(entry: Dictionary) -> bool:
-	if not entry.has("cx") or not entry.has("cy") or not entry.has("cz"):
-		return false
-	if int(entry.get("local_top", -1)) != _mesh_cache_full_local_top():
-		return false
-	if not entry.has("block_hash"):
-		return false
-	if not entry.has("neighbor_hashes"):
-		return false
-	if not entry.has("has_geometry"):
-		return false
-	return true
-
-
-func _is_mesh_cache_entry_valid_for_chunk(coord: Vector3i, chunk: ChunkData, entry: Dictionary) -> bool:
-	return _is_mesh_cache_entry_valid_for_blocks(coord, chunk.blocks, entry)
-
-
-func _is_mesh_cache_entry_valid_for_blocks(coord: Vector3i, blocks: PackedByteArray, entry: Dictionary) -> bool:
-	if int(entry.get("local_top", -1)) != _mesh_cache_full_local_top():
-		return false
-	if _hash_block_buffer(blocks) != int(entry.get("block_hash", -1)):
-		return false
-	var expected_neighbors = entry.get("neighbor_hashes", {})
-	if typeof(expected_neighbors) != TYPE_DICTIONARY:
-		return false
-	var actual_neighbors: Dictionary = _build_neighbor_hashes(coord)
-	for key in expected_neighbors.keys():
-		if int(expected_neighbors[key]) != int(actual_neighbors.get(key, -2)):
-			return false
-	return true
-
-
-func _build_neighbor_hashes(coord: Vector3i) -> Dictionary:
-	return {
-		"x_neg": _hash_blocks_for_coord_or_missing(Vector3i(coord.x - 1, coord.y, coord.z)),
-		"x_pos": _hash_blocks_for_coord_or_missing(Vector3i(coord.x + 1, coord.y, coord.z)),
-		"y_neg": _hash_blocks_for_coord_or_missing(Vector3i(coord.x, coord.y - 1, coord.z)),
-		"y_pos": _hash_blocks_for_coord_or_missing(Vector3i(coord.x, coord.y + 1, coord.z)),
-		"z_neg": _hash_blocks_for_coord_or_missing(Vector3i(coord.x, coord.y, coord.z - 1)),
-		"z_pos": _hash_blocks_for_coord_or_missing(Vector3i(coord.x, coord.y, coord.z + 1)),
-	}
-
-
-func _hash_blocks_for_coord_or_missing(coord: Vector3i) -> int:
-	if not world.is_chunk_coord_valid(coord):
-		return -1
-	var blocks: PackedByteArray = _get_blocks_for_coord(coord)
-	if blocks.size() != World.CHUNK_VOLUME:
-		return -1
-	return _hash_block_buffer(blocks)
-
-
-func _get_blocks_for_coord(coord: Vector3i) -> PackedByteArray:
-	if bulk_chunk_blocks.has(coord):
-		var blocks = bulk_chunk_blocks[coord]
-		if typeof(blocks) == TYPE_PACKED_BYTE_ARRAY:
-			return PackedByteArray(blocks)
-	var chunk: ChunkData = world.get_chunk(coord)
-	if chunk != null and chunk.generated:
-		return chunk.blocks
-	return PackedByteArray()
-
-
-func _hash_block_buffer(blocks: PackedByteArray) -> int:
-	var hash_value: int = 2166136261
-	for value in blocks:
-		hash_value = int((hash_value ^ int(value)) * 16777619) & 0xffffffff
-	return hash_value
+	mesh_cache_save_load.try_import_for_loaded_chunk(world, bulk_chunk_blocks, coord, chunk)
 
 
 func _clear_mesh_cache_entries() -> void:
-	pending_mesh_cache_entries.clear()
-	_reset_mesh_cache_stats()
+	mesh_cache_save_load.clear()
 
 
 func _reset_mesh_cache_stats() -> void:
-	mesh_cache_stats = {
-		"entries_read": 0,
-		"entries_pending": 0,
-		"entries_imported": 0,
-		"entries_rejected": 0,
-		"entries_saved": 0,
-	}
+	mesh_cache_save_load.reset_stats()
 
 
 func get_last_load_metrics() -> Dictionary:
 	var metrics := last_load_metrics.duplicate()
-	metrics["mesh_cache"] = mesh_cache_stats.duplicate()
+	metrics["mesh_cache"] = mesh_cache_save_load.get_stats()
 	return metrics
 
 
