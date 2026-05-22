@@ -94,7 +94,7 @@ The largest coupling hotspots are:
 
 - `Main.gd`: new-world/load-world flow, menu UI, and frame orchestration still share one file.
 - `WorldRenderer`: mesh scheduling, render-height queues, render-zone visibility, materials, overlays, and stats still share one class. Mesh-cache data contracts are now split into `WorldRendererMeshCache`.
-- `ChunkMesher`: padded buffers, greedy cube meshing, ramp meshing, UVs, colors, and mesh resource fallback share one class.
+- `ChunkMesher`: greedy cube meshing, ramp meshing, and mesh resource fallback still share one class. Padded-buffer/index helpers, UV helpers, and color/noise/shading helpers are split into `ChunkMesherPaddedBuffer`, `ChunkMesherUv`, and `ChunkMesherVisuals`.
 - `WorldSaveLoad`: bulk block data, persistent mesh cache, legacy chunk files, hashing, and migration checks still share one class. Metadata and inventory are split out.
 - `DebugOverlay`: live HUD stats, CSV captures, timing logs, map exports, and ramp debug tools share one class.
 
