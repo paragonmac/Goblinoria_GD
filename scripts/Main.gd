@@ -6,6 +6,7 @@ const MainCameraControllerScript = preload("res://scripts/main_camera_controller
 const MainSelectionControllerScript = preload("res://scripts/main_selection_controller.gd")
 const MainHudControllerScript = preload("res://scripts/main_hud_controller.gd")
 const MainWorkerWindowControllerScript = preload("res://scripts/main_worker_window_controller.gd")
+const MainLoadingControllerScript = preload("res://scripts/main_loading_controller.gd")
 #endregion
 
 #region Constants - Engine & General
@@ -61,6 +62,7 @@ var camera_controller: MainCameraController
 var selection_controller: MainSelectionController
 var hud_controller: MainHudController
 var worker_window_controller
+var loading_controller: MainLoadingController
 #endregion
 
 #region Input State
@@ -134,6 +136,7 @@ func _initialize_controllers() -> void:
 	selection_controller.initialize(world, camera, viewport, camera_controller)
 	hud_controller = MainHudControllerScript.new()
 	worker_window_controller = MainWorkerWindowControllerScript.new()
+	loading_controller = MainLoadingControllerScript.new()
 #endregion
 
 
@@ -623,82 +626,50 @@ func _set_menu_status(text: String) -> void:
 
 
 func _setup_loading_screen() -> void:
-	loading_layer = CanvasLayer.new()
-	loading_layer.name = "LoadingScreen"
-	loading_layer.layer = 100
-	if menu_layer != null:
-		loading_layer.layer = menu_layer.layer + 10
-	loading_layer.visible = false
-	add_child(loading_layer)
-
-	var backdrop := ColorRect.new()
-	backdrop.name = "Backdrop"
-	backdrop.color = Color(0.0, 0.0, 0.0, 0.92)
-	backdrop.anchor_right = 1.0
-	backdrop.anchor_bottom = 1.0
-	loading_layer.add_child(backdrop)
-
-	var panel := PanelContainer.new()
-	panel.name = "StatusWindow"
-	panel.anchor_left = 0.5
-	panel.anchor_top = 0.5
-	panel.anchor_right = 0.5
-	panel.anchor_bottom = 0.5
-	panel.offset_left = -220.0
-	panel.offset_top = -80.0
-	panel.offset_right = 220.0
-	panel.offset_bottom = 80.0
-	loading_layer.add_child(panel)
-
-	var box := VBoxContainer.new()
-	box.name = "Content"
-	box.add_theme_constant_override("separation", 10)
-	panel.add_child(box)
-
-	var title := Label.new()
-	title.name = "Title"
-	title.text = "Loading"
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	box.add_child(title)
-
-	loading_status_label = Label.new()
-	loading_status_label.name = "StatusLabel"
-	loading_status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	loading_status_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	loading_status_label.text = "Loading..."
-	box.add_child(loading_status_label)
-
-	loading_progress_bar = ProgressBar.new()
-	loading_progress_bar.name = "ProgressBar"
-	loading_progress_bar.min_value = 0.0
-	loading_progress_bar.max_value = 1.0
-	loading_progress_bar.value = 0.0
-	box.add_child(loading_progress_bar)
+	if loading_controller == null:
+		return
+	loading_controller.initialize(self, world, hud_layer, menu_layer)
+	loading_controller.setup_loading_screen()
+	loading_layer = loading_controller.loading_layer
+	loading_status_label = loading_controller.loading_status_label
+	loading_progress_bar = loading_controller.loading_progress_bar
 
 
 func _show_loading_screen(text: String) -> void:
 	loading_active = true
-	_set_world_draw_enabled(false)
-	_set_loading_status(text)
-	if loading_layer != null:
-		loading_layer.visible = true
+	if loading_controller != null:
+		loading_controller.show(text)
+	else:
+		_set_world_draw_enabled(false)
+		if loading_status_label != null:
+			loading_status_label.text = text
+		if loading_layer != null:
+			loading_layer.visible = true
+	_set_menu_status(text)
 	_refresh_menu_buttons()
 
 
 func _hide_loading_screen() -> void:
 	loading_active = false
-	if loading_layer != null:
+	if loading_controller != null:
+		loading_controller.hide()
+	elif loading_layer != null:
 		loading_layer.visible = false
 	_refresh_menu_buttons()
 
 
 func _set_loading_status(text: String) -> void:
-	if loading_status_label != null:
+	if loading_controller != null:
+		loading_controller.set_status(text)
+	elif loading_status_label != null:
 		loading_status_label.text = text
 	_set_menu_status(text)
 
 
 func _set_loading_progress(ready: int, total: int) -> void:
+	if loading_controller != null:
+		loading_controller.set_progress(ready, total)
+		return
 	if loading_progress_bar == null:
 		return
 	loading_progress_bar.max_value = maxf(float(total), 1.0)
@@ -706,6 +677,9 @@ func _set_loading_progress(ready: int, total: int) -> void:
 
 
 func _set_world_draw_enabled(enabled: bool) -> void:
+	if loading_controller != null:
+		loading_controller.set_world_draw_enabled(enabled)
+		return
 	if world != null:
 		world.visible = enabled
 	if hud_layer != null:
