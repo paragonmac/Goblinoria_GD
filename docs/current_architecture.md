@@ -66,10 +66,10 @@ It currently owns:
 - Runtime mesh scheduling through `WorldRendererMeshScheduler`, which owns the job queue, result queue, prefetch records, and one dedicated mesh thread.
 - Raw mesh-cache storage keyed by chunk coord and local top.
 - Lazy `ArrayMesh` creation when a cached chunk becomes visible.
-- Render-height rebuild queues and render-zone visibility.
+- Render-height rebuild queueing through `WorldRendererRenderLevel`, plus render-zone visibility.
 - Overlay forwarding and renderer/debug statistics.
 
-Raw mesh-cache entries store packed arrays and metrics, not `ArrayMesh` resources. `WorldRendererMeshCache` centralizes raw mesh-cache entry construction, validation, export, import shaping, and lazy `ArrayMesh` construction. `WorldRendererMeshScheduler` centralizes async mesh job ownership; `WorldRenderer` still builds job dictionaries and applies completed results to visible chunks. Persistent mesh cache saves those raw arrays with `store_var(..., false)` and validates them against world dimensions, chunk size, block table hash, mesher cache version, chunk block hash, and neighbor hashes.
+Raw mesh-cache entries store packed arrays and metrics, not `ArrayMesh` resources. `WorldRendererMeshCache` centralizes raw mesh-cache entry construction, validation, export, import shaping, and lazy `ArrayMesh` construction. `WorldRendererMeshScheduler` centralizes async mesh job ownership; `WorldRendererRenderLevel` owns render-height rebuild queue ordering. `WorldRenderer` still builds job dictionaries and applies completed results to visible chunks. Persistent mesh cache saves those raw arrays with `store_var(..., false)` and validates them against world dimensions, chunk size, block table hash, mesher cache version, chunk block hash, and neighbor hashes.
 
 ## Save/Load Data
 
@@ -93,7 +93,7 @@ Workers pull tasks from `TaskQueue` through `TaskManager`, pathfind with `Pathfi
 The largest coupling hotspots are:
 
 - `Main.gd`: new-world/load-world flow, menu UI, and frame orchestration still share one file.
-- `WorldRenderer`: render-height queues, render-zone visibility, materials, overlays, and stats still share one class. Mesh-cache data contracts are split into `WorldRendererMeshCache`, and runtime mesh queue/thread ownership is split into `WorldRendererMeshScheduler`.
+- `WorldRenderer`: render-zone visibility, materials, overlays, and stats still share one class. Mesh-cache data contracts are split into `WorldRendererMeshCache`, runtime mesh queue/thread ownership is split into `WorldRendererMeshScheduler`, and render-height queue ownership is split into `WorldRendererRenderLevel`.
 - `ChunkMesher`: greedy cube meshing, ramp meshing, and mesh resource fallback still share one class. Padded-buffer/index helpers, UV helpers, and color/noise/shading helpers are split into `ChunkMesherPaddedBuffer`, `ChunkMesherUv`, and `ChunkMesherVisuals`.
 - `WorldSaveLoad`: bulk block data, persistent mesh cache, legacy chunk files, hashing, and migration checks still share one class. Metadata and inventory are split out.
 - `DebugOverlay`: live HUD stats, CSV captures, timing logs, map exports, and ramp debug tools share one class.

@@ -7,6 +7,7 @@ const ChunkMesherScript = preload("res://scripts/rendering/chunk_mesher.gd")
 const ChunkCacheScript = preload("res://scripts/rendering/chunk_cache.gd")
 const WorldRendererMeshCacheScript = preload("res://scripts/rendering/world_renderer_mesh_cache.gd")
 const WorldRendererMeshSchedulerScript = preload("res://scripts/rendering/world_renderer_mesh_scheduler.gd")
+const WorldRendererRenderLevelScript = preload("res://scripts/rendering/world_renderer_render_level.gd")
 const OverlayRendererScript = preload("res://scripts/rendering/overlay_renderer.gd")
 const FrustumCullerScript = preload("res://scripts/rendering/frustum_culler.gd")
 const BlockTerrainShader = preload("res://scripts/rendering/block_terrain.gdshader")
@@ -36,6 +37,7 @@ var mesher_thread = ChunkMesherScript.new()
 var chunk_cache = ChunkCacheScript.new()
 var mesh_cache_helper = WorldRendererMeshCacheScript.new()
 var mesh_scheduler = WorldRendererMeshSchedulerScript.new()
+var render_level_helper = WorldRendererRenderLevelScript.new()
 var overlay_renderer = OverlayRendererScript.new()
 var frustum_culler = FrustumCullerScript.new()
 var block_material: Material
@@ -52,10 +54,6 @@ var total_greedy_occluded_faces: int = 0
 var total_greedy_source_visible_faces: int = 0
 var total_ramp_visible_faces: int = 0
 var total_ramp_occluded_faces: int = 0
-var render_height_queue: Array = []
-var render_height_queue_set: Dictionary = {}
-var render_height_anchor := Vector3.ZERO
-var render_height_target_y: int = 0
 var chunk_mesh_cache: Dictionary = {}
 var use_async_meshing: bool = true
 var render_zone_visible: Dictionary = {}
@@ -83,6 +81,7 @@ func initialize(world_ref: World) -> void:
 	overlay_renderer.initialize(world_ref)
 	_ensure_block_tables()
 	mesh_scheduler.configure(Callable(self, "_build_mesh_result_on_worker"), MESH_RESULT_BACKLOG_MAX, MESH_RESULT_BACKLOG_SLEEP_USEC)
+	render_level_helper.configure(self, chunk_cache, mesh_scheduler)
 	_start_mesh_worker()
 #endregion
 
@@ -104,8 +103,7 @@ func clear_chunks() -> void:
 	_clear_all_chunk_render_stats()
 	pending_neighbor_remesh.clear()
 	chunk_missing_neighbors.clear()
-	render_height_queue.clear()
-	render_height_queue_set.clear()
+	render_level_helper.clear()
 	chunk_mesh_cache.clear()
 	render_zone_visible.clear()
 	_clear_mesh_jobs()
@@ -119,9 +117,7 @@ func clear_chunks() -> void:
 
 func clear_chunk(coord: Vector3i) -> void:
 	_cancel_chunk_jobs(coord)
-	render_height_queue_set.erase(coord)
-	if render_height_queue.has(coord):
-		render_height_queue.erase(coord)
+	render_level_helper.remove_coord(coord)
 	_clear_chunk_render_stats(coord)
 	_clear_neighbor_remesh_dependencies(coord)
 	if chunk_mesh_cache.has(coord):
@@ -773,42 +769,19 @@ func _clear_mesh_jobs() -> void:
 func queue_render_height_update(old_y: int, new_y: int, anchor: Vector3, min_x: int, max_x: int, min_z: int, max_z: int) -> int:
 	if world == null:
 		return 0
-	var chunk_size: int = World.CHUNK_SIZE
-	var min_y: int = min(old_y, new_y)
-	var max_y: int = max(old_y, new_y)
-	var max_cy: int = int(floor(float(world.world_size_y) / float(chunk_size))) - 1
-	var min_cy: int = clampi(int(floor(float(min_y) / float(chunk_size))), 0, max_cy)
-	var max_cy_clamped: int = clampi(int(floor(float(max_y) / float(chunk_size))), 0, max_cy)
-	_hide_chunks_outside_bounds(min_cy, max_cy_clamped, min_x, max_x, min_z, max_z)
-	return _queue_render_height_rebuild(min_cy, max_cy_clamped, min_x, max_x, min_z, max_z, anchor, new_y)
+	return render_level_helper.queue_update(world, old_y, new_y, anchor, min_x, max_x, min_z, max_z)
 
 
 func process_render_height_queue(budget: int) -> int:
-	if budget <= 0:
-		return 0
-	var build_count: int = min(budget, render_height_queue.size())
-	for _i in range(build_count):
-		var coord: Vector3i = render_height_queue.pop_front()
-		render_height_queue_set.erase(coord)
-		queue_chunk_mesh_build(coord, render_height_target_y, true)
-	return build_count
+	return render_level_helper.process_queue(budget)
 
 
 func clear_render_height_queue() -> void:
-	render_height_queue.clear()
-	render_height_queue_set.clear()
+	render_level_helper.clear()
 
 
 func has_pending_render_height_work() -> bool:
-	if render_height_queue.size() > 0:
-		return true
-	if mesh_scheduler.has_visible_records():
-		return true
-	if _has_non_prefetch_jobs():
-		return true
-	if _has_non_prefetch_results():
-		return true
-	return false
+	return render_level_helper.has_pending_work()
 
 
 func has_pending_mesh_work(include_prefetch: bool) -> bool:
@@ -845,82 +818,8 @@ func _has_any_results() -> bool:
 	return mesh_scheduler.has_any_results()
 
 
-func _queue_render_height_rebuild(min_cy: int, max_cy: int, min_x: int, max_x: int, min_z: int, max_z: int, anchor: Vector3, target_top_y: int) -> int:
-	render_height_queue.clear()
-	render_height_queue_set.clear()
-	render_height_anchor = anchor
-	render_height_target_y = target_top_y
-	var chunk_size: int = World.CHUNK_SIZE
-	var anchor_x: float = anchor.x
-	var anchor_z: float = anchor.z
-	var candidates: Array = []
-	for key in chunk_cache.get_keys():
-		var coord: Vector3i = key
-		if coord.y < min_cy or coord.y > max_cy:
-			continue
-		if coord.x < min_x or coord.x > max_x:
-			continue
-		if coord.z < min_z or coord.z > max_z:
-			continue
-		var local_top := target_top_y - coord.y * chunk_size
-		if local_top < 0:
-			_apply_empty_mesh(coord)
-			continue
-		local_top = min(local_top, chunk_size - 1)
-		if _apply_cached_mesh(coord, local_top):
-			continue
-		_hide_chunk_mesh(coord)
-		var center_x := (float(coord.x) + 0.5) * chunk_size
-		var center_z := (float(coord.z) + 0.5) * chunk_size
-		var dx := center_x - anchor_x
-		var dz := center_z - anchor_z
-		var dist := dx * dx + dz * dz
-		candidates.append({"key": coord, "dist": dist})
-	candidates.sort_custom(Callable(self, "_sort_render_height_candidate"))
-	for entry in candidates:
-		var coord: Vector3i = entry["key"]
-		render_height_queue.append(coord)
-		render_height_queue_set[coord] = true
-	return render_height_queue.size()
-
-
-func _sort_render_height_candidate(a: Dictionary, b: Dictionary) -> bool:
-	return float(a["dist"]) < float(b["dist"])
-
-
 func update_render_height_anchor(anchor: Vector3) -> void:
-	if render_height_queue.is_empty():
-		return
-	var dx := anchor.x - render_height_anchor.x
-	var dz := anchor.z - render_height_anchor.z
-	var threshold := float(World.CHUNK_SIZE * World.CHUNK_SIZE)
-	if dx * dx + dz * dz < threshold:
-		return
-	render_height_anchor = anchor
-	render_height_queue.sort_custom(Callable(self, "_sort_render_height_coord"))
-
-
-func _sort_render_height_coord(a: Vector3i, b: Vector3i) -> bool:
-	return _render_height_coord_dist_sq(a) < _render_height_coord_dist_sq(b)
-
-
-func _render_height_coord_dist_sq(coord: Vector3i) -> float:
-	var chunk_size := World.CHUNK_SIZE
-	var center_x := (float(coord.x) + 0.5) * chunk_size
-	var center_z := (float(coord.z) + 0.5) * chunk_size
-	var dx := center_x - render_height_anchor.x
-	var dz := center_z - render_height_anchor.z
-	return dx * dx + dz * dz
-
-
-func _hide_chunks_outside_bounds(min_cy: int, max_cy: int, min_x: int, max_x: int, min_z: int, max_z: int) -> void:
-	for key in chunk_cache.get_keys():
-		var coord: Vector3i = key
-		if coord.y < min_cy or coord.y > max_cy:
-			continue
-		if coord.x >= min_x and coord.x <= max_x and coord.z >= min_z and coord.z <= max_z:
-			continue
-		_hide_chunk_mesh(coord)
+	render_level_helper.update_anchor(anchor)
 #endregion
 
 
