@@ -42,6 +42,8 @@ const ADJACENT_MANHATTAN_DISTANCE := 1
 const WANDER_ATTEMPTS := 8
 const WANDER_DIST_MIN := 1
 const WANDER_DIST_MAX := 10
+const IDLE_TASK_SEARCH_INTERVAL := 0.15
+const WAITING_REPATH_INTERVAL := 0.25
 #endregion
 
 #region State
@@ -54,6 +56,8 @@ var path_index := 0
 var work_timer := 0.0
 var idle_timer := 0.0
 var wander_wait := 0.0
+var task_search_timer := 0.0
+var waiting_repath_timer := 0.0
 var rng := RandomNumberGenerator.new()
 #endregion
 
@@ -144,6 +148,10 @@ func get_block_coord() -> Vector3i:
 
 #region Update Loop
 func update_worker(dt: float, world, task_queue, pathfinder) -> void:
+	if task_search_timer > 0.0:
+		task_search_timer = maxf(0.0, task_search_timer - dt)
+	if waiting_repath_timer > 0.0:
+		waiting_repath_timer = maxf(0.0, waiting_repath_timer - dt)
 	if idle_timer > 0.0:
 		idle_timer -= dt
 		return
@@ -152,7 +160,7 @@ func update_worker(dt: float, world, task_queue, pathfinder) -> void:
 		WorkerState.IDLE:
 			update_idle(dt, world, task_queue, pathfinder)
 		WorkerState.MOVING:
-			update_moving(dt, world, task_queue)
+			update_moving(dt, world, task_queue, pathfinder)
 		WorkerState.WORKING:
 			update_working(dt, world, task_queue)
 		WorkerState.WAITING:
@@ -162,6 +170,10 @@ func update_worker(dt: float, world, task_queue, pathfinder) -> void:
 
 #region Idle State
 func update_idle(dt: float, world, task_queue, pathfinder) -> void:
+	if task_search_timer > 0.0:
+		update_wander(dt, world, pathfinder)
+		return
+	task_search_timer = IDLE_TASK_SEARCH_INTERVAL
 	var result: Dictionary = find_pathable_task(TaskQueue.TaskType.DIG, world, task_queue, pathfinder)
 	if result.is_empty():
 		result = find_pathable_task(TaskQueue.TaskType.STAIRS, world, task_queue, pathfinder)
@@ -176,6 +188,8 @@ func update_idle(dt: float, world, task_queue, pathfinder) -> void:
 		current_task_id = task.id
 		path = maybe_path
 		path_index = 0
+		task_search_timer = 0.0
+		waiting_repath_timer = 0.0
 		set_target_from_path(world)
 		set_state(WorkerState.MOVING)
 		return
@@ -191,6 +205,8 @@ func find_pathable_task(task_type: int, world, task_queue, pathfinder) -> Dictio
 		if task.status != TaskQueue.TaskStatus.PENDING:
 			continue
 		if task.type != task_type:
+			continue
+		if world != null and not world.is_block_coord_valid(task.pos.x, task.pos.y, task.pos.z):
 			continue
 		var dx: float = float(task.pos.x) - position.x
 		var dy: float = float(task.pos.y) - position.y
@@ -243,7 +259,7 @@ func set_target_from_path(world) -> void:
 				target_pos.y += _ramp_center_offset(block_id)
 
 
-func update_moving(dt: float, world, task_queue) -> void:
+func update_moving(dt: float, world, task_queue, _pathfinder) -> void:
 	var delta := target_pos - position
 	var dist := delta.length()
 	_update_facing_from_delta(delta)
@@ -272,6 +288,7 @@ func update_moving(dt: float, world, task_queue) -> void:
 
 	if dist > 0.000001:
 		position += (delta / dist) * move_dist
+
 
 func _ramp_center_offset(block_id: int) -> float:
 	match block_id:
@@ -613,8 +630,20 @@ func update_working(dt: float, world, task_queue) -> void:
 		if task != null:
 			match task.type:
 				TaskQueue.TaskType.DIG:
+					var old_block: int = world.get_block(task.pos.x, task.pos.y, task.pos.z)
+					var drop_id: int = world.block_registry.get_drop(old_block)
+					if drop_id > 0:
+						world.add_to_inventory(drop_id)
 					world.set_block(task.pos.x, task.pos.y, task.pos.z, World.BLOCK_ID_AIR)
 				TaskQueue.TaskType.PLACE:
+					if not world.remove_from_inventory(task.material):
+						task.status = TaskQueue.TaskStatus.PENDING
+						task.assigned_worker = null
+						current_task_id = -1
+						active_work_anim = &""
+						idle_timer = IDLE_PAUSE
+						set_state(WorkerState.IDLE)
+						return
 					world.set_block(task.pos.x, task.pos.y, task.pos.z, task.material)
 				TaskQueue.TaskType.STAIRS:
 					world.set_block(task.pos.x, task.pos.y, task.pos.z, task.material)
@@ -640,6 +669,9 @@ func update_waiting(_dt: float, world, task_queue, pathfinder) -> void:
 		current_task_id = -1
 		set_state(WorkerState.IDLE)
 		return
+	if waiting_repath_timer > 0.0:
+		return
+	waiting_repath_timer = WAITING_REPATH_INTERVAL
 
 	var start: Vector3i = get_block_coord()
 	var maybe_path: Array = []
@@ -655,6 +687,7 @@ func update_waiting(_dt: float, world, task_queue, pathfinder) -> void:
 	if maybe_path.size() > 0:
 		path = maybe_path
 		path_index = 0
+		waiting_repath_timer = 0.0
 		set_target_from_path(world)
 		set_state(WorkerState.MOVING)
 		return
@@ -679,6 +712,8 @@ func update_wander(dt: float, world, pathfinder) -> void:
 		var x: int = start.x + dx
 		var y: int = start.y
 		var z: int = start.z + dz
+		if not world.is_block_coord_valid(x, y, z):
+			continue
 		if not pathfinder.is_walkable(world, x, y, z):
 			continue
 		var goal: Vector3i = Vector3i(x, y, z)

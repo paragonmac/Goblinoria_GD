@@ -5,6 +5,7 @@ class_name MainHudController
 #region State
 var y_level_label: Label
 var gen_status_label: Label
+var inventory_label: Label
 var render_level_base_y: int = 0
 #endregion
 
@@ -42,6 +43,21 @@ func setup(hud_layer: CanvasLayer) -> void:
 	gen_status_label.offset_bottom = -30.0
 	gen_status_label.text = ""
 	hud_layer.add_child(gen_status_label)
+
+	inventory_label = Label.new()
+	inventory_label.name = "InventoryLabel"
+	inventory_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	inventory_label.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
+	inventory_label.anchor_left = 0.0
+	inventory_label.anchor_right = 0.0
+	inventory_label.anchor_top = 1.0
+	inventory_label.anchor_bottom = 1.0
+	inventory_label.offset_left = 10.0
+	inventory_label.offset_top = -200.0
+	inventory_label.offset_right = 200.0
+	inventory_label.offset_bottom = -10.0
+	inventory_label.text = ""
+	hud_layer.add_child(inventory_label)
 
 
 func set_render_level_base(world: World) -> void:
@@ -95,4 +111,23 @@ func _get_info_display_text(world: World, info_block_id: int, info_block_pos: Ve
 		info_block_pos.y,
 		info_block_pos.z,
 	]
+
+
+func update_inventory(world: World) -> void:
+	if inventory_label == null or world == null:
+		return
+	var inv: Dictionary = world.inventory
+	if inv.is_empty():
+		inventory_label.text = ""
+		return
+	var lines: PackedStringArray = PackedStringArray()
+	var keys: Array = inv.keys()
+	keys.sort()
+	for block_id in keys:
+		var count: int = inv[block_id]
+		if count <= 0:
+			continue
+		var block_name: String = world.block_registry.get_name(block_id)
+		lines.append("%s: %d" % [block_name, count])
+	inventory_label.text = "\n".join(lines)
 

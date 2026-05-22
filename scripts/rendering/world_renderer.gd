@@ -24,6 +24,7 @@ const MESH_RESULT_BACKLOG_MAX := 32
 const MESH_RESULT_BACKLOG_SLEEP_USEC := 500
 const MESH_CACHE_RADIUS := 0
 const MESH_PREFETCH_BELOW_ONLY := true
+const MESHER_CACHE_VERSION := 3
 #endregion
 
 #region State
@@ -37,8 +38,16 @@ var block_material: Material
 var block_atlas_texture: Texture2D
 var debug_normals_enabled: bool = false
 var chunk_face_stats: Dictionary = {}
+var chunk_mesh_stats: Dictionary = {}
 var total_visible_faces: int = 0
 var total_occluded_faces: int = 0
+var total_mesh_vertices: int = 0
+var total_mesh_triangles: int = 0
+var total_greedy_visible_faces: int = 0
+var total_greedy_occluded_faces: int = 0
+var total_greedy_source_visible_faces: int = 0
+var total_ramp_visible_faces: int = 0
+var total_ramp_occluded_faces: int = 0
 var render_height_queue: Array = []
 var render_height_queue_set: Dictionary = {}
 var render_height_anchor := Vector3.ZERO
@@ -58,6 +67,14 @@ var render_zone_visible: Dictionary = {}
 var block_solid_table := PackedByteArray()
 var block_color_table := PackedColorArray()
 var block_ramp_table := PackedByteArray()
+var mesh_cache_hits: int = 0
+var mesh_cache_misses: int = 0
+var mesh_cache_imports: int = 0
+var mesh_build_ms_total: float = 0.0
+var mesh_upload_ms_total: float = 0.0
+var pending_neighbor_remesh: Dictionary = {}
+var chunk_missing_neighbors: Dictionary = {}
+var neighbor_remesh_queued_total: int = 0
 #endregion
 
 
@@ -80,17 +97,17 @@ func _exit_tree() -> void:
 
 #region Reset and Clear
 func reset_stats() -> void:
-	chunk_face_stats.clear()
-	total_visible_faces = 0
-	total_occluded_faces = 0
+	_clear_all_chunk_render_stats()
+	neighbor_remesh_queued_total = 0
+	reset_mesh_cache_metrics()
 	clear_drag_preview()
 	overlay_renderer.clear_task_overlays()
 
 func clear_chunks() -> void:
 	chunk_cache.clear()
-	chunk_face_stats.clear()
-	total_visible_faces = 0
-	total_occluded_faces = 0
+	_clear_all_chunk_render_stats()
+	pending_neighbor_remesh.clear()
+	chunk_missing_neighbors.clear()
 	render_height_queue.clear()
 	render_height_queue_set.clear()
 	chunk_mesh_cache.clear()
@@ -110,23 +127,237 @@ func clear_chunk(coord: Vector3i) -> void:
 	render_height_queue_set.erase(coord)
 	if render_height_queue.has(coord):
 		render_height_queue.erase(coord)
-	if chunk_face_stats.has(coord):
-		var prev_counts: Vector2i = chunk_face_stats[coord]
-		total_visible_faces -= prev_counts.x
-		total_occluded_faces -= prev_counts.y
-		chunk_face_stats.erase(coord)
+	_clear_chunk_render_stats(coord)
+	_clear_neighbor_remesh_dependencies(coord)
 	if chunk_mesh_cache.has(coord):
 		chunk_mesh_cache.erase(coord)
 	if chunk_cache != null:
 		chunk_cache.remove_chunk(coord)
 
 
+func _clear_all_chunk_render_stats() -> void:
+	chunk_face_stats.clear()
+	chunk_mesh_stats.clear()
+	total_visible_faces = 0
+	total_occluded_faces = 0
+	total_mesh_vertices = 0
+	total_mesh_triangles = 0
+	total_greedy_visible_faces = 0
+	total_greedy_occluded_faces = 0
+	total_greedy_source_visible_faces = 0
+	total_ramp_visible_faces = 0
+	total_ramp_occluded_faces = 0
+
+
+func _clear_chunk_render_stats(coord: Vector3i) -> void:
+	if chunk_face_stats.has(coord):
+		var prev_counts: Vector2i = chunk_face_stats[coord]
+		total_visible_faces -= prev_counts.x
+		total_occluded_faces -= prev_counts.y
+		chunk_face_stats.erase(coord)
+	if chunk_mesh_stats.has(coord):
+		var prev_value: Variant = chunk_mesh_stats[coord]
+		if typeof(prev_value) == TYPE_DICTIONARY:
+			var prev_stats: Dictionary = prev_value
+			total_mesh_vertices -= int(prev_stats.get("vertices", 0))
+			total_mesh_triangles -= int(prev_stats.get("triangles", 0))
+			total_greedy_visible_faces -= int(prev_stats.get("greedy_visible_faces", 0))
+			total_greedy_occluded_faces -= int(prev_stats.get("greedy_occluded_faces", 0))
+			total_greedy_source_visible_faces -= int(prev_stats.get("greedy_source_visible_faces", 0))
+			total_ramp_visible_faces -= int(prev_stats.get("ramp_visible_faces", 0))
+			total_ramp_occluded_faces -= int(prev_stats.get("ramp_occluded_faces", 0))
+		chunk_mesh_stats.erase(coord)
+
+
+func _clear_neighbor_remesh_dependencies(coord: Vector3i) -> void:
+	if chunk_missing_neighbors.has(coord):
+		var missing_map_value: Variant = chunk_missing_neighbors[coord]
+		if typeof(missing_map_value) == TYPE_DICTIONARY:
+			var missing_map: Dictionary = missing_map_value
+			for neighbor_coord in missing_map.keys():
+				if pending_neighbor_remesh.has(neighbor_coord):
+					var dependents_value: Variant = pending_neighbor_remesh[neighbor_coord]
+					if typeof(dependents_value) == TYPE_DICTIONARY:
+						var dependents: Dictionary = dependents_value
+						dependents.erase(coord)
+						if dependents.is_empty():
+							pending_neighbor_remesh.erase(neighbor_coord)
+		chunk_missing_neighbors.erase(coord)
+	for neighbor_coord in pending_neighbor_remesh.keys():
+		var dependents_value: Variant = pending_neighbor_remesh[neighbor_coord]
+		if typeof(dependents_value) != TYPE_DICTIONARY:
+			continue
+		var dependents: Dictionary = dependents_value
+		if dependents.has(coord):
+			dependents.erase(coord)
+			if dependents.is_empty():
+				pending_neighbor_remesh.erase(neighbor_coord)
+
+
+func _update_neighbor_remesh_dependencies(coord: Vector3i, missing_neighbors: Array) -> void:
+	_clear_neighbor_remesh_dependencies(coord)
+	if missing_neighbors.is_empty():
+		return
+	var unique_missing: Dictionary = {}
+	for neighbor_coord in missing_neighbors:
+		if typeof(neighbor_coord) != TYPE_VECTOR3I:
+			continue
+		if world != null and not world.is_chunk_coord_valid(neighbor_coord):
+			continue
+		unique_missing[neighbor_coord] = true
+	if unique_missing.is_empty():
+		return
+	chunk_missing_neighbors[coord] = unique_missing
+	for neighbor_coord in unique_missing.keys():
+		var dependents: Dictionary = {}
+		if pending_neighbor_remesh.has(neighbor_coord):
+			var dependents_value: Variant = pending_neighbor_remesh[neighbor_coord]
+			if typeof(dependents_value) == TYPE_DICTIONARY:
+				dependents = dependents_value
+		dependents[coord] = true
+		pending_neighbor_remesh[neighbor_coord] = dependents
+
+
+func notify_chunk_loaded(coord: Vector3i) -> void:
+	if not pending_neighbor_remesh.has(coord):
+		return
+	var dependents_value: Variant = pending_neighbor_remesh[coord]
+	pending_neighbor_remesh.erase(coord)
+	if typeof(dependents_value) != TYPE_DICTIONARY:
+		return
+	var dependents: Dictionary = dependents_value
+	for dependent_coord in dependents.keys():
+		if chunk_missing_neighbors.has(dependent_coord):
+			var missing_map_value: Variant = chunk_missing_neighbors[dependent_coord]
+			if typeof(missing_map_value) == TYPE_DICTIONARY:
+				var missing_map: Dictionary = missing_map_value
+				missing_map.erase(coord)
+				if missing_map.is_empty():
+					chunk_missing_neighbors.erase(dependent_coord)
+		if world == null or not world.is_chunk_coord_valid(dependent_coord):
+			continue
+		var chunk: ChunkData = world.get_chunk(dependent_coord)
+		if chunk == null or not chunk.generated:
+			continue
+		chunk.mesh_state = ChunkData.MESH_STATE_NONE
+		chunk.mesh_revision += 1
+		invalidate_chunk_mesh_cache(dependent_coord)
+		queue_chunk_mesh_build(dependent_coord, -1, false, true)
+		neighbor_remesh_queued_total += 1
+
+
+func _count_pending_neighbor_remesh_dependents() -> int:
+	var total := 0
+	for dependents_value in pending_neighbor_remesh.values():
+		if typeof(dependents_value) == TYPE_DICTIONARY:
+			var dependents: Dictionary = dependents_value
+			total += dependents.size()
+	return total
+
+
+func _missing_neighbors_from_value(value: Variant) -> Array:
+	var missing: Array = []
+	if typeof(value) != TYPE_ARRAY:
+		return missing
+	var values: Array = value
+	for coord in values:
+		if typeof(coord) == TYPE_VECTOR3I:
+			missing.append(coord)
+	return missing
+
+
+func _record_chunk_render_stats(coord: Vector3i, visible_faces: int, occluded_faces: int, mesh_metrics: Dictionary) -> void:
+	var prev_counts: Vector2i = chunk_face_stats.get(coord, Vector2i(0, 0))
+	total_visible_faces += visible_faces - prev_counts.x
+	total_occluded_faces += occluded_faces - prev_counts.y
+	chunk_face_stats[coord] = Vector2i(visible_faces, occluded_faces)
+
+	var metrics: Dictionary = _normalize_mesh_metrics(mesh_metrics, null)
+	var prev_stats: Dictionary = {}
+	var prev_value: Variant = chunk_mesh_stats.get(coord, {})
+	if typeof(prev_value) == TYPE_DICTIONARY:
+		prev_stats = prev_value
+	total_mesh_vertices += int(metrics.get("vertices", 0)) - int(prev_stats.get("vertices", 0))
+	total_mesh_triangles += int(metrics.get("triangles", 0)) - int(prev_stats.get("triangles", 0))
+	total_greedy_visible_faces += int(metrics.get("greedy_visible_faces", 0)) - int(prev_stats.get("greedy_visible_faces", 0))
+	total_greedy_occluded_faces += int(metrics.get("greedy_occluded_faces", 0)) - int(prev_stats.get("greedy_occluded_faces", 0))
+	total_greedy_source_visible_faces += int(metrics.get("greedy_source_visible_faces", 0)) - int(prev_stats.get("greedy_source_visible_faces", 0))
+	total_ramp_visible_faces += int(metrics.get("ramp_visible_faces", 0)) - int(prev_stats.get("ramp_visible_faces", 0))
+	total_ramp_occluded_faces += int(metrics.get("ramp_occluded_faces", 0)) - int(prev_stats.get("ramp_occluded_faces", 0))
+	chunk_mesh_stats[coord] = metrics
+
+
+func _mesh_metrics_from_result(result: Dictionary, mesh_value: Variant) -> Dictionary:
+	return _normalize_mesh_metrics({
+		"vertices": int(result.get("vertex_count", -1)),
+		"triangles": int(result.get("triangle_count", -1)),
+		"greedy_visible_faces": int(result.get("greedy_visible_faces", 0)),
+		"greedy_occluded_faces": int(result.get("greedy_occluded_faces", 0)),
+		"greedy_source_visible_faces": int(result.get("greedy_source_visible_faces", result.get("greedy_visible_faces", 0))),
+		"ramp_visible_faces": int(result.get("ramp_visible_faces", 0)),
+		"ramp_occluded_faces": int(result.get("ramp_occluded_faces", 0)),
+	}, mesh_value)
+
+
+func _mesh_metrics_from_entry(entry: Dictionary, mesh_value: Variant) -> Dictionary:
+	var metrics_value: Variant = entry.get("metrics", {})
+	if typeof(metrics_value) == TYPE_DICTIONARY:
+		var metrics: Dictionary = metrics_value
+		return _normalize_mesh_metrics(metrics, mesh_value)
+	return _normalize_mesh_metrics({}, mesh_value)
+
+
+func _normalize_mesh_metrics(metrics: Dictionary, mesh_value: Variant) -> Dictionary:
+	var vertex_count := int(metrics.get("vertices", metrics.get("vertex_count", -1)))
+	if vertex_count < 0:
+		vertex_count = _get_mesh_vertex_count(mesh_value)
+	var triangle_count := int(metrics.get("triangles", metrics.get("triangle_count", -1)))
+	if triangle_count < 0:
+		triangle_count = _get_mesh_triangle_count(mesh_value)
+		if triangle_count <= 0 and vertex_count > 0:
+			triangle_count = int(vertex_count / 3)
+	var greedy_visible_faces := int(metrics.get("greedy_visible_faces", metrics.get("greedy_visible", 0)))
+	var greedy_occluded_faces := int(metrics.get("greedy_occluded_faces", metrics.get("greedy_occluded", 0)))
+	var greedy_source_visible_faces := int(metrics.get("greedy_source_visible_faces", metrics.get("greedy_source_visible", greedy_visible_faces)))
+	var ramp_visible_faces := int(metrics.get("ramp_visible_faces", metrics.get("ramp_visible", 0)))
+	var ramp_occluded_faces := int(metrics.get("ramp_occluded_faces", metrics.get("ramp_occluded", 0)))
+	return {
+		"vertices": max(0, vertex_count),
+		"triangles": max(0, triangle_count),
+		"greedy_visible_faces": max(0, greedy_visible_faces),
+		"greedy_occluded_faces": max(0, greedy_occluded_faces),
+		"greedy_source_visible_faces": max(0, greedy_source_visible_faces),
+		"ramp_visible_faces": max(0, ramp_visible_faces),
+		"ramp_occluded_faces": max(0, ramp_occluded_faces),
+	}
+
+
+func _get_mesh_vertex_count(mesh_value: Variant) -> int:
+	if not (mesh_value is ArrayMesh):
+		return 0
+	var mesh: ArrayMesh = mesh_value as ArrayMesh
+	if mesh.get_surface_count() <= 0:
+		return 0
+	var arrays: Array = mesh.surface_get_arrays(0)
+	var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	return vertices.size()
+
+
+func _get_mesh_triangle_count(mesh_value: Variant) -> int:
+	var vertex_count := _get_mesh_vertex_count(mesh_value)
+	if vertex_count <= 0:
+		return 0
+	return int(vertex_count / 3)
+
+
 #region Chunk Building
 func regenerate_chunk(cx: int, cy: int, cz: int) -> void:
 	if world == null:
 		return
-	var chunk_size: int = World.CHUNK_SIZE
 	var key := Vector3i(cx, cy, cz)
+	if not world.is_chunk_coord_valid(key):
+		return
+	var chunk_size: int = World.CHUNK_SIZE
 	var mesh_instance: MeshInstance3D = chunk_cache.ensure_chunk(key, chunk_size)
 
 	var profiler: DebugProfiler = world.debug_profiler
@@ -142,14 +373,18 @@ func regenerate_chunk(cx: int, cy: int, cz: int) -> void:
 		if build_ms >= MESH_BUILD_LOG_THRESHOLD_MS:
 			print("Chunk mesh build %d,%d,%d: %.2f ms" % [cx, cy, cz, build_ms])
 	var mesh: ArrayMesh = result["mesh"]
+	var vertices: PackedVector3Array = result.get("vertices", PackedVector3Array())
+	var normals: PackedVector3Array = result.get("normals", PackedVector3Array())
+	var colors: PackedColorArray = result.get("colors", PackedColorArray())
+	var uvs: PackedVector2Array = result.get("uv", PackedVector2Array())
+	var uv2s: PackedVector2Array = result.get("uv2", PackedVector2Array())
 	var visible_faces: int = result["visible_faces"]
 	var occluded_faces: int = result["occluded_faces"]
 	var has_geometry: bool = result["has_geometry"]
+	var missing_neighbors: Array = _missing_neighbors_from_value(result.get("missing_neighbors", []))
+	var mesh_metrics := _mesh_metrics_from_result(result, mesh)
 
-	var prev_counts: Vector2i = chunk_face_stats.get(key, Vector2i(0, 0))
-	total_visible_faces += visible_faces - prev_counts.x
-	total_occluded_faces += occluded_faces - prev_counts.y
-	chunk_face_stats[key] = Vector2i(visible_faces, occluded_faces)
+	_record_chunk_render_stats(key, visible_faces, occluded_faces, mesh_metrics)
 	mesh_instance.mesh = mesh
 	mesh_instance.visible = has_geometry and _is_chunk_in_current_render_zone(key)
 	if has_geometry:
@@ -161,7 +396,8 @@ func regenerate_chunk(cx: int, cy: int, cz: int) -> void:
 		var local_top := world.top_render_y - key.y * chunk_size
 		if local_top >= 0:
 			local_top = min(local_top, chunk_size - 1)
-			_store_mesh_cache(key, local_top, mesh, visible_faces, occluded_faces, has_geometry, chunk.mesh_revision)
+			_store_mesh_cache_from_arrays(key, local_top, vertices, normals, colors, uvs, uv2s, visible_faces, occluded_faces, has_geometry, chunk.mesh_revision, mesh_metrics, missing_neighbors)
+	_update_neighbor_remesh_dependencies(key, missing_neighbors)
 #endregion
 
 
@@ -169,15 +405,24 @@ func regenerate_chunk(cx: int, cy: int, cz: int) -> void:
 func queue_chunk_mesh_build(coord: Vector3i, top_render_y: int = -1, respect_top: bool = false, high_priority: bool = false, force_sync: bool = false) -> void:
 	if world == null:
 		return
+	if not world.is_chunk_coord_valid(coord):
+		return
 	_ensure_block_tables()
+	var chunk: ChunkData = world.get_chunk(coord)
+	if chunk == null or not chunk.generated:
+		return
+	var requested_local_top: int = _mesh_request_local_top(coord, top_render_y)
+	if requested_local_top < 0:
+		_apply_empty_mesh(coord)
+		return
+	if _apply_cached_mesh(coord, requested_local_top):
+		_cancel_chunk_jobs(coord)
+		return
 	if not use_async_meshing or force_sync:
 		regenerate_chunk(coord.x, coord.y, coord.z)
 		return
 	if not mesh_thread_running:
 		_start_mesh_worker()
-	var chunk: ChunkData = world.get_chunk(coord)
-	if chunk == null or not chunk.generated:
-		return
 	var revision: int = chunk.mesh_revision
 	var queued_rev: int = int(mesh_job_set.get(coord, -1))
 	if queued_rev >= revision and chunk.mesh_state == ChunkData.MESH_STATE_PENDING and not respect_top:
@@ -265,6 +510,44 @@ func _queue_prefetch_job(coord: Vector3i, local_top: int) -> void:
 	mesh_job_semaphore.post()
 
 
+func queue_chunk_mesh_cache_build(coord: Vector3i, local_top: int, high_priority: bool = false) -> bool:
+	if world == null:
+		return false
+	if not use_async_meshing:
+		return false
+	if not world.is_chunk_coord_valid(coord):
+		return false
+	if local_top < 0 or local_top >= World.CHUNK_SIZE:
+		return false
+	if _has_cached_mesh(coord, local_top):
+		return false
+	if not mesh_thread_running:
+		_start_mesh_worker()
+	_ensure_block_tables()
+	var chunk: ChunkData = world.get_chunk(coord)
+	if chunk == null or not chunk.generated:
+		return false
+	var revision: int = chunk.mesh_revision
+	var key := _prefetch_key(coord, local_top)
+	var queued_rev: int = int(mesh_prefetch_set.get(key, -1))
+	if queued_rev >= revision:
+		return false
+	var top_render_y: int = coord.y * World.CHUNK_SIZE + local_top
+	var job := _build_mesh_job(coord, revision, top_render_y, true, false)
+	if job.is_empty():
+		return false
+	job["cache_only"] = true
+	mesh_prefetch_set[key] = revision
+	mesh_job_mutex.lock()
+	if high_priority:
+		mesh_job_queue.insert(0, job)
+	else:
+		mesh_job_queue.append(job)
+	mesh_job_mutex.unlock()
+	mesh_job_semaphore.post()
+	return true
+
+
 func process_mesh_results(budget: int) -> int:
 	if budget <= 0:
 		return 0
@@ -334,12 +617,14 @@ func flush_mesh_jobs(include_prefetch: bool = true, max_ms: float = -1.0) -> voi
 func _apply_mesh_result(result: Dictionary) -> bool:
 	if world == null:
 		return false
+	var apply_start_usec: int = Time.get_ticks_usec()
 	var coord: Vector3i = result["coord"]
 	var chunk: ChunkData = world.get_chunk(coord)
 	var local_top: int = int(result.get("local_top", -1))
 	var revision: int = int(result.get("mesh_revision", -1))
 	var prefetch: bool = bool(result.get("prefetch", false))
 	var respect_top: bool = bool(result.get("respect_top", false))
+	var cache_only: bool = bool(result.get("cache_only", false))
 	if chunk == null:
 		if prefetch:
 			_clear_prefetch_job_record(coord, local_top, revision)
@@ -362,17 +647,9 @@ func _apply_mesh_result(result: Dictionary) -> bool:
 	var visible_faces: int = int(result["visible_faces"])
 	var occluded_faces: int = int(result["occluded_faces"])
 	var has_geometry: bool = bool(result["has_geometry"])
+	var missing_neighbors: Array = _missing_neighbors_from_value(result.get("missing_neighbors", []))
+	var mesh_metrics := _mesh_metrics_from_result(result, null)
 
-	var mesh := ArrayMesh.new()
-	if has_geometry:
-		var arrays := []
-		arrays.resize(Mesh.ARRAY_MAX)
-		arrays[Mesh.ARRAY_VERTEX] = vertices
-		arrays[Mesh.ARRAY_NORMAL] = normals
-		arrays[Mesh.ARRAY_COLOR] = colors
-		arrays[Mesh.ARRAY_TEX_UV] = uvs
-		arrays[Mesh.ARRAY_TEX_UV2] = uv2s
-		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
 	var chunk_size: int = World.CHUNK_SIZE
 	var current_local_top := world.top_render_y - coord.y * chunk_size
@@ -380,30 +657,40 @@ func _apply_mesh_result(result: Dictionary) -> bool:
 		current_local_top = min(current_local_top, chunk_size - 1)
 	else:
 		current_local_top = -1
-	var should_apply := not prefetch
-	if prefetch or respect_top:
+	var should_apply := not prefetch and not cache_only
+	if not cache_only and (prefetch or respect_top):
 		should_apply = current_local_top == local_top
 	if should_apply:
+		var mesh := ArrayMesh.new()
+		if has_geometry:
+			var arrays := []
+			arrays.resize(Mesh.ARRAY_MAX)
+			arrays[Mesh.ARRAY_VERTEX] = vertices
+			arrays[Mesh.ARRAY_NORMAL] = normals
+			arrays[Mesh.ARRAY_COLOR] = colors
+			arrays[Mesh.ARRAY_TEX_UV] = uvs
+			arrays[Mesh.ARRAY_TEX_UV2] = uv2s
+			mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 		var mesh_instance: MeshInstance3D = chunk_cache.ensure_chunk(coord, chunk_size)
-		var prev_counts: Vector2i = chunk_face_stats.get(coord, Vector2i(0, 0))
-		total_visible_faces += visible_faces - prev_counts.x
-		total_occluded_faces += occluded_faces - prev_counts.y
-		chunk_face_stats[coord] = Vector2i(visible_faces, occluded_faces)
+		_record_chunk_render_stats(coord, visible_faces, occluded_faces, mesh_metrics)
 		mesh_instance.mesh = mesh
 		mesh_instance.visible = has_geometry and _is_chunk_in_current_render_zone(coord)
 		if has_geometry:
 			mesh_instance.material_override = get_block_material()
 		chunk.mesh_state = ChunkData.MESH_STATE_READY
 		chunk.dirty = false
-	_store_mesh_cache(coord, local_top, mesh, visible_faces, occluded_faces, has_geometry, revision)
+	_store_mesh_cache_from_arrays(coord, local_top, vertices, normals, colors, uvs, uv2s, visible_faces, occluded_faces, has_geometry, revision, mesh_metrics, missing_neighbors)
+	_update_neighbor_remesh_dependencies(coord, missing_neighbors)
 	if should_apply:
 		_queue_prefetch_layers(coord, local_top)
 
 	var build_ms := float(result.get("build_ms", 0.0))
+	mesh_build_ms_total += build_ms
 	if build_ms > 0.0 and world.debug_profiler != null:
 		world.debug_profiler.add_sample("Renderer.build_chunk_mesh", build_ms)
 		if build_ms >= MESH_BUILD_LOG_THRESHOLD_MS:
 			print("Chunk mesh build %d,%d,%d: %.2f ms" % [coord.x, coord.y, coord.z, build_ms])
+	mesh_upload_ms_total += float(Time.get_ticks_usec() - apply_start_usec) / 1000.0
 	if prefetch:
 		_clear_prefetch_job_record(coord, local_top, revision)
 	else:
@@ -459,6 +746,8 @@ func _prefetch_key(coord: Vector3i, local_top: int) -> String:
 func _build_mesh_job(coord: Vector3i, revision: int, top_render_y: int, prefetch: bool, respect_top: bool) -> Dictionary:
 	if world == null:
 		return {}
+	if not world.is_chunk_coord_valid(coord):
+		return {}
 	var chunk: ChunkData = world.get_chunk(coord)
 	if chunk == null:
 		return {}
@@ -468,14 +757,16 @@ func _build_mesh_job(coord: Vector3i, revision: int, top_render_y: int, prefetch
 	if top_render_y < chunk_base_y:
 		return {}
 	var local_top: int = World.CHUNK_SIZE - 1
+	var missing_neighbors: Array = []
 	var neighbors: Dictionary = {
-		"x_neg": _copy_neighbor_blocks(Vector3i(coord.x - 1, coord.y, coord.z)),
-		"x_pos": _copy_neighbor_blocks(Vector3i(coord.x + 1, coord.y, coord.z)),
-		"y_neg": _copy_neighbor_blocks(Vector3i(coord.x, coord.y - 1, coord.z)),
-		"y_pos": _copy_neighbor_blocks(Vector3i(coord.x, coord.y + 1, coord.z)),
-		"z_neg": _copy_neighbor_blocks(Vector3i(coord.x, coord.y, coord.z - 1)),
-		"z_pos": _copy_neighbor_blocks(Vector3i(coord.x, coord.y, coord.z + 1)),
+		"x_neg": _copy_neighbor_blocks(Vector3i(coord.x - 1, coord.y, coord.z), missing_neighbors),
+		"x_pos": _copy_neighbor_blocks(Vector3i(coord.x + 1, coord.y, coord.z), missing_neighbors),
+		"y_neg": _copy_neighbor_blocks(Vector3i(coord.x, coord.y - 1, coord.z), missing_neighbors),
+		"y_pos": _copy_neighbor_blocks(Vector3i(coord.x, coord.y + 1, coord.z), missing_neighbors),
+		"z_neg": _copy_neighbor_blocks(Vector3i(coord.x, coord.y, coord.z - 1), missing_neighbors),
+		"z_pos": _copy_neighbor_blocks(Vector3i(coord.x, coord.y, coord.z + 1), missing_neighbors),
 	}
+	var padded_blocks := mesher.build_padded_block_buffer(World.CHUNK_SIZE, chunk.blocks, neighbors, World.BLOCK_ID_AIR)
 	return {
 		"coord": coord,
 		"cx": coord.x,
@@ -485,7 +776,7 @@ func _build_mesh_job(coord: Vector3i, revision: int, top_render_y: int, prefetch
 		"top_render_y": top_render_y,
 		"air_id": World.BLOCK_ID_AIR,
 		"blocks": chunk.blocks.duplicate(),
-		"neighbors": neighbors,
+		"padded_blocks": padded_blocks,
 		"solid_table": block_solid_table,
 		"ramp_table": block_ramp_table,
 		"color_table": block_color_table,
@@ -493,14 +784,18 @@ func _build_mesh_job(coord: Vector3i, revision: int, top_render_y: int, prefetch
 		"local_top": local_top,
 		"prefetch": prefetch,
 		"respect_top": respect_top,
+		"missing_neighbors": missing_neighbors,
 	}
 
 
-func _copy_neighbor_blocks(coord: Vector3i) -> Variant:
+func _copy_neighbor_blocks(coord: Vector3i, missing_neighbors: Array) -> Variant:
 	if world == null:
+		return null
+	if not world.is_chunk_coord_valid(coord):
 		return null
 	var chunk: ChunkData = world.get_chunk(coord)
 	if chunk == null or not chunk.generated:
+		missing_neighbors.append(coord)
 		return null
 	return chunk.blocks.duplicate()
 
@@ -534,6 +829,8 @@ func _mesh_worker_loop() -> void:
 		result["local_top"] = job.get("local_top", -1)
 		result["prefetch"] = job.get("prefetch", false)
 		result["respect_top"] = job.get("respect_top", false)
+		result["cache_only"] = job.get("cache_only", false)
+		result["missing_neighbors"] = job.get("missing_neighbors", [])
 		result["build_ms"] = float(Time.get_ticks_usec() - build_start) / 1000.0
 		mesh_result_mutex.lock()
 		mesh_result_queue.append(result)
@@ -760,6 +1057,31 @@ func invalidate_chunk_mesh_cache(coord: Vector3i) -> void:
 		chunk_mesh_cache.erase(coord)
 
 
+func reset_mesh_cache_metrics() -> void:
+	mesh_cache_hits = 0
+	mesh_cache_misses = 0
+	mesh_cache_imports = 0
+	mesh_build_ms_total = 0.0
+	mesh_upload_ms_total = 0.0
+
+
+func get_mesh_cache_metrics() -> Dictionary:
+	return {
+		"hits": mesh_cache_hits,
+		"misses": mesh_cache_misses,
+		"imports": mesh_cache_imports,
+		"mesh_build_ms": mesh_build_ms_total,
+		"mesh_upload_ms": mesh_upload_ms_total,
+	}
+
+func get_mesher_table_snapshot() -> Dictionary:
+	_ensure_block_tables()
+	return {
+		"solid_table": block_solid_table.duplicate(),
+		"color_table": block_color_table.duplicate(),
+		"ramp_table": block_ramp_table.duplicate(),
+	}
+
 func _get_chunk_mesh_cache(coord: Vector3i) -> Dictionary:
 	if chunk_mesh_cache.has(coord):
 		return chunk_mesh_cache[coord]
@@ -768,18 +1090,187 @@ func _get_chunk_mesh_cache(coord: Vector3i) -> Dictionary:
 	return entry
 
 
-func _store_mesh_cache(coord: Vector3i, local_top: int, mesh: ArrayMesh, visible_faces: int, occluded_faces: int, has_geometry: bool, revision: int) -> void:
+func _store_mesh_cache_from_arrays(
+	coord: Vector3i,
+	local_top: int,
+	vertices: PackedVector3Array,
+	normals: PackedVector3Array,
+	colors: PackedColorArray,
+	uvs: PackedVector2Array,
+	uv2s: PackedVector2Array,
+	visible_faces: int,
+	occluded_faces: int,
+	has_geometry: bool,
+	revision: int,
+	mesh_metrics: Dictionary = {},
+	missing_neighbors: Array = []
+) -> void:
 	if local_top < 0:
 		return
-	var entry := {
-		"mesh": mesh,
+	var entry: Dictionary = _mesh_cache_entry_from_arrays(
+		local_top,
+		vertices,
+		normals,
+		colors,
+		uvs,
+		uv2s,
+		visible_faces,
+		occluded_faces,
+		has_geometry,
+		revision,
+		mesh_metrics,
+		missing_neighbors
+	)
+	_store_mesh_cache_entry(coord, local_top, entry)
+
+
+func _mesh_cache_entry_from_arrays(
+	local_top: int,
+	vertices: PackedVector3Array,
+	normals: PackedVector3Array,
+	colors: PackedColorArray,
+	uvs: PackedVector2Array,
+	uv2s: PackedVector2Array,
+	visible_faces: int,
+	occluded_faces: int,
+	has_geometry: bool,
+	revision: int,
+	mesh_metrics: Dictionary = {},
+	missing_neighbors: Array = []
+) -> Dictionary:
+	var metrics := _normalize_mesh_metrics(mesh_metrics, null)
+	if int(metrics.get("vertices", 0)) <= 0 and vertices.size() > 0:
+		metrics["vertices"] = vertices.size()
+	if int(metrics.get("triangles", 0)) <= 0 and vertices.size() > 0:
+		metrics["triangles"] = int(vertices.size() / 3)
+	return {
+		"vertices": PackedVector3Array(vertices),
+		"normals": PackedVector3Array(normals),
+		"colors": PackedColorArray(colors),
+		"uv": PackedVector2Array(uvs),
+		"uv2": PackedVector2Array(uv2s),
 		"visible_faces": visible_faces,
 		"occluded_faces": occluded_faces,
 		"has_geometry": has_geometry,
 		"revision": revision,
+		"metrics": metrics,
+		"missing_neighbors": missing_neighbors.duplicate(),
+		"local_top": local_top,
 	}
+
+
+func _store_mesh_cache_entry(coord: Vector3i, local_top: int, entry: Dictionary) -> void:
+	if local_top < 0:
+		return
 	var cache := _get_chunk_mesh_cache(coord)
 	cache[local_top] = entry
+
+
+func export_persistent_mesh_cache_entry(coord: Vector3i, local_top: int) -> Dictionary:
+	if local_top < 0:
+		return {}
+	if not chunk_mesh_cache.has(coord):
+		return {}
+	var cache = chunk_mesh_cache[coord]
+	if typeof(cache) != TYPE_DICTIONARY:
+		return {}
+	if not cache.has(local_top):
+		return {}
+	var entry = cache[local_top]
+	if typeof(entry) != TYPE_DICTIONARY:
+		return {}
+	var typed_entry: Dictionary = entry
+	if not _validate_mesh_cache_arrays(typed_entry):
+		return {}
+	return {
+		"local_top": local_top,
+		"visible_faces": int(typed_entry.get("visible_faces", 0)),
+		"occluded_faces": int(typed_entry.get("occluded_faces", 0)),
+		"has_geometry": bool(typed_entry.get("has_geometry", false)),
+		"metrics": _mesh_metrics_from_entry(typed_entry, null),
+		"vertices": PackedVector3Array(typed_entry.get("vertices", PackedVector3Array())),
+		"normals": PackedVector3Array(typed_entry.get("normals", PackedVector3Array())),
+		"colors": PackedColorArray(typed_entry.get("colors", PackedColorArray())),
+		"uv": PackedVector2Array(typed_entry.get("uv", PackedVector2Array())),
+		"uv2": PackedVector2Array(typed_entry.get("uv2", PackedVector2Array())),
+	}
+
+
+func import_persistent_mesh_cache_entry(coord: Vector3i, entry: Dictionary) -> bool:
+	if world == null:
+		return false
+	if not world.is_chunk_coord_valid(coord):
+		return false
+	var chunk: ChunkData = world.get_chunk(coord)
+	if chunk == null:
+		return false
+	var local_top: int = int(entry.get("local_top", -1))
+	if local_top < 0 or local_top >= World.CHUNK_SIZE:
+		return false
+	if not _validate_mesh_cache_arrays(entry):
+		return false
+	var stored_entry: Dictionary = _mesh_cache_entry_from_arrays(
+		local_top,
+		PackedVector3Array(entry.get("vertices", PackedVector3Array())),
+		PackedVector3Array(entry.get("normals", PackedVector3Array())),
+		PackedColorArray(entry.get("colors", PackedColorArray())),
+		PackedVector2Array(entry.get("uv", PackedVector2Array())),
+		PackedVector2Array(entry.get("uv2", PackedVector2Array())),
+		int(entry.get("visible_faces", 0)),
+		int(entry.get("occluded_faces", 0)),
+		bool(entry.get("has_geometry", false)),
+		chunk.mesh_revision,
+		_mesh_metrics_from_entry(entry, null),
+		[]
+	)
+	_store_mesh_cache_entry(coord, local_top, stored_entry)
+	mesh_cache_imports += 1
+	return true
+
+
+func _validate_mesh_cache_arrays(entry: Dictionary) -> bool:
+	var has_geometry: bool = bool(entry.get("has_geometry", false))
+	var vertices_value = entry.get("vertices", PackedVector3Array())
+	var normals_value = entry.get("normals", PackedVector3Array())
+	var colors_value = entry.get("colors", PackedColorArray())
+	var uvs_value = entry.get("uv", PackedVector2Array())
+	var uv2s_value = entry.get("uv2", PackedVector2Array())
+	if typeof(vertices_value) != TYPE_PACKED_VECTOR3_ARRAY:
+		return false
+	if typeof(normals_value) != TYPE_PACKED_VECTOR3_ARRAY:
+		return false
+	if typeof(colors_value) != TYPE_PACKED_COLOR_ARRAY:
+		return false
+	if typeof(uvs_value) != TYPE_PACKED_VECTOR2_ARRAY:
+		return false
+	if typeof(uv2s_value) != TYPE_PACKED_VECTOR2_ARRAY:
+		return false
+	if not has_geometry:
+		return true
+	var vertices: PackedVector3Array = vertices_value
+	if vertices.is_empty():
+		return false
+	return true
+
+
+func _array_mesh_from_entry(entry: Dictionary) -> ArrayMesh:
+	var mesh := ArrayMesh.new()
+	if not bool(entry.get("has_geometry", false)):
+		return mesh
+	if not _validate_mesh_cache_arrays(entry):
+		return mesh
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = PackedVector3Array(entry.get("vertices", PackedVector3Array()))
+	arrays[Mesh.ARRAY_NORMAL] = PackedVector3Array(entry.get("normals", PackedVector3Array()))
+	arrays[Mesh.ARRAY_COLOR] = PackedColorArray(entry.get("colors", PackedColorArray()))
+	arrays[Mesh.ARRAY_TEX_UV] = PackedVector2Array(entry.get("uv", PackedVector2Array()))
+	arrays[Mesh.ARRAY_TEX_UV2] = PackedVector2Array(entry.get("uv2", PackedVector2Array()))
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return mesh
+
+func has_cached_chunk_mesh(coord: Vector3i, local_top: int) -> bool:
+	return _has_cached_mesh(coord, local_top)
 
 
 func _has_cached_mesh(coord: Vector3i, local_top: int) -> bool:
@@ -789,15 +1280,20 @@ func _has_cached_mesh(coord: Vector3i, local_top: int) -> bool:
 		return false
 	if not chunk_mesh_cache.has(coord):
 		return false
-	var cache: Dictionary = chunk_mesh_cache[coord]
-	if not cache.has(local_top):
+	var cache = chunk_mesh_cache[coord]
+	if typeof(cache) != TYPE_DICTIONARY:
 		return false
-	var entry: Dictionary = cache[local_top]
+	var cache_local_top: int = _resolve_cached_local_top(cache, local_top)
+	if cache_local_top < 0:
+		return false
+	var entry = cache[cache_local_top]
+	if typeof(entry) != TYPE_DICTIONARY:
+		return false
 	var chunk: ChunkData = world.get_chunk(coord)
 	if chunk == null:
 		return false
 	if int(entry.get("revision", -1)) != chunk.mesh_revision:
-		cache.erase(local_top)
+		cache.erase(cache_local_top)
 		return false
 	return true
 
@@ -806,50 +1302,75 @@ func _apply_cached_mesh(coord: Vector3i, local_top: int) -> bool:
 	if local_top < 0:
 		return false
 	if not chunk_mesh_cache.has(coord):
+		mesh_cache_misses += 1
 		return false
-	var cache: Dictionary = chunk_mesh_cache[coord]
-	if not cache.has(local_top):
+	var cache = chunk_mesh_cache[coord]
+	if typeof(cache) != TYPE_DICTIONARY:
+		mesh_cache_misses += 1
 		return false
-	var entry: Dictionary = cache[local_top]
+	var cache_local_top: int = _resolve_cached_local_top(cache, local_top)
+	if cache_local_top < 0:
+		mesh_cache_misses += 1
+		return false
+	var entry = cache[cache_local_top]
+	if typeof(entry) != TYPE_DICTIONARY:
+		mesh_cache_misses += 1
+		return false
 	var chunk: ChunkData = world.get_chunk(coord)
 	if chunk == null:
+		mesh_cache_misses += 1
 		return false
 	if int(entry.get("revision", -1)) != chunk.mesh_revision:
-		cache.erase(local_top)
+		cache.erase(cache_local_top)
+		mesh_cache_misses += 1
 		return false
+	mesh_cache_hits += 1
 	_apply_mesh_entry(coord, entry, chunk)
-	_queue_prefetch_layers(coord, local_top)
+	_queue_prefetch_layers(coord, cache_local_top)
 	return true
 
 
+func _resolve_cached_local_top(cache: Dictionary, local_top: int) -> int:
+	if cache.has(local_top):
+		return local_top
+	var full_local_top: int = World.CHUNK_SIZE - 1
+	if local_top != full_local_top and cache.has(full_local_top):
+		return full_local_top
+	return -1
+
+
+func _mesh_request_local_top(coord: Vector3i, top_render_y: int) -> int:
+	if top_render_y < 0:
+		top_render_y = world.top_render_y
+	var local_top: int = top_render_y - coord.y * World.CHUNK_SIZE
+	if local_top < 0:
+		return -1
+	return mini(local_top, World.CHUNK_SIZE - 1)
+
+
 func _apply_mesh_entry(coord: Vector3i, entry: Dictionary, chunk: ChunkData) -> void:
-	var mesh: ArrayMesh = entry["mesh"]
 	var visible_faces: int = int(entry["visible_faces"])
 	var occluded_faces: int = int(entry["occluded_faces"])
 	var has_geometry: bool = bool(entry["has_geometry"])
+	var missing_neighbors: Array = _missing_neighbors_from_value(entry.get("missing_neighbors", []))
+	var mesh: ArrayMesh = _array_mesh_from_entry(entry)
 	var mesh_instance: MeshInstance3D = chunk_cache.ensure_chunk(coord, World.CHUNK_SIZE)
-	var prev_counts: Vector2i = chunk_face_stats.get(coord, Vector2i(0, 0))
-	total_visible_faces += visible_faces - prev_counts.x
-	total_occluded_faces += occluded_faces - prev_counts.y
-	chunk_face_stats[coord] = Vector2i(visible_faces, occluded_faces)
-	mesh_instance.mesh = mesh
+	_record_chunk_render_stats(coord, visible_faces, occluded_faces, _mesh_metrics_from_entry(entry, null))
+	mesh_instance.mesh = mesh if has_geometry else null
 	mesh_instance.visible = has_geometry and _is_chunk_in_current_render_zone(coord)
 	if has_geometry:
 		mesh_instance.material_override = get_block_material()
 	chunk.mesh_state = ChunkData.MESH_STATE_READY
 	chunk.dirty = false
-
+	_update_neighbor_remesh_dependencies(coord, missing_neighbors)
 
 func _apply_empty_mesh(coord: Vector3i) -> void:
 	var mesh_instance: MeshInstance3D = chunk_cache.get_chunk(coord)
-	if mesh_instance == null:
-		return
-	var prev_counts: Vector2i = chunk_face_stats.get(coord, Vector2i(0, 0))
-	total_visible_faces -= prev_counts.x
-	total_occluded_faces -= prev_counts.y
-	chunk_face_stats[coord] = Vector2i(0, 0)
-	mesh_instance.mesh = null
-	mesh_instance.visible = false
+	_clear_chunk_render_stats(coord)
+	_clear_neighbor_remesh_dependencies(coord)
+	if mesh_instance != null:
+		mesh_instance.mesh = null
+		mesh_instance.visible = false
 	var chunk: ChunkData = world.get_chunk(coord)
 	if chunk != null:
 		chunk.mesh_state = ChunkData.MESH_STATE_READY
@@ -984,7 +1505,19 @@ func get_chunk_draw_stats() -> Dictionary:
 		if mesh_instance.visible:
 			visible_count += 1
 	var zone: int = render_zone_visible.size()
-	return {"loaded": loaded, "meshed": meshed, "visible": visible_count, "zone": zone}
+	var pool_stats := chunk_cache.get_pool_stats()
+	return {
+		"loaded": loaded,
+		"meshed": meshed,
+		"visible": visible_count,
+		"zone": zone,
+		"chunk_node_active": int(pool_stats.get("active", 0)),
+		"chunk_node_pooled": int(pool_stats.get("pooled", 0)),
+		"chunk_node_pool_max": int(pool_stats.get("pool_max", 0)),
+		"chunk_node_created": int(pool_stats.get("created", 0)),
+		"chunk_node_reused": int(pool_stats.get("reused", 0)),
+		"chunk_node_freed": int(pool_stats.get("freed", 0)),
+	}
 
 
 func get_mesh_work_stats() -> Dictionary:
@@ -996,11 +1529,34 @@ func get_mesh_work_stats() -> Dictionary:
 	mesh_result_mutex.lock()
 	result_queue = mesh_result_queue.size()
 	mesh_result_mutex.unlock()
+	var greedy_saved_faces := int(max(0, total_greedy_source_visible_faces - total_greedy_visible_faces))
+	var greedy_reduction_percent := 0.0
+	if total_greedy_source_visible_faces > 0:
+		greedy_reduction_percent = float(greedy_saved_faces) / float(total_greedy_source_visible_faces) * PERCENT_FACTOR
 	return {
 		"job_queue": job_queue,
 		"result_queue": result_queue,
 		"job_set": mesh_job_set.size(),
 		"prefetch_set": mesh_prefetch_set.size(),
+		"vertices": total_mesh_vertices,
+		"triangles": total_mesh_triangles,
+		"visible_faces": total_visible_faces,
+		"occluded_faces": total_occluded_faces,
+		"greedy_visible_faces": total_greedy_visible_faces,
+		"greedy_occluded_faces": total_greedy_occluded_faces,
+		"greedy_source_visible_faces": total_greedy_source_visible_faces,
+		"greedy_saved_faces": greedy_saved_faces,
+		"greedy_reduction_percent": greedy_reduction_percent,
+		"ramp_visible_faces": total_ramp_visible_faces,
+		"ramp_occluded_faces": total_ramp_occluded_faces,
+		"cache_hits": mesh_cache_hits,
+		"cache_misses": mesh_cache_misses,
+		"cache_imports": mesh_cache_imports,
+		"mesh_build_ms": mesh_build_ms_total,
+		"mesh_upload_ms": mesh_upload_ms_total,
+		"pending_neighbor_remesh_chunks": pending_neighbor_remesh.size(),
+		"pending_neighbor_remesh_dependents": _count_pending_neighbor_remesh_dependents(),
+		"neighbor_remesh_queued": neighbor_remesh_queued_total,
 	}
 
 

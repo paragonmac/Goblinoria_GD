@@ -213,7 +213,7 @@ func _handle_click(screen_pos: Vector2) -> void:
 func _enqueue_task_at(x: int, y: int, z: int) -> void:
 	if world == null:
 		return
-	if not _is_valid_position(y):
+	if not _is_valid_position(x, y, z):
 		return
 
 	match world.player_mode:
@@ -221,13 +221,18 @@ func _enqueue_task_at(x: int, y: int, z: int) -> void:
 			if world.is_diggable_at(x, y, z):
 				world.queue_task_request(TaskQueue.TaskType.DIG, Vector3i(x, y, z), 0)
 		World.PlayerMode.PLACE:
-			if world.is_empty(x, y, z):
+			if world.is_empty(x, y, z) and _has_place_stock():
 				world.queue_task_request(TaskQueue.TaskType.PLACE, Vector3i(x, y, z), PLACE_MATERIAL_ID)
 		World.PlayerMode.STAIRS:
 			if world.can_place_stairs_at(x, y, z):
 				world.queue_task_request(TaskQueue.TaskType.STAIRS, Vector3i(x, y, z), World.STAIR_BLOCK_ID)
 
 
-func _is_valid_position(y: int) -> bool:
-	return world != null and y >= 0 and y < world.world_size_y
+func _has_place_stock() -> bool:
+	var stock: int = world.get_inventory_count(PLACE_MATERIAL_ID)
+	var committed: int = world.task_queue.count_active_by_type_and_material(TaskQueue.TaskType.PLACE, PLACE_MATERIAL_ID)
+	return stock - committed > 0
 
+
+func _is_valid_position(x: int, y: int, z: int) -> bool:
+	return world != null and world.is_block_coord_valid(x, y, z)

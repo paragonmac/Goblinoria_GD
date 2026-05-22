@@ -7,6 +7,7 @@ const BlockRegistryScript = preload("res://scripts/block_registry.gd")
 const ChunkDataScript = preload("res://scripts/chunk_data.gd")
 const WorldGeneratorScript = preload("res://scripts/world_generator.gd")
 const WorldSaveLoadScript = preload("res://scripts/world_save_load.gd")
+const WorldArenaCookerScript = preload("res://scripts/world_arena_cooker.gd")
 const WorldStreamingScript = preload("res://scripts/world_streaming.gd")
 const WorldRaycasterScript = preload("res://scripts/world_raycaster.gd")
 const ChunkDataType = ChunkDataScript
@@ -18,6 +19,14 @@ const CHUNK_VOLUME := CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE
 const WORLD_CHUNKS_X := 32
 const WORLD_CHUNKS_Y := 32
 const WORLD_CHUNKS_Z := 32
+const WORLD_MIN_CHUNK_X := -16
+const WORLD_MAX_CHUNK_X := 15
+const WORLD_MIN_CHUNK_Z := -16
+const WORLD_MAX_CHUNK_Z := 15
+const WORLD_MIN_BLOCK_X := WORLD_MIN_CHUNK_X * CHUNK_SIZE
+const WORLD_MAX_BLOCK_X := (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE - 1
+const WORLD_MIN_BLOCK_Z := WORLD_MIN_CHUNK_Z * CHUNK_SIZE
+const WORLD_MAX_BLOCK_Z := (WORLD_MAX_CHUNK_Z + 1) * CHUNK_SIZE - 1
 #endregion
 
 #region Constants - Block IDs
@@ -107,12 +116,15 @@ const GENERATION_APPLY_BUDGET := 8
 const PREWARM_SYNC_RADIUS_CHUNKS_MIN := 6
 const PREWARM_SYNC_RADIUS_CHUNKS_MAX := 16
 const PREWARM_SYNC_LAYERS := 1
+const DEPTH_VISIBILITY_LIMIT_ENABLED := false
 const DEPTH_VISIBILITY_PADDING := 1
 const UNINITIALIZED_Y := -1
 #endregion
 
 #region World State
+var world_size_x := CHUNK_SIZE * WORLD_CHUNKS_X
 var world_size_y := CHUNK_SIZE * WORLD_CHUNKS_Y
+var world_size_z := CHUNK_SIZE * WORLD_CHUNKS_Z
 var sea_level := UNINITIALIZED_Y
 var top_render_y := UNINITIALIZED_Y
 var world_seed: int = 0
@@ -132,6 +144,7 @@ var task_manager: TaskManager
 var pathfinder := Pathfinder.new()
 var generator: WorldGeneratorScript
 var save_load: WorldSaveLoadScript
+var arena_cooker: WorldArenaCookerScript
 var streaming: WorldStreamingScript
 var raycaster: WorldRaycasterScript
 var debug_profiler: DebugProfiler
@@ -153,6 +166,10 @@ var selected_blocks: Dictionary = {}
 var deepest_structure_y: int = UNINITIALIZED_Y
 #endregion
 
+#region Inventory
+var inventory: Dictionary = {}
+#endregion
+
 #region Ramp Lookup Table
 var _ramp_lookup := PackedByteArray()
 #endregion
@@ -165,6 +182,7 @@ func _ready() -> void:
 	task_manager = TaskManager.new(self, task_queue)
 	generator = WorldGeneratorScript.new(self)
 	save_load = WorldSaveLoadScript.new(self)
+	arena_cooker = WorldArenaCookerScript.new(self)
 	streaming = WorldStreamingScript.new(self)
 	raycaster = WorldRaycasterScript.new(self)
 	renderer = WorldRenderer.new()
@@ -178,6 +196,7 @@ func _ready() -> void:
 func init_world(seed_world_flag: bool = true) -> void:
 	clear_tasks()
 	clear_workers()
+	clear_inventory()
 	if renderer != null:
 		renderer.clear_chunks()
 	chunks.clear()
@@ -221,6 +240,7 @@ func load_world(path: String) -> bool:
 		clear_tasks()
 	if ok and renderer != null:
 		renderer.set_top_render_y(top_render_y)
+		renderer.set_min_render_y(get_min_render_y())
 	if ok and generator != null:
 		generator.reset_generation_jobs()
 	return ok
@@ -253,12 +273,16 @@ func chunk_index(lx: int, ly: int, lz: int) -> int:
 	return (lz * CHUNK_SIZE + ly) * CHUNK_SIZE + lx
 
 func get_chunk(coord: Vector3i) -> ChunkDataType:
+	if not is_chunk_coord_valid(coord):
+		return null
 	if chunks.has(coord):
 		var chunk: ChunkDataType = chunks[coord]
 		return chunk
 	return null
 
 func ensure_chunk(coord: Vector3i) -> ChunkDataType:
+	if not is_chunk_coord_valid(coord):
+		return null
 	if chunks.has(coord):
 		var existing: ChunkDataType = chunks[coord]
 		return existing
@@ -268,16 +292,21 @@ func ensure_chunk(coord: Vector3i) -> ChunkDataType:
 
 func ensure_chunk_generated(coord: Vector3i) -> ChunkDataType:
 	var chunk := ensure_chunk(coord)
+	if chunk == null:
+		return null
 	if chunk.generated:
 		return chunk
 	if save_load != null and save_load.load_chunk_into(coord, chunk):
 		touch_chunk(chunk)
+		notify_chunk_loaded(coord)
 		return chunk
 	generator.generate_chunk(coord, chunk)
+	if chunk.generated:
+		notify_chunk_loaded(coord)
 	return chunk
 
 
-func request_chunk_generation_async(coord: Vector3i, high_priority: bool = false) -> bool:
+func request_chunk_generation_async(coord: Vector3i, high_priority: bool = false, queue_mesh_on_complete: bool = true) -> bool:
 	if not is_chunk_coord_valid(coord):
 		return false
 	var chunk := ensure_chunk(coord)
@@ -285,9 +314,10 @@ func request_chunk_generation_async(coord: Vector3i, high_priority: bool = false
 		return true
 	if save_load != null and save_load.load_chunk_into(coord, chunk):
 		touch_chunk(chunk)
+		notify_chunk_loaded(coord)
 		return true
 	if generator != null:
-		generator.queue_chunk_generation(coord, high_priority)
+		generator.queue_chunk_generation(coord, high_priority, queue_mesh_on_complete)
 	return false
 
 
@@ -301,6 +331,12 @@ func unload_chunk(coord: Vector3i) -> void:
 		renderer.clear_chunk(coord)
 	chunks.erase(coord)
 
+
+func notify_chunk_loaded(coord: Vector3i) -> void:
+	if renderer != null:
+		renderer.notify_chunk_loaded(coord)
+
+
 func touch_chunk(chunk: ChunkDataType) -> void:
 	chunk_access_tick += 1
 	chunk.last_access_tick = chunk_access_tick
@@ -308,10 +344,43 @@ func touch_chunk(chunk: ChunkDataType) -> void:
 
 func is_chunk_coord_valid(coord: Vector3i) -> bool:
 	var max_cy: int = int(floor(float(world_size_y) / float(CHUNK_SIZE)))
-	return coord.y >= 0 and coord.y < max_cy
+	return coord.x >= WORLD_MIN_CHUNK_X \
+		and coord.x <= WORLD_MAX_CHUNK_X \
+		and coord.y >= 0 \
+		and coord.y < max_cy \
+		and coord.z >= WORLD_MIN_CHUNK_Z \
+		and coord.z <= WORLD_MAX_CHUNK_Z
+
+
+func is_block_xz_valid(x: int, z: int) -> bool:
+	return x >= WORLD_MIN_BLOCK_X \
+		and x <= WORLD_MAX_BLOCK_X \
+		and z >= WORLD_MIN_BLOCK_Z \
+		and z <= WORLD_MAX_BLOCK_Z
+
+
+func is_block_coord_valid(x: int, y: int, z: int) -> bool:
+	return is_block_xz_valid(x, z) and y >= 0 and y < world_size_y
+
+
+func clamp_block_xz(pos: Vector3) -> Vector3:
+	return Vector3(
+		clampf(pos.x, float(WORLD_MIN_BLOCK_X), float(WORLD_MAX_BLOCK_X)),
+		pos.y,
+		clampf(pos.z, float(WORLD_MIN_BLOCK_Z), float(WORLD_MAX_BLOCK_Z))
+	)
+
+
+func get_world_bounds_rect() -> Rect2:
+	return Rect2(
+		Vector2(float(WORLD_MIN_BLOCK_X), float(WORLD_MIN_BLOCK_Z)),
+		Vector2(float(world_size_x), float(world_size_z))
+	)
 
 
 func ensure_chunk_buffer_for_pos(pos: Vector3i) -> void:
+	if not is_block_coord_valid(pos.x, pos.y, pos.z):
+		return
 	var coord := world_to_chunk_coords(pos.x, pos.y, pos.z)
 	ensure_chunk_buffer_for_chunk(coord)
 
@@ -331,6 +400,8 @@ func ensure_chunk_buffer_for_chunk(coord: Vector3i) -> void:
 
 func debug_verify_chunk(coord: Vector3i) -> bool:
 	var existing: ChunkDataType = ensure_chunk_generated(coord)
+	if existing == null:
+		return false
 	var temp: ChunkDataType = ChunkDataScript.new(CHUNK_SIZE, BLOCK_ID_AIR)
 	generator.generate_chunk(coord, temp)
 	if temp.blocks.size() != existing.blocks.size():
@@ -342,7 +413,7 @@ func debug_verify_chunk(coord: Vector3i) -> bool:
 
 
 func set_block_raw(x: int, y: int, z: int, value: int, mark_dirty: bool) -> void:
-	if y < 0 or y >= world_size_y:
+	if not is_block_coord_valid(x, y, z):
 		return
 	var coord := world_to_chunk_coords(x, y, z)
 	var local := chunk_to_local_coords(x, y, z)
@@ -367,17 +438,19 @@ func set_block_raw(x: int, y: int, z: int, value: int, mark_dirty: bool) -> void
 
 #region Block Access
 func get_block(x: int, y: int, z: int) -> int:
-	if y < 0 or y >= world_size_y:
+	if not is_block_coord_valid(x, y, z):
 		return BLOCK_ID_AIR
 	var coord := world_to_chunk_coords(x, y, z)
 	var chunk: ChunkDataType = ensure_chunk_generated(coord)
+	if chunk == null:
+		return BLOCK_ID_AIR
 	touch_chunk(chunk)
 	var local := chunk_to_local_coords(x, y, z)
 	return chunk.blocks[chunk_index(local.x, local.y, local.z)]
 
 
 func get_block_no_generate(x: int, y: int, z: int) -> int:
-	if y < 0 or y >= world_size_y:
+	if not is_block_coord_valid(x, y, z):
 		return BLOCK_ID_AIR
 	var coord := world_to_chunk_coords(x, y, z)
 	var chunk: ChunkDataType = get_chunk(coord)
@@ -388,7 +461,7 @@ func get_block_no_generate(x: int, y: int, z: int) -> int:
 
 
 func set_block(x: int, y: int, z: int, value: int) -> void:
-	if y < 0 or y >= world_size_y:
+	if not is_block_coord_valid(x, y, z):
 		return
 	if value < 0 or value >= BlockRegistryScript.TABLE_SIZE:
 		return
@@ -417,19 +490,27 @@ func is_block_empty_id(block_id: int) -> bool:
 
 
 func is_empty(x: int, y: int, z: int) -> bool:
+	if not is_block_coord_valid(x, y, z):
+		return false
 	return is_block_empty_id(get_block(x, y, z))
 
 
 func is_diggable_at(x: int, y: int, z: int) -> bool:
+	if not is_block_coord_valid(x, y, z):
+		return false
 	return block_registry.get_hardness(get_block(x, y, z)) > 0.0
 
 
 func can_place_stairs_at(x: int, y: int, z: int) -> bool:
+	if not is_block_coord_valid(x, y, z):
+		return false
 	var block_id := get_block(x, y, z)
 	return not is_ramp_block_id(block_id) and block_registry.is_replaceable(block_id)
 
 
 func is_stairs_at(x: int, y: int, z: int) -> bool:
+	if not is_block_coord_valid(x, y, z):
+		return false
 	return is_ramp_block_id(get_block(x, y, z))
 
 
@@ -584,6 +665,8 @@ func process_generation_results() -> void:
 
 
 func get_min_render_y() -> int:
+	if not DEPTH_VISIBILITY_LIMIT_ENABLED:
+		return 0
 	var base_y := sea_level
 	if deepest_structure_y != UNINITIALIZED_Y:
 		base_y = deepest_structure_y
@@ -613,9 +696,39 @@ func reassess_waiting_tasks() -> void:
 
 
 func queue_task_request(task_type: int, pos: Vector3i, material: int) -> void:
+	if not is_block_coord_valid(pos.x, pos.y, pos.z):
+		return
 	ensure_chunk_buffer_for_pos(pos)
 	if task_manager != null:
 		task_manager.queue_task_request(task_type, pos, material)
+#endregion
+
+
+#region Inventory
+func add_to_inventory(block_id: int, count: int = 1) -> void:
+	if block_id <= 0 or count <= 0:
+		return
+	inventory[block_id] = inventory.get(block_id, 0) + count
+
+
+func remove_from_inventory(block_id: int, count: int = 1) -> bool:
+	var current: int = inventory.get(block_id, 0)
+	if current < count:
+		return false
+	var remaining: int = current - count
+	if remaining <= 0:
+		inventory.erase(block_id)
+	else:
+		inventory[block_id] = remaining
+	return true
+
+
+func get_inventory_count(block_id: int) -> int:
+	return inventory.get(block_id, 0)
+
+
+func clear_inventory() -> void:
+	inventory.clear()
 #endregion
 
 
@@ -631,7 +744,7 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
 	if renderer != null:
 		var center_x: float = view_rect.position.x + view_rect.size.x * 0.5
 		var center_z: float = view_rect.position.y + view_rect.size.y * 0.5
-		renderer.update_render_height_anchor(Vector3(center_x, plane_y, center_z))
+		renderer.update_render_height_anchor(clamp_block_xz(Vector3(center_x, plane_y, center_z)))
 
 
 func prewarm_render_cache(view_rect: Rect2, plane_y: float) -> void:
@@ -656,7 +769,8 @@ func _prewarm_sync_chunks(view_rect: Rect2, plane_y: float) -> void:
 	var radius_chunks: int = clampi(desired_radius, PREWARM_SYNC_RADIUS_CHUNKS_MIN, PREWARM_SYNC_RADIUS_CHUNKS_MAX)
 	var center_x: float = view_rect.position.x + view_rect.size.x * 0.5
 	var center_z: float = view_rect.position.y + view_rect.size.y * 0.5
-	var anchor := world_to_chunk_coords(int(floor(center_x)), int(floor(plane_y)), int(floor(center_z)))
+	var clamped_center := clamp_block_xz(Vector3(center_x, plane_y, center_z))
+	var anchor := world_to_chunk_coords(int(floor(clamped_center.x)), int(floor(plane_y)), int(floor(clamped_center.z)))
 	for layer in range(PREWARM_SYNC_LAYERS):
 		var cy: int = anchor.y - layer
 		if cy < 0:
@@ -691,6 +805,10 @@ func spawn_initial_workers() -> void:
 
 
 func find_surface_y(x: int, z: int) -> int:
+	if not is_block_xz_valid(x, z):
+		var clamped := clamp_block_xz(Vector3(float(x), 0.0, float(z)))
+		x = int(clamped.x)
+		z = int(clamped.z)
 	if generator != null:
 		return generator.get_surface_y(x, z)
 	return clampi(sea_level, 0, world_size_y - 1)
@@ -709,8 +827,8 @@ func clear_tasks() -> void:
 		task_queue.next_id = 1
 	if task_manager != null:
 		task_manager.blocked_tasks.clear()
-		task_manager.blocked_recheck_timer = 1.0
-		task_manager.reassign_timer = 1.0
+		task_manager.blocked_recheck_timer = task_manager.BLOCKED_RECHECK_INTERVAL
+		task_manager.reassign_timer = task_manager.REASSIGN_INTERVAL
 
 
 func clear_workers() -> void:
@@ -772,7 +890,12 @@ func get_render_height_bounds() -> Dictionary:
 	var anchor_max_x := anchor_coord.x + radius
 	var anchor_min_z := anchor_coord.z - radius
 	var anchor_max_z := anchor_coord.z + radius
-	return {"min_x": anchor_min_x, "max_x": anchor_max_x, "min_z": anchor_min_z, "max_z": anchor_max_z}
+	return {
+		"min_x": clampi(anchor_min_x, WORLD_MIN_CHUNK_X, WORLD_MAX_CHUNK_X),
+		"max_x": clampi(anchor_max_x, WORLD_MIN_CHUNK_X, WORLD_MAX_CHUNK_X),
+		"min_z": clampi(anchor_min_z, WORLD_MIN_CHUNK_Z, WORLD_MAX_CHUNK_Z),
+		"max_z": clampi(anchor_max_z, WORLD_MIN_CHUNK_Z, WORLD_MAX_CHUNK_Z),
+	}
 
 
 func get_render_height_anchor() -> Vector3:
