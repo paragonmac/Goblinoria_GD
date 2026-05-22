@@ -6,6 +6,7 @@ class_name WorldRenderer
 const ChunkMesherScript = preload("res://scripts/rendering/chunk_mesher.gd")
 const ChunkCacheScript = preload("res://scripts/rendering/chunk_cache.gd")
 const WorldRendererMeshCacheScript = preload("res://scripts/rendering/world_renderer_mesh_cache.gd")
+const WorldRendererMeshSchedulerScript = preload("res://scripts/rendering/world_renderer_mesh_scheduler.gd")
 const OverlayRendererScript = preload("res://scripts/rendering/overlay_renderer.gd")
 const FrustumCullerScript = preload("res://scripts/rendering/frustum_culler.gd")
 const BlockTerrainShader = preload("res://scripts/rendering/block_terrain.gdshader")
@@ -34,6 +35,7 @@ var mesher = ChunkMesherScript.new()
 var mesher_thread = ChunkMesherScript.new()
 var chunk_cache = ChunkCacheScript.new()
 var mesh_cache_helper = WorldRendererMeshCacheScript.new()
+var mesh_scheduler = WorldRendererMeshSchedulerScript.new()
 var overlay_renderer = OverlayRendererScript.new()
 var frustum_culler = FrustumCullerScript.new()
 var block_material: Material
@@ -56,15 +58,6 @@ var render_height_anchor := Vector3.ZERO
 var render_height_target_y: int = 0
 var chunk_mesh_cache: Dictionary = {}
 var use_async_meshing: bool = true
-var mesh_thread: Thread
-var mesh_thread_running: bool = false
-var mesh_job_queue: Array = []
-var mesh_job_set: Dictionary = {}
-var mesh_job_mutex := Mutex.new()
-var mesh_job_semaphore := Semaphore.new()
-var mesh_result_queue: Array = []
-var mesh_result_mutex := Mutex.new()
-var mesh_prefetch_set: Dictionary = {}
 var render_zone_visible: Dictionary = {}
 var block_solid_table := PackedByteArray()
 var block_color_table := PackedColorArray()
@@ -89,6 +82,7 @@ func initialize(world_ref: World) -> void:
 		add_child(overlay_renderer)
 	overlay_renderer.initialize(world_ref)
 	_ensure_block_tables()
+	mesh_scheduler.configure(Callable(self, "_build_mesh_result_on_worker"), MESH_RESULT_BACKLOG_MAX, MESH_RESULT_BACKLOG_SLEEP_USEC)
 	_start_mesh_worker()
 #endregion
 
@@ -113,7 +107,6 @@ func clear_chunks() -> void:
 	render_height_queue.clear()
 	render_height_queue_set.clear()
 	chunk_mesh_cache.clear()
-	mesh_prefetch_set.clear()
 	render_zone_visible.clear()
 	_clear_mesh_jobs()
 	if world == null:
@@ -423,10 +416,10 @@ func queue_chunk_mesh_build(coord: Vector3i, top_render_y: int = -1, respect_top
 	if not use_async_meshing or force_sync:
 		regenerate_chunk(coord.x, coord.y, coord.z)
 		return
-	if not mesh_thread_running:
+	if not mesh_scheduler.is_running():
 		_start_mesh_worker()
 	var revision: int = chunk.mesh_revision
-	var queued_rev: int = int(mesh_job_set.get(coord, -1))
+	var queued_rev: int = mesh_scheduler.get_job_revision(coord)
 	if queued_rev >= revision and chunk.mesh_state == ChunkData.MESH_STATE_PENDING and not respect_top:
 		if high_priority:
 			_reprioritize_mesh_job(coord)
@@ -438,32 +431,11 @@ func queue_chunk_mesh_build(coord: Vector3i, top_render_y: int = -1, respect_top
 	if job.is_empty():
 		_apply_empty_mesh(coord)
 		return
-	mesh_job_set[coord] = revision
-	mesh_job_mutex.lock()
-	if high_priority:
-		mesh_job_queue.insert(0, job)
-	else:
-		var insert_index := mesh_job_queue.size()
-		for i in range(mesh_job_queue.size()):
-			if bool(mesh_job_queue[i].get("prefetch", false)):
-				insert_index = i
-				break
-		mesh_job_queue.insert(insert_index, job)
-	mesh_job_mutex.unlock()
-	mesh_job_semaphore.post()
+	mesh_scheduler.enqueue_visible_job(job, revision, high_priority)
 
 
 func _reprioritize_mesh_job(coord: Vector3i) -> void:
-	mesh_job_mutex.lock()
-	for i in range(mesh_job_queue.size()):
-		var job: Dictionary = mesh_job_queue[i]
-		var job_coord: Vector3i = job.get("coord", Vector3i.ZERO)
-		if job_coord != coord:
-			continue
-		mesh_job_queue.remove_at(i)
-		mesh_job_queue.insert(0, job)
-		break
-	mesh_job_mutex.unlock()
+	mesh_scheduler.reprioritize_job(coord)
 
 
 func _queue_prefetch_layers(coord: Vector3i, local_top: int) -> void:
@@ -484,7 +456,7 @@ func _queue_prefetch_job(coord: Vector3i, local_top: int) -> void:
 		return
 	if not use_async_meshing:
 		return
-	if not mesh_thread_running:
+	if not mesh_scheduler.is_running():
 		_start_mesh_worker()
 	_ensure_block_tables()
 	var chunk_size: int = World.CHUNK_SIZE
@@ -497,7 +469,7 @@ func _queue_prefetch_job(coord: Vector3i, local_top: int) -> void:
 		return
 	var revision: int = chunk.mesh_revision
 	var key := _prefetch_key(coord, local_top)
-	var queued_rev: int = int(mesh_prefetch_set.get(key, -1))
+	var queued_rev: int = mesh_scheduler.get_prefetch_revision(key)
 	if queued_rev >= revision:
 		return
 	var chunk_base_y: int = coord.y * chunk_size
@@ -505,11 +477,7 @@ func _queue_prefetch_job(coord: Vector3i, local_top: int) -> void:
 	var job := _build_mesh_job(coord, revision, top_render_y, true, false)
 	if job.is_empty():
 		return
-	mesh_prefetch_set[key] = revision
-	mesh_job_mutex.lock()
-	mesh_job_queue.append(job)
-	mesh_job_mutex.unlock()
-	mesh_job_semaphore.post()
+	mesh_scheduler.enqueue_prefetch_job(key, job, revision)
 
 
 func queue_chunk_mesh_cache_build(coord: Vector3i, local_top: int, high_priority: bool = false) -> bool:
@@ -523,7 +491,7 @@ func queue_chunk_mesh_cache_build(coord: Vector3i, local_top: int, high_priority
 		return false
 	if _has_cached_mesh(coord, local_top):
 		return false
-	if not mesh_thread_running:
+	if not mesh_scheduler.is_running():
 		_start_mesh_worker()
 	_ensure_block_tables()
 	var chunk: ChunkData = world.get_chunk(coord)
@@ -531,7 +499,7 @@ func queue_chunk_mesh_cache_build(coord: Vector3i, local_top: int, high_priority
 		return false
 	var revision: int = chunk.mesh_revision
 	var key := _prefetch_key(coord, local_top)
-	var queued_rev: int = int(mesh_prefetch_set.get(key, -1))
+	var queued_rev: int = mesh_scheduler.get_prefetch_revision(key)
 	if queued_rev >= revision:
 		return false
 	var top_render_y: int = coord.y * World.CHUNK_SIZE + local_top
@@ -539,14 +507,7 @@ func queue_chunk_mesh_cache_build(coord: Vector3i, local_top: int, high_priority
 	if job.is_empty():
 		return false
 	job["cache_only"] = true
-	mesh_prefetch_set[key] = revision
-	mesh_job_mutex.lock()
-	if high_priority:
-		mesh_job_queue.insert(0, job)
-	else:
-		mesh_job_queue.append(job)
-	mesh_job_mutex.unlock()
-	mesh_job_semaphore.post()
+	mesh_scheduler.enqueue_prefetch_job(key, job, revision, high_priority)
 	return true
 
 
@@ -555,12 +516,9 @@ func process_mesh_results(budget: int) -> int:
 		return 0
 	var applied := 0
 	while applied < budget:
-		mesh_result_mutex.lock()
-		if mesh_result_queue.is_empty():
-			mesh_result_mutex.unlock()
+		var result: Dictionary = mesh_scheduler.pop_result()
+		if result.is_empty():
 			break
-		var result: Dictionary = mesh_result_queue.pop_front()
-		mesh_result_mutex.unlock()
 		if _apply_mesh_result(result):
 			applied += 1
 	return applied
@@ -580,16 +538,14 @@ func process_mesh_results_time_budget(max_ms: float, max_count: int = -1) -> int
 			break
 		if build_ms_sum >= max_ms:
 			break
-		mesh_result_mutex.lock()
-		if mesh_result_queue.is_empty():
-			mesh_result_mutex.unlock()
+		var next_build_ms := mesh_scheduler.peek_next_result_build_ms()
+		if next_build_ms < 0.0:
 			break
-		var next_build_ms := float(mesh_result_queue[0].get("build_ms", 0.0))
 		if build_ms_sum > 0.0 and build_ms_sum + next_build_ms > max_ms:
-			mesh_result_mutex.unlock()
 			break
-		var result: Dictionary = mesh_result_queue.pop_front()
-		mesh_result_mutex.unlock()
+		var result: Dictionary = mesh_scheduler.pop_result()
+		if result.is_empty():
+			break
 		build_ms_sum += next_build_ms
 		if _apply_mesh_result(result):
 			applied += 1
@@ -701,48 +657,23 @@ func _apply_mesh_result(result: Dictionary) -> bool:
 
 
 func _clear_mesh_job_record(coord: Vector3i, revision: int) -> void:
-	if not mesh_job_set.has(coord):
-		return
-	var queued_rev: int = int(mesh_job_set.get(coord, -1))
-	if queued_rev <= revision:
-		mesh_job_set.erase(coord)
+	mesh_scheduler.clear_job_record(coord, revision)
 
 
 func _clear_prefetch_job_record(coord: Vector3i, local_top: int, revision: int) -> void:
-	var key := _prefetch_key(coord, local_top)
-	if not mesh_prefetch_set.has(key):
-		return
-	var queued_rev: int = int(mesh_prefetch_set.get(key, -1))
-	if queued_rev <= revision:
-		mesh_prefetch_set.erase(key)
+	mesh_scheduler.clear_prefetch_job_record(coord, local_top, revision)
 
 
 func _cancel_chunk_jobs(coord: Vector3i) -> void:
-	mesh_job_mutex.lock()
-	for i in range(mesh_job_queue.size() - 1, -1, -1):
-		var job: Dictionary = mesh_job_queue[i]
-		if job.get("coord", null) == coord:
-			mesh_job_queue.remove_at(i)
-	mesh_job_mutex.unlock()
-	mesh_result_mutex.lock()
-	for i in range(mesh_result_queue.size() - 1, -1, -1):
-		var result: Dictionary = mesh_result_queue[i]
-		if result.get("coord", null) == coord:
-			mesh_result_queue.remove_at(i)
-	mesh_result_mutex.unlock()
-	mesh_job_set.erase(coord)
-	_purge_prefetch_for_coord(coord)
+	mesh_scheduler.cancel_coord(coord)
 
 
 func _purge_prefetch_for_coord(coord: Vector3i) -> void:
-	for key in mesh_prefetch_set.keys():
-		var key_str: String = key
-		if key_str.begins_with("%d,%d,%d," % [coord.x, coord.y, coord.z]):
-			mesh_prefetch_set.erase(key_str)
+	mesh_scheduler.purge_prefetch_for_coord(coord)
 
 
 func _prefetch_key(coord: Vector3i, local_top: int) -> String:
-	return "%d,%d,%d,%d" % [coord.x, coord.y, coord.z, local_top]
+	return mesh_scheduler.prefetch_key(coord, local_top)
 
 
 func _build_mesh_job(coord: Vector3i, revision: int, top_render_y: int, prefetch: bool, respect_top: bool) -> Dictionary:
@@ -802,59 +733,26 @@ func _copy_neighbor_blocks(coord: Vector3i, missing_neighbors: Array) -> Variant
 	return chunk.blocks.duplicate()
 
 
-func _mesh_worker_loop() -> void:
-	while mesh_thread_running:
-		mesh_job_semaphore.wait()
-		if not mesh_thread_running:
-			break
-		var job: Dictionary = {}
-		mesh_job_mutex.lock()
-		if mesh_job_queue.size() > 0:
-			job = mesh_job_queue.pop_front()
-		mesh_job_mutex.unlock()
-		if job.is_empty():
-			continue
-		if MESH_RESULT_BACKLOG_MAX > 0:
-			var backlog := 0
-			mesh_result_mutex.lock()
-			backlog = mesh_result_queue.size()
-			mesh_result_mutex.unlock()
-			while backlog >= MESH_RESULT_BACKLOG_MAX and mesh_thread_running:
-				OS.delay_usec(MESH_RESULT_BACKLOG_SLEEP_USEC)
-				mesh_result_mutex.lock()
-				backlog = mesh_result_queue.size()
-				mesh_result_mutex.unlock()
-		var build_start := Time.get_ticks_usec()
-		var result: Dictionary = mesher_thread.build_chunk_arrays_from_data(job)
-		result["coord"] = job["coord"]
-		result["mesh_revision"] = job.get("mesh_revision", -1)
-		result["local_top"] = job.get("local_top", -1)
-		result["prefetch"] = job.get("prefetch", false)
-		result["respect_top"] = job.get("respect_top", false)
-		result["cache_only"] = job.get("cache_only", false)
-		result["missing_neighbors"] = job.get("missing_neighbors", [])
-		result["build_ms"] = float(Time.get_ticks_usec() - build_start) / 1000.0
-		mesh_result_mutex.lock()
-		mesh_result_queue.append(result)
-		mesh_result_mutex.unlock()
+func _build_mesh_result_on_worker(job: Dictionary) -> Dictionary:
+	var build_start := Time.get_ticks_usec()
+	var result: Dictionary = mesher_thread.build_chunk_arrays_from_data(job)
+	result["coord"] = job["coord"]
+	result["mesh_revision"] = job.get("mesh_revision", -1)
+	result["local_top"] = job.get("local_top", -1)
+	result["prefetch"] = job.get("prefetch", false)
+	result["respect_top"] = job.get("respect_top", false)
+	result["cache_only"] = job.get("cache_only", false)
+	result["missing_neighbors"] = job.get("missing_neighbors", [])
+	result["build_ms"] = float(Time.get_ticks_usec() - build_start) / 1000.0
+	return result
 
 
 func _start_mesh_worker() -> void:
-	if not use_async_meshing or mesh_thread_running:
-		return
-	mesh_thread_running = true
-	mesh_thread = Thread.new()
-	mesh_thread.start(Callable(self, "_mesh_worker_loop"))
+	mesh_scheduler.start(use_async_meshing)
 
 
 func _stop_mesh_worker() -> void:
-	if not mesh_thread_running:
-		return
-	mesh_thread_running = false
-	mesh_job_semaphore.post()
-	if mesh_thread != null:
-		mesh_thread.wait_to_finish()
-	mesh_thread = null
+	mesh_scheduler.stop()
 
 
 func _ensure_block_tables() -> void:
@@ -867,14 +765,7 @@ func _ensure_block_tables() -> void:
 
 
 func _clear_mesh_jobs() -> void:
-	mesh_job_mutex.lock()
-	mesh_job_queue.clear()
-	mesh_job_mutex.unlock()
-	mesh_result_mutex.lock()
-	mesh_result_queue.clear()
-	mesh_result_mutex.unlock()
-	mesh_job_set.clear()
-	mesh_prefetch_set.clear()
+	mesh_scheduler.clear()
 #endregion
 
 
@@ -911,7 +802,7 @@ func clear_render_height_queue() -> void:
 func has_pending_render_height_work() -> bool:
 	if render_height_queue.size() > 0:
 		return true
-	if mesh_job_set.size() > 0:
+	if mesh_scheduler.has_visible_records():
 		return true
 	if _has_non_prefetch_jobs():
 		return true
@@ -921,9 +812,9 @@ func has_pending_render_height_work() -> bool:
 
 
 func has_pending_mesh_work(include_prefetch: bool) -> bool:
-	if mesh_job_set.size() > 0:
+	if mesh_scheduler.has_visible_records():
 		return true
-	if include_prefetch and mesh_prefetch_set.size() > 0:
+	if include_prefetch and mesh_scheduler.has_prefetch_records():
 		return true
 	if include_prefetch:
 		if _has_any_jobs():
@@ -939,39 +830,19 @@ func has_pending_mesh_work(include_prefetch: bool) -> bool:
 
 
 func _has_non_prefetch_jobs() -> bool:
-	mesh_job_mutex.lock()
-	for job in mesh_job_queue:
-		if not bool(job.get("prefetch", false)):
-			mesh_job_mutex.unlock()
-			return true
-	mesh_job_mutex.unlock()
-	return false
+	return mesh_scheduler.has_non_prefetch_jobs()
 
 
 func _has_non_prefetch_results() -> bool:
-	mesh_result_mutex.lock()
-	for result in mesh_result_queue:
-		if not bool(result.get("prefetch", false)):
-			mesh_result_mutex.unlock()
-			return true
-	mesh_result_mutex.unlock()
-	return false
+	return mesh_scheduler.has_non_prefetch_results()
 
 
 func _has_any_jobs() -> bool:
-	var pending := false
-	mesh_job_mutex.lock()
-	pending = mesh_job_queue.size() > 0
-	mesh_job_mutex.unlock()
-	return pending
+	return mesh_scheduler.has_any_jobs()
 
 
 func _has_any_results() -> bool:
-	var pending := false
-	mesh_result_mutex.lock()
-	pending = mesh_result_queue.size() > 0
-	mesh_result_mutex.unlock()
-	return pending
+	return mesh_scheduler.has_any_results()
 
 
 func _queue_render_height_rebuild(min_cy: int, max_cy: int, min_x: int, max_x: int, min_z: int, max_z: int, anchor: Vector3, target_top_y: int) -> int:
@@ -1454,14 +1325,9 @@ func get_chunk_draw_stats() -> Dictionary:
 
 
 func get_mesh_work_stats() -> Dictionary:
-	var job_queue := 0
-	var result_queue := 0
-	mesh_job_mutex.lock()
-	job_queue = mesh_job_queue.size()
-	mesh_job_mutex.unlock()
-	mesh_result_mutex.lock()
-	result_queue = mesh_result_queue.size()
-	mesh_result_mutex.unlock()
+	var scheduler_stats := mesh_scheduler.get_stats()
+	var job_queue := int(scheduler_stats.get("job_queue", 0))
+	var result_queue := int(scheduler_stats.get("result_queue", 0))
 	var greedy_saved_faces := int(max(0, total_greedy_source_visible_faces - total_greedy_visible_faces))
 	var greedy_reduction_percent := 0.0
 	if total_greedy_source_visible_faces > 0:
@@ -1469,8 +1335,8 @@ func get_mesh_work_stats() -> Dictionary:
 	return {
 		"job_queue": job_queue,
 		"result_queue": result_queue,
-		"job_set": mesh_job_set.size(),
-		"prefetch_set": mesh_prefetch_set.size(),
+		"job_set": int(scheduler_stats.get("job_set", 0)),
+		"prefetch_set": int(scheduler_stats.get("prefetch_set", 0)),
 		"vertices": total_mesh_vertices,
 		"triangles": total_mesh_triangles,
 		"visible_faces": total_visible_faces,
