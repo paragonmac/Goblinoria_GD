@@ -4,7 +4,7 @@ This document records the current runtime shape during housekeeping refactors. I
 
 ## Startup And Main Loop
 
-`Main.gd` is the scene coordinator. It owns controller setup, menu actions, startup/load flows, and per-frame orchestration. Loading-screen UI is delegated to `MainLoadingController`; render-Y readiness, Y prewarm, background warmup, and Y-transition profiling are delegated to `MainRenderLevelController`.
+`Main.gd` is the scene coordinator. It owns controller setup, menu actions, startup/load flows, and per-frame orchestration. Loading-screen UI is delegated to `MainLoadingController`; render-Y readiness, Y prewarm, and background warmup are delegated to `MainRenderLevelController`; Y-transition CSV row construction is delegated to `MainYTransitionProfiler`.
 
 Normal frame flow is:
 
@@ -52,7 +52,7 @@ Interactive render-Y changes use a viewport-bounded readiness gate in `MainRende
 1. Build mesh targets from camera-visible chunk bounds plus safety margin.
 2. Build generation targets for the mesh bands and neighbor bands.
 3. Request chunk generation/load and mesh builds until those bounded targets are ready.
-4. Log one CSV row through `DebugOverlay` for each Y transition.
+4. Build one Y-transition CSV row through `MainYTransitionProfiler` and log it through `DebugOverlay`.
 
 Background warmup and directional prewarm are separate from the blocking reveal gate.
 
@@ -92,7 +92,7 @@ Workers pull tasks from `TaskQueue` through `TaskManager`, pathfind with `Pathfi
 
 The largest coupling hotspots are:
 
-- `Main.gd`: new-world/load-world flow, menu UI, and frame orchestration still share one file.
+- `Main.gd`: menu actions and frame orchestration still share one file. Loading UI, HUD, render-level readiness, and Y-transition profiling are split into controllers/helpers.
 - `WorldRenderer`: render-zone visibility, materials, overlays, and stats still share one class. Mesh-cache data contracts are split into `WorldRendererMeshCache`, runtime mesh queue/thread ownership is split into `WorldRendererMeshScheduler`, and render-height queue ownership is split into `WorldRendererRenderLevel`.
 - `ChunkMesher`: greedy cube meshing, ramp meshing, and mesh resource fallback still share one class. Padded-buffer/index helpers, UV helpers, and color/noise/shading helpers are split into `ChunkMesherPaddedBuffer`, `ChunkMesherUv`, and `ChunkMesherVisuals`.
 - `WorldSaveLoad`: legacy chunk files, block-table hashing, and migration checks still share one class. Metadata, bulk block data, inventory, and persistent mesh-cache file handling are split out.
