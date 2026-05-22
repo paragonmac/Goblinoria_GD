@@ -1,0 +1,101 @@
+# Current Architecture
+
+This document records the current runtime shape before housekeeping refactors. It is descriptive, not a new design target.
+
+## Startup And Main Loop
+
+`Main.gd` is the scene coordinator. It owns controller setup, menu and loading-screen UI, render-level input, startup/load flows, and per-frame orchestration.
+
+Normal frame flow is:
+
+1. Global input handles menu toggles.
+2. Gameplay input handles mode keys, debug keys, worker window toggle, and render-level changes.
+3. Camera, selection, streaming, world simulation, workers, tasks, overlays, and HUD update through `Main._run_frame_updates()`.
+4. Directional Y prewarm and background level warmup pump after the main update.
+
+## New World Flow
+
+A new world starts from `Main._start_new_world_with_loading()`:
+
+1. Hide world draw and show the loading screen.
+2. `World.start_new_world()` resets state, seeds terrain, primes spawn chunks, and spawns workers.
+3. If `generate_full_map_on_startup` is enabled, `WorldArenaCooker` runs a full finite-map cook.
+4. The generated block and raw mesh-cache data are saved through `World.save_world()`.
+5. Startup reveal prepares the camera-visible render-Y area before showing the world.
+6. Optional background warmup starts from the current chunk-Y band.
+
+Full-map arena cook is two-stage:
+
+1. WorkerThreadPool tasks generate all finite chunk block buffers.
+2. The main thread merges generated chunks into `World` over frames.
+3. WorkerThreadPool tasks build raw mesh-cache entries from the completed block arena.
+4. The main thread imports raw mesh-cache entries into `WorldRenderer` over frames.
+
+## Load Flow
+
+`World.load_world()` delegates to `WorldSaveLoad.load_world()`:
+
+1. Read and validate `world_meta.dat`.
+2. Read `world_blocks.dat` into the bulk chunk cache.
+3. Read optional `world_mesh_cache.dat` entries into pending mesh-cache storage.
+4. Clear live chunks, reset streaming, reset renderer stats, and respawn workers.
+5. Startup reveal requests the camera-visible chunks and imports valid pending mesh-cache entries as chunks load.
+
+Mesh-cache failures are non-fatal. Missing, stale, corrupt, or version-mismatched mesh cache data falls back to normal mesh builds from block data.
+
+## Streaming And Render-Level Readiness
+
+`WorldStreaming` decides which finite chunks should be loaded around the camera view. X/Z are clamped to the 32x32 finite chunk map, while Y remains within world height.
+
+Interactive render-Y changes use a viewport-bounded readiness gate in `Main`:
+
+1. Build mesh targets from camera-visible chunk bounds plus safety margin.
+2. Build generation targets for the mesh bands and neighbor bands.
+3. Request chunk generation/load and mesh builds until those bounded targets are ready.
+4. Log one CSV row through `DebugOverlay` for each Y transition.
+
+Background warmup and directional prewarm are separate from the blocking reveal gate.
+
+## Rendering And Mesh Cache
+
+`WorldRenderer` is the public rendering facade used by `World`, `Main`, and `WorldStreaming`.
+
+It currently owns:
+
+- Chunk `MeshInstance3D` pooling through `ChunkCache`.
+- Runtime mesh job queue and one dedicated mesh thread.
+- Raw mesh-cache storage keyed by chunk coord and local top.
+- Lazy `ArrayMesh` creation when a cached chunk becomes visible.
+- Render-height rebuild queues and render-zone visibility.
+- Overlay forwarding and renderer/debug statistics.
+
+Raw mesh-cache entries store packed arrays and metrics, not `ArrayMesh` resources. Persistent mesh cache saves those raw arrays with `store_var(..., false)` and validates them against world dimensions, chunk size, block table hash, mesher cache version, chunk block hash, and neighbor hashes.
+
+## Save/Load Data
+
+`WorldSaveLoad` owns persistence:
+
+- `world_meta.dat`: seed, spawn, top render Y, world dimensions, chunk size, block table hash, save version.
+- `world_blocks.dat`: finite-world bulk chunk block data with fill/raw/ZSTD entries.
+- `world_mesh_cache.dat`: optional raw mesh-cache acceleration data.
+- `inventory.dat`: inventory state.
+
+Current save formats are not changed by housekeeping refactors unless explicitly planned.
+
+## Gameplay Systems
+
+`World` is the gameplay/system hub. It owns chunks, world bounds, block access, inventory, tasks, pathfinding, workers, generator, save/load, streaming, raycasting, and renderer references.
+
+Workers pull tasks from `TaskQueue` through `TaskManager`, pathfind with `Pathfinder`, mutate blocks through `World`, and update inventory for dig/place work.
+
+## Refactor Pressure Points
+
+The largest coupling hotspots are:
+
+- `Main.gd`: loading flow, Y readiness, menu UI, diagnostics, warmup, and frame orchestration share one file.
+- `WorldRenderer`: mesh scheduling, mesh cache, render-height queues, render-zone visibility, materials, overlays, and stats share one class.
+- `ChunkMesher`: padded buffers, greedy cube meshing, ramp meshing, UVs, colors, and mesh resource fallback share one class.
+- `WorldSaveLoad`: metadata, block data, mesh cache, chunk files, inventory, hashing, and migration checks share one class.
+- `DebugOverlay`: live HUD stats, CSV captures, timing logs, map exports, and ramp debug tools share one class.
+
+Housekeeping should split these by responsibility while preserving the current external APIs and runtime behavior.
