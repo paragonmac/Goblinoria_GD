@@ -33,6 +33,32 @@ func entry_from_arrays(
 	}
 
 
+func entry_from_mesher_result(result: Dictionary, local_top: int, revision: int = 0, missing_neighbors: Array = []) -> Dictionary:
+	var vertices: PackedVector3Array = result.get("vertices", PackedVector3Array())
+	var metrics: Dictionary = {
+		"vertices": int(result.get("vertex_count", vertices.size())),
+		"triangles": int(result.get("triangle_count", int(vertices.size() / 3))),
+		"greedy_visible_faces": int(result.get("greedy_visible_faces", 0)),
+		"greedy_occluded_faces": int(result.get("greedy_occluded_faces", 0)),
+		"greedy_source_visible_faces": int(result.get("greedy_source_visible_faces", result.get("greedy_visible_faces", 0))),
+		"ramp_visible_faces": int(result.get("ramp_visible_faces", 0)),
+		"ramp_occluded_faces": int(result.get("ramp_occluded_faces", 0)),
+	}
+	return entry_from_arrays(
+		local_top,
+		vertices,
+		PackedVector3Array(result.get("normals", PackedVector3Array())),
+		PackedColorArray(result.get("colors", PackedColorArray())),
+		PackedVector2Array(result.get("uv", PackedVector2Array())),
+		PackedVector2Array(result.get("uv2", PackedVector2Array())),
+		int(result.get("visible_faces", 0)),
+		int(result.get("occluded_faces", 0)),
+		bool(result.get("has_geometry", false)),
+		revision,
+		metrics,
+		missing_neighbors
+	)
+
 func entry_from_persistent(entry: Dictionary, revision: int) -> Dictionary:
 	var local_top: int = int(entry.get("local_top", -1))
 	return entry_from_arrays(

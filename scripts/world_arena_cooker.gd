@@ -3,6 +3,7 @@ class_name WorldArenaCooker
 
 const WorldGeneratorScript = preload("res://scripts/world_generator.gd")
 const ChunkMesherScript = preload("res://scripts/rendering/chunk_mesher.gd")
+const WorldRendererMeshCacheScript = preload("res://scripts/rendering/world_renderer_mesh_cache.gd")
 
 const PROGRESS_UPDATE_INTERVAL := 16
 const DIAGNOSTIC_DIR := "user://diagnostics"
@@ -19,6 +20,7 @@ enum Stage {
 }
 
 var world: World
+var mesh_cache_helper = WorldRendererMeshCacheScript.new()
 var stage: int = Stage.IDLE
 var worker_count: int = 1
 var coords: Array[Vector3i] = []
@@ -495,34 +497,7 @@ func _build_generation_job(coord: Vector3i) -> Dictionary:
 
 
 func _mesh_cache_entry_from_result(result: Dictionary) -> Dictionary:
-	var vertices: PackedVector3Array = result.get("vertices", PackedVector3Array())
-	var normals: PackedVector3Array = result.get("normals", PackedVector3Array())
-	var colors: PackedColorArray = result.get("colors", PackedColorArray())
-	var uvs: PackedVector2Array = result.get("uv", PackedVector2Array())
-	var uv2s: PackedVector2Array = result.get("uv2", PackedVector2Array())
-	var metrics: Dictionary = {
-		"vertices": int(result.get("vertex_count", vertices.size())),
-		"triangles": int(result.get("triangle_count", int(vertices.size() / 3))),
-		"greedy_visible_faces": int(result.get("greedy_visible_faces", 0)),
-		"greedy_occluded_faces": int(result.get("greedy_occluded_faces", 0)),
-		"greedy_source_visible_faces": int(result.get("greedy_source_visible_faces", result.get("greedy_visible_faces", 0))),
-		"ramp_visible_faces": int(result.get("ramp_visible_faces", 0)),
-		"ramp_occluded_faces": int(result.get("ramp_occluded_faces", 0)),
-	}
-	return {
-		"local_top": World.CHUNK_SIZE - 1,
-		"visible_faces": int(result.get("visible_faces", 0)),
-		"occluded_faces": int(result.get("occluded_faces", 0)),
-		"has_geometry": bool(result.get("has_geometry", false)),
-		"metrics": metrics,
-		"vertices": vertices,
-		"normals": normals,
-		"colors": colors,
-		"uv": uvs,
-		"uv2": uv2s,
-		"missing_neighbors": [],
-	}
-
+	return mesh_cache_helper.entry_from_mesher_result(result, World.CHUNK_SIZE - 1, 0, [])
 
 func _build_neighbor_blocks(coord: Vector3i) -> Dictionary:
 	return {
