@@ -5,6 +5,7 @@ class_name WorldRenderer
 #region Preloads
 const ChunkMesherScript = preload("res://scripts/rendering/chunk_mesher.gd")
 const ChunkCacheScript = preload("res://scripts/rendering/chunk_cache.gd")
+const WorldRendererMeshCacheScript = preload("res://scripts/rendering/world_renderer_mesh_cache.gd")
 const OverlayRendererScript = preload("res://scripts/rendering/overlay_renderer.gd")
 const FrustumCullerScript = preload("res://scripts/rendering/frustum_culler.gd")
 const BlockTerrainShader = preload("res://scripts/rendering/block_terrain.gdshader")
@@ -32,6 +33,7 @@ var world: World
 var mesher = ChunkMesherScript.new()
 var mesher_thread = ChunkMesherScript.new()
 var chunk_cache = ChunkCacheScript.new()
+var mesh_cache_helper = WorldRendererMeshCacheScript.new()
 var overlay_renderer = OverlayRendererScript.new()
 var frustum_culler = FrustumCullerScript.new()
 var block_material: Material
@@ -1138,26 +1140,20 @@ func _mesh_cache_entry_from_arrays(
 	mesh_metrics: Dictionary = {},
 	missing_neighbors: Array = []
 ) -> Dictionary:
-	var metrics := _normalize_mesh_metrics(mesh_metrics, null)
-	if int(metrics.get("vertices", 0)) <= 0 and vertices.size() > 0:
-		metrics["vertices"] = vertices.size()
-	if int(metrics.get("triangles", 0)) <= 0 and vertices.size() > 0:
-		metrics["triangles"] = int(vertices.size() / 3)
-	return {
-		"vertices": PackedVector3Array(vertices),
-		"normals": PackedVector3Array(normals),
-		"colors": PackedColorArray(colors),
-		"uv": PackedVector2Array(uvs),
-		"uv2": PackedVector2Array(uv2s),
-		"visible_faces": visible_faces,
-		"occluded_faces": occluded_faces,
-		"has_geometry": has_geometry,
-		"revision": revision,
-		"metrics": metrics,
-		"missing_neighbors": missing_neighbors.duplicate(),
-		"local_top": local_top,
-	}
-
+	return mesh_cache_helper.entry_from_arrays(
+		local_top,
+		vertices,
+		normals,
+		colors,
+		uvs,
+		uv2s,
+		visible_faces,
+		occluded_faces,
+		has_geometry,
+		revision,
+		mesh_metrics,
+		missing_neighbors
+	)
 
 func _store_mesh_cache_entry(coord: Vector3i, local_top: int, entry: Dictionary) -> void:
 	if local_top < 0:
@@ -1180,21 +1176,7 @@ func export_persistent_mesh_cache_entry(coord: Vector3i, local_top: int) -> Dict
 	if typeof(entry) != TYPE_DICTIONARY:
 		return {}
 	var typed_entry: Dictionary = entry
-	if not _validate_mesh_cache_arrays(typed_entry):
-		return {}
-	return {
-		"local_top": local_top,
-		"visible_faces": int(typed_entry.get("visible_faces", 0)),
-		"occluded_faces": int(typed_entry.get("occluded_faces", 0)),
-		"has_geometry": bool(typed_entry.get("has_geometry", false)),
-		"metrics": _mesh_metrics_from_entry(typed_entry, null),
-		"vertices": PackedVector3Array(typed_entry.get("vertices", PackedVector3Array())),
-		"normals": PackedVector3Array(typed_entry.get("normals", PackedVector3Array())),
-		"colors": PackedColorArray(typed_entry.get("colors", PackedColorArray())),
-		"uv": PackedVector2Array(typed_entry.get("uv", PackedVector2Array())),
-		"uv2": PackedVector2Array(typed_entry.get("uv2", PackedVector2Array())),
-	}
-
+	return mesh_cache_helper.export_persistent_entry(typed_entry, local_top)
 
 func import_persistent_mesh_cache_entry(coord: Vector3i, entry: Dictionary) -> bool:
 	if world == null:
@@ -1207,67 +1189,18 @@ func import_persistent_mesh_cache_entry(coord: Vector3i, entry: Dictionary) -> b
 	var local_top: int = int(entry.get("local_top", -1))
 	if local_top < 0 or local_top >= World.CHUNK_SIZE:
 		return false
-	if not _validate_mesh_cache_arrays(entry):
+	if not mesh_cache_helper.validate_arrays(entry):
 		return false
-	var stored_entry: Dictionary = _mesh_cache_entry_from_arrays(
-		local_top,
-		PackedVector3Array(entry.get("vertices", PackedVector3Array())),
-		PackedVector3Array(entry.get("normals", PackedVector3Array())),
-		PackedColorArray(entry.get("colors", PackedColorArray())),
-		PackedVector2Array(entry.get("uv", PackedVector2Array())),
-		PackedVector2Array(entry.get("uv2", PackedVector2Array())),
-		int(entry.get("visible_faces", 0)),
-		int(entry.get("occluded_faces", 0)),
-		bool(entry.get("has_geometry", false)),
-		chunk.mesh_revision,
-		_mesh_metrics_from_entry(entry, null),
-		[]
-	)
+	var stored_entry: Dictionary = mesh_cache_helper.entry_from_persistent(entry, chunk.mesh_revision)
 	_store_mesh_cache_entry(coord, local_top, stored_entry)
 	mesh_cache_imports += 1
 	return true
 
-
 func _validate_mesh_cache_arrays(entry: Dictionary) -> bool:
-	var has_geometry: bool = bool(entry.get("has_geometry", false))
-	var vertices_value = entry.get("vertices", PackedVector3Array())
-	var normals_value = entry.get("normals", PackedVector3Array())
-	var colors_value = entry.get("colors", PackedColorArray())
-	var uvs_value = entry.get("uv", PackedVector2Array())
-	var uv2s_value = entry.get("uv2", PackedVector2Array())
-	if typeof(vertices_value) != TYPE_PACKED_VECTOR3_ARRAY:
-		return false
-	if typeof(normals_value) != TYPE_PACKED_VECTOR3_ARRAY:
-		return false
-	if typeof(colors_value) != TYPE_PACKED_COLOR_ARRAY:
-		return false
-	if typeof(uvs_value) != TYPE_PACKED_VECTOR2_ARRAY:
-		return false
-	if typeof(uv2s_value) != TYPE_PACKED_VECTOR2_ARRAY:
-		return false
-	if not has_geometry:
-		return true
-	var vertices: PackedVector3Array = vertices_value
-	if vertices.is_empty():
-		return false
-	return true
-
+	return mesh_cache_helper.validate_arrays(entry)
 
 func _array_mesh_from_entry(entry: Dictionary) -> ArrayMesh:
-	var mesh := ArrayMesh.new()
-	if not bool(entry.get("has_geometry", false)):
-		return mesh
-	if not _validate_mesh_cache_arrays(entry):
-		return mesh
-	var arrays := []
-	arrays.resize(Mesh.ARRAY_MAX)
-	arrays[Mesh.ARRAY_VERTEX] = PackedVector3Array(entry.get("vertices", PackedVector3Array()))
-	arrays[Mesh.ARRAY_NORMAL] = PackedVector3Array(entry.get("normals", PackedVector3Array()))
-	arrays[Mesh.ARRAY_COLOR] = PackedColorArray(entry.get("colors", PackedColorArray()))
-	arrays[Mesh.ARRAY_TEX_UV] = PackedVector2Array(entry.get("uv", PackedVector2Array()))
-	arrays[Mesh.ARRAY_TEX_UV2] = PackedVector2Array(entry.get("uv2", PackedVector2Array()))
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-	return mesh
+	return mesh_cache_helper.array_mesh_from_entry(entry)
 
 func has_cached_chunk_mesh(coord: Vector3i, local_top: int) -> bool:
 	return _has_cached_mesh(coord, local_top)
