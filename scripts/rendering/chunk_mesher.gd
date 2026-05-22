@@ -4,6 +4,7 @@ class_name ChunkMesher
 
 #region Preloads
 const ChunkMesherPaddedBufferScript = preload("res://scripts/rendering/chunk_mesher_padded_buffer.gd")
+const ChunkMesherUvScript = preload("res://scripts/rendering/chunk_mesher_uv.gd")
 #endregion
 
 #region Constants
@@ -37,6 +38,7 @@ var block_solid_table := PackedByteArray()
 var block_color_table := PackedColorArray()
 var block_ramp_table := PackedByteArray()
 var padded_buffer: ChunkMesherPaddedBuffer = ChunkMesherPaddedBufferScript.new()
+var uv_helper: ChunkMesherUv = ChunkMesherUvScript.new()
 #endregion
 
 
@@ -380,46 +382,23 @@ func _ramp_side_is_full(block_id: int, side: Vector3) -> bool:
 
 
 func _atlas_tile_scale(columns: int, rows: int) -> Vector2:
-	return Vector2(1.0 / float(columns), 1.0 / float(rows))
+	return uv_helper.atlas_tile_scale(columns, rows)
 
 
 func _atlas_tile_offset(tile_index: int, columns: int, tile_scale: Vector2) -> Vector2:
-	var col := 0
-	var row := 0
-	if columns > 0:
-		col = tile_index % columns
-		row = int(floor(float(tile_index) / float(columns)))
-	return Vector2(float(col) * tile_scale.x, float(row) * tile_scale.y)
+	return uv_helper.atlas_tile_offset(tile_index, columns, tile_scale)
 
 
 func _tile_index_for_id(block_id: int, tile_count: int) -> int:
-	if tile_count <= 0:
-		return 0
-	if block_id < 0:
-		return 0
-	return block_id % tile_count
+	return uv_helper.tile_index_for_id(block_id, tile_count)
 
 
 func _planar_uv(vertex: Vector3, base: Vector3, normal: Vector3) -> Vector2:
-	var local := vertex - base
-	var abs_normal := Vector3(abs(normal.x), abs(normal.y), abs(normal.z))
-	var u: float
-	var v: float
-	if abs_normal.y >= abs_normal.x and abs_normal.y >= abs_normal.z:
-		u = local.x + 0.5
-		v = local.z + 0.5
-	elif abs_normal.x >= abs_normal.z:
-		u = local.z + 0.5
-		v = local.y + 0.5
-	else:
-		u = local.x + 0.5
-		v = local.y + 0.5
-	return Vector2(u, v)
+	return uv_helper.planar_uv(vertex, base, normal)
 
 
 func _atlas_uv(local_uv: Vector2, tile_offset: Vector2, tile_scale: Vector2) -> Vector2:
-	return tile_offset + Vector2(local_uv.x * tile_scale.x, local_uv.y * tile_scale.y)
-
+	return uv_helper.atlas_uv(local_uv, tile_offset, tile_scale)
 
 func add_greedy_cube_faces(
 	vertices: PackedVector3Array,
