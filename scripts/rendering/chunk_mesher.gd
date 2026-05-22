@@ -20,9 +20,9 @@ const GREEDY_UV2_FLAG := 2.0
 var block_solid_table := PackedByteArray()
 var block_color_table := PackedColorArray()
 var block_ramp_table := PackedByteArray()
-var padded_buffer: ChunkMesherPaddedBuffer = ChunkMesherPaddedBufferScript.new()
-var uv_helper: ChunkMesherUv = ChunkMesherUvScript.new()
-var visuals: ChunkMesherVisuals = ChunkMesherVisualsScript.new()
+var padded_buffer: RefCounted = ChunkMesherPaddedBufferScript.new()
+var uv_helper: RefCounted = ChunkMesherUvScript.new()
+var visuals: RefCounted = ChunkMesherVisualsScript.new()
 #endregion
 
 
