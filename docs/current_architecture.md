@@ -1,10 +1,10 @@
 # Current Architecture
 
-This document records the current runtime shape before housekeeping refactors. It is descriptive, not a new design target.
+This document records the current runtime shape during housekeeping refactors. It is descriptive, not a new design target.
 
 ## Startup And Main Loop
 
-`Main.gd` is the scene coordinator. It owns controller setup, menu and loading-screen UI, render-level input, startup/load flows, and per-frame orchestration.
+`Main.gd` is the scene coordinator. It owns controller setup, menu actions, startup/load flows, and per-frame orchestration. Loading-screen UI is delegated to `MainLoadingController`; render-Y readiness, Y prewarm, background warmup, and Y-transition profiling are delegated to `MainRenderLevelController`.
 
 Normal frame flow is:
 
@@ -47,7 +47,7 @@ Mesh-cache failures are non-fatal. Missing, stale, corrupt, or version-mismatche
 
 `WorldStreaming` decides which finite chunks should be loaded around the camera view. X/Z are clamped to the 32x32 finite chunk map, while Y remains within world height.
 
-Interactive render-Y changes use a viewport-bounded readiness gate in `Main`:
+Interactive render-Y changes use a viewport-bounded readiness gate in `MainRenderLevelController`:
 
 1. Build mesh targets from camera-visible chunk bounds plus safety margin.
 2. Build generation targets for the mesh bands and neighbor bands.
@@ -69,16 +69,16 @@ It currently owns:
 - Render-height rebuild queues and render-zone visibility.
 - Overlay forwarding and renderer/debug statistics.
 
-Raw mesh-cache entries store packed arrays and metrics, not `ArrayMesh` resources. Persistent mesh cache saves those raw arrays with `store_var(..., false)` and validates them against world dimensions, chunk size, block table hash, mesher cache version, chunk block hash, and neighbor hashes.
+Raw mesh-cache entries store packed arrays and metrics, not `ArrayMesh` resources. `WorldRendererMeshCache` centralizes raw mesh-cache entry construction, validation, export, import shaping, and lazy `ArrayMesh` construction. Persistent mesh cache saves those raw arrays with `store_var(..., false)` and validates them against world dimensions, chunk size, block table hash, mesher cache version, chunk block hash, and neighbor hashes.
 
 ## Save/Load Data
 
-`WorldSaveLoad` owns persistence:
+`WorldSaveLoad` orchestrates persistence, with metadata and inventory file handling split into small helpers:
 
-- `world_meta.dat`: seed, spawn, top render Y, world dimensions, chunk size, block table hash, save version.
+- `world_meta.dat`: seed, spawn, top render Y, world dimensions, chunk size, block table hash, save version. Handled by `WorldMetadataSaveLoad`.
 - `world_blocks.dat`: finite-world bulk chunk block data with fill/raw/ZSTD entries.
 - `world_mesh_cache.dat`: optional raw mesh-cache acceleration data.
-- `inventory.dat`: inventory state.
+- `inventory.dat`: inventory state. Handled by `WorldInventorySaveLoad`.
 
 Current save formats are not changed by housekeeping refactors unless explicitly planned.
 
@@ -92,10 +92,10 @@ Workers pull tasks from `TaskQueue` through `TaskManager`, pathfind with `Pathfi
 
 The largest coupling hotspots are:
 
-- `Main.gd`: loading flow, Y readiness, menu UI, diagnostics, warmup, and frame orchestration share one file.
-- `WorldRenderer`: mesh scheduling, mesh cache, render-height queues, render-zone visibility, materials, overlays, and stats share one class.
+- `Main.gd`: new-world/load-world flow, menu UI, and frame orchestration still share one file.
+- `WorldRenderer`: mesh scheduling, render-height queues, render-zone visibility, materials, overlays, and stats still share one class. Mesh-cache data contracts are now split into `WorldRendererMeshCache`.
 - `ChunkMesher`: padded buffers, greedy cube meshing, ramp meshing, UVs, colors, and mesh resource fallback share one class.
-- `WorldSaveLoad`: metadata, block data, mesh cache, chunk files, inventory, hashing, and migration checks share one class.
+- `WorldSaveLoad`: bulk block data, persistent mesh cache, legacy chunk files, hashing, and migration checks still share one class. Metadata and inventory are split out.
 - `DebugOverlay`: live HUD stats, CSV captures, timing logs, map exports, and ramp debug tools share one class.
 
 Housekeeping should split these by responsibility while preserving the current external APIs and runtime behavior.
