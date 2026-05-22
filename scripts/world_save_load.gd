@@ -2,6 +2,10 @@ extends RefCounted
 class_name WorldSaveLoad
 ## Handles world save/load and serialization.
 
+#region Preloads
+const WorldInventorySaveLoadScript = preload("res://scripts/world_inventory_save_load.gd")
+#endregion
+
 #region Constants
 const META_MAGIC := 0x474D4554
 const CHUNK_MAGIC := 0x43484B53
@@ -21,8 +25,6 @@ const COMPRESSION_ZSTD := FileAccess.COMPRESSION_ZSTD
 const BULK_ENTRY_RAW := 0
 const BULK_ENTRY_FILL := 1
 const BULK_ENTRY_COMPRESSED := 2
-const INVENTORY_FILE_NAME := "inventory.dat"
-const INVENTORY_MAGIC := 0x494E5654
 const STARTUP_MESH_CACHE_BAND_RADIUS := 1
 #endregion
 
@@ -35,6 +37,7 @@ var bulk_chunks_loaded: bool = false
 var pending_mesh_cache_entries: Dictionary = {}
 var last_load_metrics: Dictionary = {}
 var mesh_cache_stats: Dictionary = {}
+var inventory_save_load = WorldInventorySaveLoadScript.new()
 #endregion
 
 
@@ -802,42 +805,9 @@ func _get_block_table_hash() -> int:
 
 
 func _save_inventory(world_dir: String) -> bool:
-	var path := world_dir.path_join(INVENTORY_FILE_NAME)
-	var inv: Dictionary = world.inventory
-	if inv.is_empty():
-		if FileAccess.file_exists(path):
-			DirAccess.remove_absolute(path)
-		return true
-	var file := FileAccess.open(path, FileAccess.WRITE)
-	if file == null:
-		push_warning("Inventory save failed: %s" % path)
-		return false
-	file.store_32(INVENTORY_MAGIC)
-	file.store_32(inv.size())
-	for block_id in inv.keys():
-		file.store_16(block_id)
-		file.store_32(inv[block_id])
-	file.flush()
-	return true
+	return inventory_save_load.save_inventory(world, world_dir)
 
 
 func _load_inventory(world_dir: String) -> bool:
-	world.clear_inventory()
-	var path := world_dir.path_join(INVENTORY_FILE_NAME)
-	if not FileAccess.file_exists(path):
-		return true
-	var file := FileAccess.open(path, FileAccess.READ)
-	if file == null:
-		return false
-	var magic: int = file.get_32()
-	if magic != INVENTORY_MAGIC:
-		push_warning("Inventory load failed: bad magic")
-		return false
-	var count: int = file.get_32()
-	for _i in range(count):
-		var block_id: int = file.get_16()
-		var amount: int = file.get_32()
-		if block_id > 0 and amount > 0:
-			world.add_to_inventory(block_id, amount)
-	return true
+	return inventory_save_load.load_inventory(world, world_dir)
 #endregion
