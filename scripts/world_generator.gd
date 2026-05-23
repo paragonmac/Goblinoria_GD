@@ -2,6 +2,8 @@ extends RefCounted
 class_name WorldGenerator
 ## Handles chunk generation, seeding, and terrain algorithms.
 
+const WorldGenerationPipelineScript = preload("res://scripts/world_generation_pipeline.gd")
+
 #region Constants
 const SEED_MIX_FACTOR := 0x45d9f3b
 const SEED_MASK := 0x7fffffff
@@ -75,6 +77,27 @@ func mix_seed(value: int) -> int:
 #endregion
 
 
+
+
+func build_layered_world_config(seed: int, sea_level_value: int, world_size_y_value: int) -> Dictionary:
+	return {
+		"world_seed": seed,
+		"sea_level": sea_level_value,
+		"world_size_y": world_size_y_value,
+		"chunk_size": World.CHUNK_SIZE,
+		"world_chunks_x": World.WORLD_CHUNKS_X,
+		"world_chunks_y": World.WORLD_CHUNKS_Y,
+		"world_chunks_z": World.WORLD_CHUNKS_Z,
+		"world_min_chunk_x": World.WORLD_MIN_CHUNK_X,
+		"world_max_chunk_x": World.WORLD_MAX_CHUNK_X,
+		"world_min_chunk_z": World.WORLD_MIN_CHUNK_Z,
+		"world_max_chunk_z": World.WORLD_MAX_CHUNK_Z,
+	}
+
+
+func generate_layered_world(config: Dictionary) -> Dictionary:
+	var pipeline = WorldGenerationPipelineScript.new()
+	return pipeline.generate(config)
 #region Chunk Generation
 func generate_chunk(coord: Vector3i, chunk: World.ChunkDataType) -> void:
 	if not world.is_chunk_coord_valid(coord):

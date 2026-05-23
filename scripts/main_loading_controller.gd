@@ -43,10 +43,10 @@ func setup_loading_screen() -> void:
 	panel.anchor_top = 0.5
 	panel.anchor_right = 0.5
 	panel.anchor_bottom = 0.5
-	panel.offset_left = -220.0
-	panel.offset_top = -80.0
-	panel.offset_right = 220.0
-	panel.offset_bottom = 80.0
+	panel.offset_left = -330.0
+	panel.offset_top = -120.0
+	panel.offset_right = 330.0
+	panel.offset_bottom = 120.0
 	loading_layer.add_child(panel)
 
 	var box := VBoxContainer.new()
@@ -64,6 +64,8 @@ func setup_loading_screen() -> void:
 	loading_status_label.name = "StatusLabel"
 	loading_status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	loading_status_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	loading_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	loading_status_label.custom_minimum_size = Vector2(600.0, 96.0)
 	loading_status_label.text = "Loading..."
 	box.add_child(loading_status_label)
 
@@ -72,6 +74,7 @@ func setup_loading_screen() -> void:
 	loading_progress_bar.min_value = 0.0
 	loading_progress_bar.max_value = 1.0
 	loading_progress_bar.value = 0.0
+	loading_progress_bar.custom_minimum_size = Vector2(600.0, 0.0)
 	box.add_child(loading_progress_bar)
 
 

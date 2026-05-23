@@ -832,16 +832,70 @@ func _format_arena_cook_status(status_prefix: String, phase: String, progress: D
 	var percent := 0.0
 	if total > 0:
 		percent = float(done) / float(total) * 100.0
-	return "%s\n%s: %d / %d (%.0f%%)\nWorkers: %d | Chunks: %d | Meshes: %d" % [
+	var detail: String = _format_arena_generation_detail(phase, progress)
+	var detail_suffix: String = "" if detail.is_empty() else "\n%s" % detail
+	return "%s\n%s: %d / %d (%.0f%%)%s\nWorkers: %d | Chunks: %d | Meshes: %d" % [
 		status_prefix,
 		phase,
 		done,
 		total,
 		percent,
+		detail_suffix,
 		int(progress.get("workers", 1)),
 		int(progress.get("chunks_generated", 0)),
 		int(progress.get("meshes_built", 0)),
 	]
+
+
+func _format_arena_generation_detail(phase: String, progress: Dictionary) -> String:
+	if not phase.begins_with("Generating"):
+		return ""
+	var pass_name: String = str(progress.get("pipeline_pass_name", ""))
+	if pass_name.is_empty():
+		return "Layers: climate, biome, strata, caves, water, ores, trees, flowers"
+	var pass_completed: int = int(progress.get("pipeline_pass_completed", 0))
+	var pass_total: int = maxi(int(progress.get("pipeline_pass_total", 0)), 1)
+	var pass_state: String = str(progress.get("pipeline_pass_state", ""))
+	var pass_number: int = clampi(pass_completed + 1, 1, pass_total)
+	if pass_state == "done":
+		pass_number = clampi(pass_completed, 1, pass_total)
+	return "Now: %s (%d/%d)\nLayers: climate, biome, strata, caves, water, ores, trees, flowers" % [
+		_humanize_generation_pass(pass_name),
+		pass_number,
+		pass_total,
+	]
+
+
+func _humanize_generation_pass(pass_name: String) -> String:
+	match pass_name:
+		"climate_maps":
+			return "Building climate maps"
+		"biome_map":
+			return "Assigning biomes"
+		"geology_maps":
+			return "Layering strata"
+		"fill_solid_terrain":
+			return "Filling terrain"
+		"carve_caves":
+			return "Carving caves"
+		"add_static_water":
+			return "Adding underground water"
+		"add_ores":
+			return "Placing ores"
+		"apply_surface_blocks":
+			return "Painting surfaces"
+		"apply_ramps":
+			return "Applying ramps"
+		"place_trees":
+			return "Planting trees"
+		"place_flowers":
+			return "Placing flowers"
+		"final_cleanup":
+			return "Cleaning up"
+		"bake_chunks":
+			return "Baking chunks"
+		_:
+			return pass_name.replace("_", " ")
 
 func _format_full_map_loading_status(status_prefix: String, generated: int, total: int) -> String:
 	var remaining: int = maxi(total - generated, 0)

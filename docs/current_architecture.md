@@ -31,6 +31,14 @@ Full-map arena cook is two-stage:
 3. WorkerThreadPool tasks build raw mesh-cache entries from the completed block arena.
 4. The main thread imports raw mesh-cache entries into `WorldRenderer` over frames.
 
+
+## Layered World Generation
+
+Full-map new-world creation uses `WorldGenerationPipeline` through `WorldGenerator` and `WorldArenaCooker`. The pipeline builds finite-world intermediate maps in world coordinates before baking final block IDs into normal chunk buffers. Current maps are elevation, moisture, temperature, biome, soil/stone region, tree density, and feature reservations.
+
+Generation pass order is serial and explicit: climate maps, biome, geology, solid terrain fill, caves, static underground water, ores, surface blocks, ramps, trees, flowers, cleanup, then chunk baking. The result is still ordinary `ChunkData.blocks`; intermediate maps are not saved yet. Persistent saves continue to store final block data and optional raw mesh-cache entries only.
+
+The richer layered pipeline is used for the full-map arena cook. Runtime on-demand chunk generation remains compatible as a fallback path for non-full-map startup modes.
 ## Load Flow
 
 `World.load_world()` delegates to `WorldSaveLoad.load_world()`:

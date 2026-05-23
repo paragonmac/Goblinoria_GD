@@ -58,6 +58,9 @@ var diagnostic_path: String = ""
 var cook_world_seed: int = 0
 var cook_sea_level: int = 0
 var cook_world_size_y: int = 0
+var generation_mode: String = ""
+var pipeline_metrics: Dictionary = {}
+var pipeline_progress: Dictionary = {}
 
 
 func _init(world_ref: World) -> void:
@@ -67,22 +70,21 @@ func _init(world_ref: World) -> void:
 func start_generation() -> void:
 	_reset_state()
 	coords = _build_all_world_chunk_targets()
-	worker_count = _resolve_worker_count(coords.size())
+	worker_count = 1
 	cook_world_seed = world.world_seed
 	cook_sea_level = world.sea_level
 	cook_world_size_y = world.world_size_y
 	cook_start_usec = Time.get_ticks_usec()
 	generation_start_usec = cook_start_usec
 	stage = Stage.GENERATING
+	generation_mode = "layered_pipeline"
 	_start_worker_arrays(worker_count)
-	var slices: Array = _split_coords(coords, worker_count)
-	for worker_index in range(worker_count):
-		var task_id: int = WorkerThreadPool.add_task(
-			Callable(self, "_run_generation_worker").bind(worker_index, slices[worker_index]),
-			false,
-			"Arena block generation %d" % worker_index
-		)
-		generation_task_ids.append(task_id)
+	var task_id: int = WorkerThreadPool.add_task(
+		Callable(self, "_run_layered_generation_worker").bind(0),
+		false,
+		"Arena layered world generation"
+	)
+	generation_task_ids.append(task_id)
 
 
 func is_generation_done() -> bool:
@@ -150,6 +152,7 @@ func start_mesh() -> void:
 	if stage != Stage.MERGING_BLOCKS:
 		return
 	stage = Stage.MESHING
+	worker_count = _resolve_worker_count(coords.size())
 	mesh_start_usec = Time.get_ticks_usec()
 	mesh_task_ids.clear()
 	mesh_results.clear()
@@ -231,6 +234,10 @@ func get_progress() -> Dictionary:
 		done += int(value)
 	for value in worker_totals:
 		total += int(value)
+	var pass_name: String = str(pipeline_progress.get("pass_name", ""))
+	var pass_completed: int = int(pipeline_progress.get("pass_completed", 0))
+	var pass_total: int = int(pipeline_progress.get("pass_total", 0))
+	var pass_state: String = str(pipeline_progress.get("state", ""))
 	progress_mutex.unlock()
 	return {
 		"stage": stage,
@@ -240,6 +247,10 @@ func get_progress() -> Dictionary:
 		"chunks_generated": chunks_generated,
 		"meshes_built": meshes_built,
 		"meshes_merged": meshes_merged,
+		"pipeline_pass_name": pass_name,
+		"pipeline_pass_completed": pass_completed,
+		"pipeline_pass_total": pass_total,
+		"pipeline_pass_state": pass_state,
 	}
 
 
@@ -266,6 +277,9 @@ func get_diagnostics() -> Dictionary:
 		"merge_blocks_ms": merge_blocks_ms,
 		"merge_meshes_ms": merge_meshes_ms,
 		"save_ms": save_ms,
+		"generation_mode": generation_mode,
+		"pipeline_total_ms": float(pipeline_metrics.get("total_ms", 0.0)),
+		"pipeline_pass_count": int(pipeline_metrics.get("pass_count", 0)),
 		"diagnostic_path": diagnostic_path,
 	}
 
@@ -287,6 +301,12 @@ func write_diagnostics() -> String:
 		if key == "diagnostic_path":
 			continue
 		file.store_line("%s,%s" % [str(key), str(metrics[key])])
+	var pass_entries: Array = pipeline_metrics.get("passes", [])
+	for pass_index in range(pass_entries.size()):
+		var pass_value = pass_entries[pass_index]
+		if typeof(pass_value) == TYPE_DICTIONARY:
+			var pass_entry: Dictionary = pass_value
+			file.store_line("pipeline_pass_%d_%s_ms,%s" % [pass_index, str(pass_entry.get("name", "unknown")), str(pass_entry.get("ms", 0.0))])
 	for i in range(worker_count):
 		file.store_line("worker_%d_generation_ms,%s" % [i, str(_worker_float(worker_generation_ms, i))])
 		file.store_line("worker_%d_mesh_ms,%s" % [i, str(_worker_float(worker_mesh_ms, i))])
@@ -338,6 +358,9 @@ func _reset_state() -> void:
 	empty_meshes = 0
 	meshes_merged = 0
 	diagnostic_path = ""
+	generation_mode = ""
+	pipeline_metrics.clear()
+	pipeline_progress.clear()
 
 
 func _start_worker_arrays(count: int) -> void:
@@ -402,6 +425,38 @@ func _build_all_world_chunk_targets() -> Array[Vector3i]:
 			for cz in range(World.WORLD_MIN_CHUNK_Z, World.WORLD_MAX_CHUNK_Z + 1):
 				targets.append(Vector3i(cx, cy, cz))
 	return targets
+
+
+func _run_layered_generation_worker(worker_index: int) -> void:
+	var start_usec: int = Time.get_ticks_usec()
+	_set_worker_total(worker_index, coords.size())
+	var generator: WorldGenerator = WorldGeneratorScript.new(null)
+	var config: Dictionary = generator.build_layered_world_config(cook_world_seed, cook_sea_level, cook_world_size_y)
+	config["progress_callback"] = Callable(self, "_record_pipeline_progress")
+	var result: Dictionary = generator.generate_layered_world(config)
+	var blocks_by_coord: Dictionary = result.get("chunks", {})
+	_set_worker_progress(worker_index, blocks_by_coord.size())
+	var elapsed: float = _elapsed_ms(start_usec)
+	_store_generation_result(worker_index, {
+		"blocks": blocks_by_coord,
+		"chunks": blocks_by_coord.size(),
+		"generation_ms": elapsed,
+		"pipeline_metrics": result.get("metrics", {}),
+	})
+
+
+func _record_pipeline_progress(row: Dictionary) -> void:
+	var pass_completed: int = int(row.get("pass_completed", 0))
+	var pass_total: int = maxi(int(row.get("pass_total", 1)), 1)
+	var total_chunks: int = coords.size()
+	var chunk_equivalent_progress: int = clampi(int(round(float(total_chunks) * float(pass_completed) / float(pass_total))), 0, total_chunks)
+	progress_mutex.lock()
+	pipeline_progress = row.duplicate()
+	if worker_totals.size() > 0:
+		worker_totals[0] = total_chunks
+	if worker_progress.size() > 0:
+		worker_progress[0] = chunk_equivalent_progress
+	progress_mutex.unlock()
 
 
 func _run_generation_worker(worker_index: int, worker_coords: Array) -> void:
@@ -577,6 +632,8 @@ func _store_generation_result(worker_index: int, result: Dictionary) -> void:
 	generation_results[worker_index] = result
 	progress_mutex.lock()
 	worker_generation_ms[worker_index] = float(result.get("generation_ms", 0.0))
+	if result.has("pipeline_metrics"):
+		pipeline_metrics = result.get("pipeline_metrics", {})
 	progress_mutex.unlock()
 	result_mutex.unlock()
 
