@@ -8,11 +8,9 @@ const ChunkCacheScript = preload("res://scripts/rendering/chunk_cache.gd")
 const WorldRendererMeshCacheScript = preload("res://scripts/rendering/world_renderer_mesh_cache.gd")
 const WorldRendererMeshSchedulerScript = preload("res://scripts/rendering/world_renderer_mesh_scheduler.gd")
 const WorldRendererRenderLevelScript = preload("res://scripts/rendering/world_renderer_render_level.gd")
+const WorldRendererMaterialsScript = preload("res://scripts/rendering/world_renderer_materials.gd")
 const OverlayRendererScript = preload("res://scripts/rendering/overlay_renderer.gd")
 const FrustumCullerScript = preload("res://scripts/rendering/frustum_culler.gd")
-const BlockTerrainShader = preload("res://scripts/rendering/block_terrain.gdshader")
-const BlockTerrainDebugShader = preload("res://scripts/rendering/block_terrain_debug.gdshader")
-const BLOCK_ATLAS_PATH := "res://assets/textures/atlas.png"
 #endregion
 
 #region Constants
@@ -38,11 +36,9 @@ var chunk_cache = ChunkCacheScript.new()
 var mesh_cache_helper = WorldRendererMeshCacheScript.new()
 var mesh_scheduler = WorldRendererMeshSchedulerScript.new()
 var render_level_helper = WorldRendererRenderLevelScript.new()
+var material_helper = WorldRendererMaterialsScript.new()
 var overlay_renderer = OverlayRendererScript.new()
 var frustum_culler = FrustumCullerScript.new()
-var block_material: Material
-var block_atlas_texture: Texture2D
-var debug_normals_enabled: bool = false
 var chunk_face_stats: Dictionary = {}
 var chunk_mesh_stats: Dictionary = {}
 var total_visible_faces: int = 0
@@ -79,6 +75,7 @@ func initialize(world_ref: World) -> void:
 	if overlay_renderer.get_parent() == null:
 		add_child(overlay_renderer)
 	overlay_renderer.initialize(world_ref)
+	material_helper.initialize(world_ref)
 	_ensure_block_tables()
 	mesh_scheduler.configure(Callable(self, "_build_mesh_result_on_worker"), MESH_RESULT_BACKLOG_MAX, MESH_RESULT_BACKLOG_SLEEP_USEC)
 	render_level_helper.configure(self, chunk_cache, mesh_scheduler)
@@ -1128,56 +1125,21 @@ func _set_chunk_visibility(coord: Vector3i, is_visible: bool) -> void:
 
 #region Materials
 func get_block_material() -> Material:
-	if block_material == null:
-		var shader_material := ShaderMaterial.new()
-		shader_material.shader = BlockTerrainDebugShader if debug_normals_enabled else BlockTerrainShader
-		shader_material.set_shader_parameter("atlas_texture", _get_block_atlas_texture())
-		if world != null:
-			shader_material.set_shader_parameter("top_render_y", float(world.top_render_y))
-			shader_material.set_shader_parameter("min_render_y", float(world.get_min_render_y()))
-		block_material = shader_material
-	return block_material
-
-
-func _get_block_atlas_texture() -> Texture2D:
-	if block_atlas_texture != null:
-		return block_atlas_texture
-	var image := Image.new()
-	var err := image.load(BLOCK_ATLAS_PATH)
-	if err != OK:
-		push_warning("Block atlas load failed: %s (%d)" % [BLOCK_ATLAS_PATH, err])
-		return null
-	block_atlas_texture = ImageTexture.create_from_image(image)
-	return block_atlas_texture
+	return material_helper.get_block_material()
 
 
 func set_top_render_y(value: int) -> void:
-	var mat := get_block_material()
-	if mat is ShaderMaterial:
-		var shader_material := mat as ShaderMaterial
-		shader_material.set_shader_parameter("top_render_y", float(value))
-		if world != null:
-			shader_material.set_shader_parameter("min_render_y", float(world.get_min_render_y()))
+	material_helper.set_top_render_y(value)
 	if overlay_renderer != null:
 		overlay_renderer.set_top_render_y(value)
 
 
 func set_min_render_y(value: int) -> void:
-	var mat := get_block_material()
-	if mat is ShaderMaterial:
-		var shader_material := mat as ShaderMaterial
-		shader_material.set_shader_parameter("min_render_y", float(value))
+	material_helper.set_min_render_y(value)
 
 
 func toggle_debug_normals() -> void:
-	debug_normals_enabled = not debug_normals_enabled
-	var mat := get_block_material()
-	if mat is ShaderMaterial:
-		var shader_material := mat as ShaderMaterial
-		shader_material.shader = BlockTerrainDebugShader if debug_normals_enabled else BlockTerrainShader
-		if world != null:
-			shader_material.set_shader_parameter("top_render_y", float(world.top_render_y))
-			shader_material.set_shader_parameter("min_render_y", float(world.get_min_render_y()))
+	material_helper.toggle_debug_normals()
 #endregion
 
 
