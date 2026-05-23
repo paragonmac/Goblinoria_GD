@@ -4,7 +4,7 @@ This document records the current runtime shape during housekeeping refactors. I
 
 ## Startup And Main Loop
 
-`Main.gd` is the scene coordinator. It owns controller setup, menu actions, startup/load flows, and per-frame orchestration. Loading-screen UI is delegated to `MainLoadingController`; render-Y readiness, Y prewarm, and background warmup are delegated to `MainRenderLevelController`; Y-transition CSV row construction is delegated to `MainYTransitionProfiler`.
+`Main.gd` is the scene coordinator. It owns controller setup, menu actions, startup/load flows, and per-frame orchestration. Loading-screen UI is delegated to `MainLoadingController`; render-Y readiness, Y prewarm, and background warmup are delegated to `MainRenderLevelController`; render-level chunk target construction is delegated to `MainRenderLevelTargetBuilder`; Y-transition CSV row construction is delegated to `MainYTransitionProfiler`.
 
 Normal frame flow is:
 
@@ -49,7 +49,7 @@ Mesh-cache failures are non-fatal. Missing, stale, corrupt, or version-mismatche
 
 Interactive render-Y changes use a viewport-bounded readiness gate in `MainRenderLevelController`:
 
-1. Build mesh targets from camera-visible chunk bounds plus safety margin.
+1. Build mesh targets from camera-visible chunk bounds plus safety margin through `MainRenderLevelTargetBuilder`.
 2. Build generation targets for the mesh bands and neighbor bands.
 3. Request chunk generation/load and mesh builds until those bounded targets are ready.
 4. Build one Y-transition CSV row through `MainYTransitionProfiler` and log it through `DebugOverlay`.
