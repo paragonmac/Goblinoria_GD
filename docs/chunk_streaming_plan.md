@@ -3,7 +3,7 @@
 This is the working plan for chunked storage, streaming, and persistence.
 
 ## Goals
-- Chunked in-memory storage (no full-world array).
+- Finite chunked in-memory storage (no full-world array).
 - Deterministic on-demand generation (seed + coord).
 - Versioned save/load with explicit mismatch detection.
 - Streaming with load priorities and unload policy.
@@ -13,8 +13,13 @@ This is the working plan for chunked storage, streaming, and persistence.
 - Block ID is the master key (u8).
 - Block properties are lookup-table driven (CSV -> registry).
 - Old save formats must be detectable (no silent corruption).
-- No greedy meshing for now.
-- Infinite world streaming requires signed chunk coords and negative-safe coordinate math.
+- Cube blocks use greedy meshing; ramp/stair blocks still use the face-by-face mesher.
+- Renderer debug stats track emitted vertices/triangles, greedy source-vs-emitted faces, ramp faces, mesh cache hits/misses/imports, and build/upload time before higher-risk rendering changes.
+- Render-level transitions write `user://diagnostics/y_transition_profile_*.csv` rows so blocked Y changes can be diagnosed before choosing a vertical prewarm strategy.
+- Render-level reveal readiness is viewport-bounded to the visible view plus a 1-chunk X/Z margin; directional Y prewarm handles the broader buffered bounds in the background.
+- Current scope is a finite 32x32x32 chunk world centered on origin; signed chunk coords and negative-safe coordinate math are still required for the negative half of the map.
+- Hard invisible bounds prevent generation, selection, pathing, camera movement, and streaming outside the finite X/Z rectangle.
+- The title-screen/menu checkbox `Generate and cache full map` controls `Main.generate_full_map_on_startup`: off keeps startup to the limited streamed view, while on runs the parallel arena cooker to generate every finite chunk and raw full-chunk mesh cache before reveal.
 
 ## Phase 0: Coord Math Fixes
 - [x] Add `floor_div()` and `positive_mod()` helpers for negative-safe chunk math.
@@ -44,7 +49,7 @@ This is the working plan for chunked storage, streaming, and persistence.
 - [x] Data payload: blocks as `u8` (compressed or raw).
 - [x] Implement `serialize_chunk()` / `deserialize_chunk()` with version checks.
 - [ ] Add migration stub (future).
-- [ ] Consider simple compression for sparse chunks (RLE or Godot Compression).
+- [x] Bulk save compression: `world_blocks.dat` v2 stores fill chunks, raw chunks, or ZSTD-compressed chunks and still reads the previous raw bulk layout.
 
 ## Milestone 4: Disk-Backed Cache (Save on Unload)
 - [x] File path scheme: `user://saves/<world_id>/chunks/x_y_z.chunk`.
@@ -62,7 +67,8 @@ This is the working plan for chunked storage, streaming, and persistence.
 - [x] Prioritize render zone loads before buffer zone loads.
 - [ ] Prevent starvation (age bump).
 - [x] Cancel queued loads for chunks that leave range (queue reset on range change).
-- [x] Remove clampi/bounds logic in `world_streaming.gd` and `world.gd` for X/Z.
+- [x] Clamp X/Z streaming and world access to the finite 32x32 chunk map scope.
+- [x] Add a user-settable startup flag to choose limited streaming or whole finite-map generation.
 
 ## Zone Configuration
 - [x] Define constants: render radius, buffer (base/max), unload radius.
@@ -70,19 +76,24 @@ This is the working plan for chunked storage, streaming, and persistence.
 - [x] Buffer zone: meshed and cached, but `visible = false`.
 - [x] Unload zone: chunks outside `UNLOAD_RADIUS` are candidates for unload.
 - [x] View-scaled buffer expansion for stream/render bounds.
+- [x] Vertical streaming uses a centered render-level margin of +/-20 blocks, rounded to chunk boundaries.
+- [x] Y-level reveal gate prepares only the camera-visible bounds plus a 1-chunk X/Z safety margin.
+- [x] Directional Y prewarm queues the next chunk-height ahead using broader buffered render bounds.
+- [x] New-world full-map mode uses the arena cooker: parallel block generation, parallel raw mesh-cache builds, frame-budgeted merge, and a diagnostics CSV under `user://diagnostics`.
+- [ ] Tighten the blocking Y-level reveal gate to the actual visible chunk set, targeting roughly 100 chunks at max zoom instead of the current axis-aligned camera rectangle.
 
 ## Milestone 6: Render Streaming Tied to Chunk State
 - [x] Mesh state per chunk: `NONE | PENDING | READY`.
 - [x] Only mesh when chunk is loaded + in stream range (render + buffer).
 - [x] Clear mesh on unload.
 - [x] Rebuild neighbor meshes when block edits hit chunk edges.
-- [ ] Require neighbor data before meshing to avoid seams.
-- [ ] If meshing without neighbors, re-mesh chunks when neighbors load.
-- [ ] Track neighbor-triggered remesh in `pending_neighbor_remesh: Dictionary`.
+- [x] Track missing neighbor data when meshing and remesh affected chunks when those neighbors load.
+- [x] Track neighbor-triggered remesh in `pending_neighbor_remesh: Dictionary`.
+- [ ] Decide whether to delay visible meshing until all valid neighbors are loaded, or keep current quick mesh + refresh behavior.
 
 ## Milestone 7: Compression (Per Chunk)
-- [ ] Use Godot compression or LZ4.
-- [ ] Store compression flag in header.
+- [x] Use Godot ZSTD compression for normal bulk chunk payloads when it beats raw storage.
+- [x] Store per-entry kind/compression flags in the bulk block file.
 - [ ] Benchmark CPU vs disk savings.
 
 ## Milestone 8: Async IO
@@ -100,6 +111,17 @@ This is the working plan for chunked storage, streaming, and persistence.
 - [x] Snapshot chunk + neighbor data (thread-safe).
 - [x] Mesh in worker thread, apply mesh on main thread.
 - [x] Invalidate if chunk changes during mesh.
+- [x] Build mesh jobs from a padded chunk-plus-border block buffer.
+- [x] Greedy mesh normal cube blocks first; keep ramp/stair blocks on the existing face path.
+- [x] Preserve per-block atlas tiling on greedy quads through shader-side repeat UV decoding.
+- [x] Expose mesh geometry and cache metrics through the debug streaming HUD and CSV capture.
+- [x] Store mesh cache as raw packed arrays and create `ArrayMesh` lazily only when a chunk becomes visible.
+
+## Milestone 11: Higher-Risk Rendering Optimizations
+- [ ] Use debug metrics to decide whether packed custom vertex data is worth the shader complexity.
+- [x] Add bounded chunk `MeshInstance3D` pooling to reduce allocation/free churn during streaming.
+- [ ] Use debug metrics and chunk node pool stats to decide whether SceneTree chunk instance overhead justifies a RenderingServer migration.
+- [ ] Keep current ArrayMesh output path until vertex count, triangle count, upload time, or node overhead is measured as the next bottleneck.
 
 ## Open Decisions
 - Chunk size (current: 8).

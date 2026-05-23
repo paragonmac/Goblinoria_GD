@@ -37,6 +37,57 @@ const STREAMING_CAPTURE_INTERVAL := 0.25
 const DEBUG_POLL_INTERVAL_SEC := 0.25
 const DEBUG_TIMINGS_LOG_INTERVAL_SEC := 0.5
 const MAP_EXPORT_RADIUS := 64
+const Y_TRANSITION_PROFILE_DIR := "user://diagnostics"
+const Y_TRANSITION_PROFILE_COLUMNS := [
+	"t_ms",
+	"from_y",
+	"target_y",
+	"delta",
+	"target_chunk_y",
+	"blocked",
+	"mesh_total",
+	"mesh_ready_before",
+	"mesh_ready_after",
+	"generation_total",
+	"generation_ready_before",
+	"generation_ready_after",
+	"request_ms",
+	"generation_load_ms",
+	"mesh_wait_ms",
+	"total_blocked_ms",
+	"frames_waited",
+	"generator_queued_before",
+	"generator_results_before",
+	"generator_active_before",
+	"generator_queued_after",
+	"generator_results_after",
+	"generator_active_after",
+	"stream_build_queue_before",
+	"stream_pending_before",
+	"stream_min_y_before",
+	"stream_max_y_before",
+	"stream_build_queue_after",
+	"stream_pending_after",
+	"stream_min_y_after",
+	"stream_max_y_after",
+	"mesh_job_queue_before",
+	"mesh_result_queue_before",
+	"mesh_job_set_before",
+	"mesh_prefetch_set_before",
+	"mesh_job_queue_after",
+	"mesh_result_queue_after",
+	"mesh_job_set_after",
+	"mesh_prefetch_set_after",
+	"mesh_cache_hits_delta",
+	"mesh_cache_misses_delta",
+	"mesh_cache_imports_delta",
+	"mesh_build_ms_delta",
+	"mesh_upload_ms_delta",
+	"loaded_chunks_before",
+	"loaded_chunks_after",
+	"mem_static_mb_before",
+	"mem_static_mb_after",
+]
 #endregion
 
 #region Capture State
@@ -44,6 +95,8 @@ var streaming_capture_timer: float = 0.0
 var streaming_capture_start_ms: int = 0
 var streaming_capture_path := ""
 var streaming_capture_lines: Array = []
+var y_transition_profile_path := ""
+var y_transition_profile_file: FileAccess
 var debug_timings_log_path := ""
 var last_debug_timings_log_ms: int = 0
 var last_draw_burden_ms: int = 0
@@ -58,6 +111,12 @@ func _ready() -> void:
 	setup_draw_burden_label()
 	setup_streaming_stats_label()
 	setup_debug_timings_label()
+
+
+func _exit_tree() -> void:
+	if y_transition_profile_file != null:
+		y_transition_profile_file.flush()
+		y_transition_profile_file = null
 #endregion
 
 
@@ -198,12 +257,20 @@ func update_draw_burden() -> void:
 	var meshed: int = int(stats.get("meshed", 0))
 	var visible_count: int = int(stats.get("visible", 0))
 	var zone: int = int(stats.get("zone", 0))
+	var node_active: int = int(stats.get("chunk_node_active", 0))
+	var node_pooled: int = int(stats.get("chunk_node_pooled", 0))
+	var node_pool_max: int = int(stats.get("chunk_node_pool_max", 0))
+	var node_reused: int = int(stats.get("chunk_node_reused", 0))
 	draw_burden_label.text = "Chunks Loaded/Meshed: %d/%d" % [loaded, meshed]
 	draw_rendered_label.text = "Chunks Visible/Zone: %d/%d" % [visible_count, zone]
 
 	var static_mem: float = float(Performance.get_monitor(Performance.MEMORY_STATIC))
-	draw_memory_label.text = "Memory: static %.1f MB" % [
+	draw_memory_label.text = "Memory: static %.1f MB | Nodes a:%d p:%d/%d r:%d" % [
 		static_mem / 1048576.0,
+		node_active,
+		node_pooled,
+		node_pool_max,
+		node_reused,
 	]
 #endregion
 
@@ -217,14 +284,38 @@ func update_streaming_stats() -> void:
 		return
 	last_streaming_stats_ms = Time.get_ticks_msec()
 	var stats := _collect_streaming_stats()
-	streaming_stats_label.text = "Streaming chunks:%d build:%d pending:%s\nMesh q:%d res:%d act:%d pre:%d\nRadii s:%d r:%d u:%d\nBuffer %d (base %d max %d)" % [
+	streaming_stats_label.text = "Streaming chunks:%d build:%d pending:%s y:%d..%d\nMesh q:%d res:%d act:%d pre:%d nbr:%d/%d q:%d\nNodes a:%d p:%d/%d new:%d reuse:%d free:%d\nGeo v:%d tri:%d faces:%d/%d\nGreedy %d/%d saved:%.0f%% ramp:%d\nCache h:%d m:%d i:%d ms:%.0f/%.0f\nRadii s:%d r:%d u:%d\nBuffer %d (base %d max %d)" % [
 		int(stats["loaded_chunks"]),
 		int(stats["build_queue"]),
 		"true" if int(stats["stream_pending"]) != 0 else "false",
+		int(stats["stream_min_y"]),
+		int(stats["stream_max_y"]),
 		int(stats["mesh_job_queue"]),
 		int(stats["mesh_result_queue"]),
 		int(stats["mesh_job_set"]),
 		int(stats["mesh_prefetch_set"]),
+		int(stats["pending_neighbor_remesh_chunks"]),
+		int(stats["pending_neighbor_remesh_dependents"]),
+		int(stats["neighbor_remesh_queued"]),
+		int(stats["chunk_node_active"]),
+		int(stats["chunk_node_pooled"]),
+		int(stats["chunk_node_pool_max"]),
+		int(stats["chunk_node_created"]),
+		int(stats["chunk_node_reused"]),
+		int(stats["chunk_node_freed"]),
+		int(stats["mesh_vertices"]),
+		int(stats["mesh_triangles"]),
+		int(stats["mesh_visible_faces"]),
+		int(stats["mesh_occluded_faces"]),
+		int(stats["greedy_visible_faces"]),
+		int(stats["greedy_source_visible_faces"]),
+		float(stats["greedy_reduction_percent"]),
+		int(stats["ramp_visible_faces"]),
+		int(stats["mesh_cache_hits"]),
+		int(stats["mesh_cache_misses"]),
+		int(stats["mesh_cache_imports"]),
+		float(stats["mesh_build_ms"]),
+		float(stats["mesh_upload_ms"]),
 		int(stats["stream_radius"]),
 		int(stats["render_radius"]),
 		int(stats["unload_radius"]),
@@ -251,32 +342,57 @@ func update_streaming_capture(dt: float) -> void:
 	var mem_static: float = float(Performance.get_monitor(Performance.MEMORY_STATIC)) / 1048576.0
 	var now_ms: int = Time.get_ticks_msec() - streaming_capture_start_ms
 	var overlay_positions_str := _format_overlay_positions(overlay_stats)
-	var line := "%d,%.2f,%.2f,%.2f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.2f,%d,%d,%d,%d,\"%s\"" % [
-		now_ms,
-		cam_pos.x,
-		cam_pos.y,
-		cam_pos.z,
-		int(stats["top_render_y"]),
-		int(stats["loaded_chunks"]),
-		int(stats["build_queue"]),
-		int(stats["stream_pending"]),
-		int(stats["stream_radius"]),
-		int(stats["render_radius"]),
-		int(stats["unload_radius"]),
-		int(stats["buffer_last"]),
-		int(stats["buffer_base"]),
-		int(stats["buffer_max"]),
-		int(stats["mesh_job_queue"]),
-		int(stats["mesh_result_queue"]),
-		int(stats["mesh_job_set"]),
-		int(stats["mesh_prefetch_set"]),
-		mem_static,
-		int(overlay_stats.get("drag_count", 0)),
-		int(overlay_stats.get("drag_visible_count", 0)),
-		int(overlay_stats.get("task_count", 0)),
-		int(overlay_stats.get("task_visible_count", 0)),
-		overlay_positions_str,
+	var csv_parts: Array = [
+		str(now_ms),
+		"%.2f" % cam_pos.x,
+		"%.2f" % cam_pos.y,
+		"%.2f" % cam_pos.z,
+		str(int(stats["top_render_y"])),
+		str(int(stats["loaded_chunks"])),
+		str(int(stats["build_queue"])),
+		str(int(stats["stream_pending"])),
+		str(int(stats["stream_min_y"])),
+		str(int(stats["stream_max_y"])),
+		str(int(stats["stream_radius"])),
+		str(int(stats["render_radius"])),
+		str(int(stats["unload_radius"])),
+		str(int(stats["buffer_last"])),
+		str(int(stats["buffer_base"])),
+		str(int(stats["buffer_max"])),
+		str(int(stats["mesh_job_queue"])),
+		str(int(stats["mesh_result_queue"])),
+		str(int(stats["mesh_job_set"])),
+		str(int(stats["mesh_prefetch_set"])),
+		str(int(stats["pending_neighbor_remesh_chunks"])),
+		str(int(stats["pending_neighbor_remesh_dependents"])),
+		str(int(stats["neighbor_remesh_queued"])),
+		str(int(stats["chunk_node_active"])),
+		str(int(stats["chunk_node_pooled"])),
+		str(int(stats["chunk_node_pool_max"])),
+		str(int(stats["chunk_node_created"])),
+		str(int(stats["chunk_node_reused"])),
+		str(int(stats["chunk_node_freed"])),
+		str(int(stats["mesh_vertices"])),
+		str(int(stats["mesh_triangles"])),
+		str(int(stats["mesh_visible_faces"])),
+		str(int(stats["mesh_occluded_faces"])),
+		str(int(stats["greedy_visible_faces"])),
+		str(int(stats["greedy_source_visible_faces"])),
+		"%.2f" % float(stats["greedy_reduction_percent"]),
+		str(int(stats["ramp_visible_faces"])),
+		str(int(stats["mesh_cache_hits"])),
+		str(int(stats["mesh_cache_misses"])),
+		str(int(stats["mesh_cache_imports"])),
+		"%.2f" % float(stats["mesh_build_ms"]),
+		"%.2f" % float(stats["mesh_upload_ms"]),
+		"%.2f" % mem_static,
+		str(int(overlay_stats.get("drag_count", 0))),
+		str(int(overlay_stats.get("drag_visible_count", 0))),
+		str(int(overlay_stats.get("task_count", 0))),
+		str(int(overlay_stats.get("task_visible_count", 0))),
 	]
+	var escaped_overlay_positions := overlay_positions_str.replace("\"", "\"\"")
+	var line := "%s,\"%s\"" % [",".join(csv_parts), escaped_overlay_positions]
 	streaming_capture_lines.append(line)
 
 
@@ -285,7 +401,7 @@ func _start_streaming_capture() -> void:
 	streaming_capture_start_ms = Time.get_ticks_msec()
 	streaming_capture_lines.clear()
 	streaming_capture_path = "user://streaming_capture_%d.csv" % streaming_capture_start_ms
-	streaming_capture_lines.append("t_ms,cam_x,cam_y,cam_z,top_render_y,loaded_chunks,build_queue,stream_pending,stream_radius,render_radius,unload_radius,buffer_last,buffer_base,buffer_max,mesh_job_queue,mesh_result_queue,mesh_job_set,mesh_prefetch_set,mem_static_mb,drag_count,drag_visible,task_count,task_visible,overlay_positions")
+	streaming_capture_lines.append("t_ms,cam_x,cam_y,cam_z,top_render_y,loaded_chunks,build_queue,stream_pending,stream_min_y,stream_max_y,stream_radius,render_radius,unload_radius,buffer_last,buffer_base,buffer_max,mesh_job_queue,mesh_result_queue,mesh_job_set,mesh_prefetch_set,pending_neighbor_remesh_chunks,pending_neighbor_remesh_dependents,neighbor_remesh_queued,chunk_node_active,chunk_node_pooled,chunk_node_pool_max,chunk_node_created,chunk_node_reused,chunk_node_freed,mesh_vertices,mesh_triangles,mesh_visible_faces,mesh_occluded_faces,greedy_visible_faces,greedy_source_visible_faces,greedy_reduction_percent,ramp_visible_faces,mesh_cache_hits,mesh_cache_misses,mesh_cache_imports,mesh_build_ms,mesh_upload_ms,mem_static_mb,drag_count,drag_visible,task_count,task_visible,overlay_positions")
 	print("Streaming capture started: %s" % streaming_capture_path)
 
 
@@ -301,6 +417,42 @@ func _stop_streaming_capture() -> void:
 	print("Streaming capture saved: %s" % streaming_capture_path)
 	streaming_capture_lines.clear()
 	streaming_capture_path = ""
+
+
+func record_y_transition(row: Dictionary) -> void:
+	if not _ensure_y_transition_profile_file():
+		return
+	var values: Array = []
+	for column in Y_TRANSITION_PROFILE_COLUMNS:
+		values.append(_csv_escape(row.get(column, "")))
+	y_transition_profile_file.store_line(",".join(values))
+	y_transition_profile_file.flush()
+
+
+func _ensure_y_transition_profile_file() -> bool:
+	if y_transition_profile_file != null:
+		return true
+	var result := DirAccess.make_dir_recursive_absolute(Y_TRANSITION_PROFILE_DIR)
+	if result != OK:
+		push_warning("Y transition profile directory failed: %s" % Y_TRANSITION_PROFILE_DIR)
+		return false
+	var stamp := Time.get_datetime_string_from_system().replace(":", "-").replace(" ", "_")
+	y_transition_profile_path = "%s/y_transition_profile_%s.csv" % [Y_TRANSITION_PROFILE_DIR, stamp]
+	y_transition_profile_file = FileAccess.open(y_transition_profile_path, FileAccess.WRITE)
+	if y_transition_profile_file == null:
+		push_warning("Y transition profile failed: %s" % y_transition_profile_path)
+		return false
+	y_transition_profile_file.store_line(",".join(Y_TRANSITION_PROFILE_COLUMNS))
+	y_transition_profile_file.flush()
+	print("Y transition profile: %s" % ProjectSettings.globalize_path(y_transition_profile_path))
+	return true
+
+
+func _csv_escape(value: Variant) -> String:
+	var text := str(value)
+	if text.contains("\"") or text.contains(",") or text.contains("\n"):
+		return "\"%s\"" % text.replace("\"", "\"\"")
+	return text
 
 
 func _collect_overlay_stats() -> Dictionary:
@@ -354,6 +506,8 @@ func _collect_streaming_stats() -> Dictionary:
 		"loaded_chunks": 0,
 		"build_queue": 0,
 		"stream_pending": 0,
+		"stream_min_y": 0,
+		"stream_max_y": 0,
 		"stream_radius": 0,
 		"render_radius": 0,
 		"unload_radius": 0,
@@ -364,6 +518,30 @@ func _collect_streaming_stats() -> Dictionary:
 		"mesh_result_queue": 0,
 		"mesh_job_set": 0,
 		"mesh_prefetch_set": 0,
+		"pending_neighbor_remesh_chunks": 0,
+		"pending_neighbor_remesh_dependents": 0,
+		"neighbor_remesh_queued": 0,
+		"chunk_node_active": 0,
+		"chunk_node_pooled": 0,
+		"chunk_node_pool_max": 0,
+		"chunk_node_created": 0,
+		"chunk_node_reused": 0,
+		"chunk_node_freed": 0,
+		"mesh_vertices": 0,
+		"mesh_triangles": 0,
+		"mesh_visible_faces": 0,
+		"mesh_occluded_faces": 0,
+		"greedy_visible_faces": 0,
+		"greedy_occluded_faces": 0,
+		"greedy_source_visible_faces": 0,
+		"greedy_reduction_percent": 0.0,
+		"ramp_visible_faces": 0,
+		"ramp_occluded_faces": 0,
+		"mesh_cache_hits": 0,
+		"mesh_cache_misses": 0,
+		"mesh_cache_imports": 0,
+		"mesh_build_ms": 0.0,
+		"mesh_upload_ms": 0.0,
 	}
 	if world == null:
 		return stats
@@ -373,6 +551,12 @@ func _collect_streaming_stats() -> Dictionary:
 		var streaming: WorldStreaming = world.streaming
 		stats["build_queue"] = streaming.chunk_build_queue.size()
 		stats["stream_pending"] = 1 if streaming.stream_pending else 0
+		if streaming.stream_min_y == streaming.DUMMY_INT:
+			stats["stream_min_y"] = 0
+			stats["stream_max_y"] = 0
+		else:
+			stats["stream_min_y"] = streaming.stream_min_y * World.CHUNK_SIZE
+			stats["stream_max_y"] = ((streaming.stream_max_y + 1) * World.CHUNK_SIZE) - 1
 		stats["stream_radius"] = streaming.stream_radius_chunks
 		stats["render_radius"] = streaming.render_radius_chunks
 		stats["unload_radius"] = streaming.unload_radius_chunks
@@ -380,11 +564,36 @@ func _collect_streaming_stats() -> Dictionary:
 		stats["buffer_max"] = streaming.stream_max_buffer_chunks
 		stats["buffer_last"] = streaming.last_buffer_chunks
 	if world.renderer != null:
+		var chunk_stats: Dictionary = world.renderer.get_chunk_draw_stats()
+		stats["chunk_node_active"] = int(chunk_stats.get("chunk_node_active", 0))
+		stats["chunk_node_pooled"] = int(chunk_stats.get("chunk_node_pooled", 0))
+		stats["chunk_node_pool_max"] = int(chunk_stats.get("chunk_node_pool_max", 0))
+		stats["chunk_node_created"] = int(chunk_stats.get("chunk_node_created", 0))
+		stats["chunk_node_reused"] = int(chunk_stats.get("chunk_node_reused", 0))
+		stats["chunk_node_freed"] = int(chunk_stats.get("chunk_node_freed", 0))
 		var mesh_stats: Dictionary = world.renderer.get_mesh_work_stats()
 		stats["mesh_job_queue"] = int(mesh_stats.get("job_queue", 0))
 		stats["mesh_result_queue"] = int(mesh_stats.get("result_queue", 0))
 		stats["mesh_job_set"] = int(mesh_stats.get("job_set", 0))
 		stats["mesh_prefetch_set"] = int(mesh_stats.get("prefetch_set", 0))
+		stats["pending_neighbor_remesh_chunks"] = int(mesh_stats.get("pending_neighbor_remesh_chunks", 0))
+		stats["pending_neighbor_remesh_dependents"] = int(mesh_stats.get("pending_neighbor_remesh_dependents", 0))
+		stats["neighbor_remesh_queued"] = int(mesh_stats.get("neighbor_remesh_queued", 0))
+		stats["mesh_vertices"] = int(mesh_stats.get("vertices", 0))
+		stats["mesh_triangles"] = int(mesh_stats.get("triangles", 0))
+		stats["mesh_visible_faces"] = int(mesh_stats.get("visible_faces", 0))
+		stats["mesh_occluded_faces"] = int(mesh_stats.get("occluded_faces", 0))
+		stats["greedy_visible_faces"] = int(mesh_stats.get("greedy_visible_faces", 0))
+		stats["greedy_occluded_faces"] = int(mesh_stats.get("greedy_occluded_faces", 0))
+		stats["greedy_source_visible_faces"] = int(mesh_stats.get("greedy_source_visible_faces", 0))
+		stats["greedy_reduction_percent"] = float(mesh_stats.get("greedy_reduction_percent", 0.0))
+		stats["ramp_visible_faces"] = int(mesh_stats.get("ramp_visible_faces", 0))
+		stats["ramp_occluded_faces"] = int(mesh_stats.get("ramp_occluded_faces", 0))
+		stats["mesh_cache_hits"] = int(mesh_stats.get("cache_hits", 0))
+		stats["mesh_cache_misses"] = int(mesh_stats.get("cache_misses", 0))
+		stats["mesh_cache_imports"] = int(mesh_stats.get("cache_imports", 0))
+		stats["mesh_build_ms"] = float(mesh_stats.get("mesh_build_ms", 0.0))
+		stats["mesh_upload_ms"] = float(mesh_stats.get("mesh_upload_ms", 0.0))
 	return stats
 
 
@@ -657,10 +866,10 @@ func export_map_snapshot(radius: int = MAP_EXPORT_RADIUS, loaded_only: bool = tr
 			loaded_columns[Vector2i(coord.x, coord.z)] = true
 
 	var chunk_size: int = World.CHUNK_SIZE
-	var min_x: int = center.x - radius
-	var max_x: int = center.x + radius
-	var min_z: int = center.z - radius
-	var max_z: int = center.z + radius
+	var min_x: int = clampi(center.x - radius, World.WORLD_MIN_BLOCK_X, World.WORLD_MAX_BLOCK_X)
+	var max_x: int = clampi(center.x + radius, World.WORLD_MIN_BLOCK_X, World.WORLD_MAX_BLOCK_X)
+	var min_z: int = clampi(center.z - radius, World.WORLD_MIN_BLOCK_Z, World.WORLD_MAX_BLOCK_Z)
+	var max_z: int = clampi(center.z + radius, World.WORLD_MIN_BLOCK_Z, World.WORLD_MAX_BLOCK_Z)
 	for x in range(min_x, max_x + 1):
 		var cx: int = world.floor_div(x, chunk_size)
 		for z in range(min_z, max_z + 1):

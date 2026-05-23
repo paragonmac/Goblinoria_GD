@@ -77,6 +77,8 @@ func mix_seed(value: int) -> int:
 
 #region Chunk Generation
 func generate_chunk(coord: Vector3i, chunk: World.ChunkDataType) -> void:
+	if not world.is_chunk_coord_valid(coord):
+		return
 	var chunk_size: int = World.CHUNK_SIZE
 	var base_y: int = coord.y * chunk_size
 	var max_height: int = min(world.sea_level + MAX_HEIGHT_AMPLITUDE, world.world_size_y - 1)
@@ -123,24 +125,30 @@ func prime_spawn_chunks() -> void:
 
 
 #region Async Generation
-func queue_chunk_generation(coord: Vector3i, high_priority: bool = false) -> bool:
+func queue_chunk_generation(coord: Vector3i, high_priority: bool = false, queue_mesh_on_complete: bool = true) -> bool:
+	if not world.is_chunk_coord_valid(coord):
+		return false
 	generation_mutex.lock()
 	if generation_job_set.has(coord):
 		var existing_prio: int = int(generation_job_set.get(coord, 0))
-		if high_priority and existing_prio < 2:
-			generation_job_set[coord] = 2
-			for i in range(generation_job_queue.size()):
-				var job: Dictionary = generation_job_queue[i]
-				var job_coord: Vector3i = job.get("coord", Vector3i.ZERO)
-				if job_coord == coord:
+		for i in range(generation_job_queue.size()):
+			var job: Dictionary = generation_job_queue[i]
+			var job_coord: Vector3i = job.get("coord", Vector3i.ZERO)
+			if job_coord == coord:
+				if queue_mesh_on_complete:
+					job["queue_mesh_on_complete"] = true
+				if high_priority and existing_prio < 2:
+					generation_job_set[coord] = 2
 					job["high_priority"] = true
 					generation_job_queue.remove_at(i)
 					generation_job_queue.insert(0, job)
-					break
-			generation_mutex.unlock()
+				else:
+					generation_job_queue[i] = job
+				break
+		generation_mutex.unlock()
+		if high_priority and existing_prio < 2:
 			generation_semaphore.post()
 			return true
-		generation_mutex.unlock()
 		return false
 	if not generation_thread_running:
 		_start_generation_thread()
@@ -156,6 +164,7 @@ func queue_chunk_generation(coord: Vector3i, high_priority: bool = false) -> boo
 		"block_id_grass": World.BLOCK_ID_GRASS,
 		"block_id_dirt": World.BLOCK_ID_DIRT,
 		"high_priority": high_priority,
+		"queue_mesh_on_complete": queue_mesh_on_complete,
 	}
 	generation_job_set[coord] = 2 if high_priority else 1
 	if high_priority:
@@ -196,7 +205,9 @@ func process_generation_results(budget: int) -> int:
 		chunk.dirty = false
 		chunk.mesh_state = ChunkData.MESH_STATE_NONE
 		world.touch_chunk(chunk)
-		if world.renderer != null:
+		world.notify_chunk_loaded(coord)
+		var queue_mesh_on_complete: bool = bool(result.get("queue_mesh_on_complete", true))
+		if queue_mesh_on_complete and world.renderer != null:
 			var high_priority: bool = bool(result.get("high_priority", false))
 			world.renderer.queue_chunk_mesh_build(coord, -1, false, high_priority)
 		_clear_generation_job(coord)
@@ -270,6 +281,7 @@ func _generation_thread_main() -> void:
 			"blocks": blocks,
 			"epoch": job.get("epoch", 0),
 			"high_priority": bool(job.get("high_priority", false)),
+			"queue_mesh_on_complete": bool(job.get("queue_mesh_on_complete", true)),
 		}
 		generation_mutex.lock()
 		generation_active -= 1

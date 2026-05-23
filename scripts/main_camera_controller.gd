@@ -23,6 +23,7 @@ const DUMMY_FLOAT := 666.0
 #region State
 var camera: Camera3D
 var viewport: Viewport
+var world_ref: World
 
 var cam_speed := CAM_SPEED_DEFAULT
 var cam_fast_multiplier := CAM_FAST_MULTIPLIER_DEFAULT
@@ -52,6 +53,7 @@ func reset_mouse_state() -> void:
 func setup_camera(world: World) -> void:
 	if camera == null:
 		return
+	world_ref = world
 	var center := Vector3(0.0, world.top_render_y, 0.0)
 	camera.position = center + CAMERA_OFFSET
 	camera.projection = Camera3D.PROJECTION_ORTHOGONAL
@@ -66,12 +68,14 @@ func setup_camera(world: World) -> void:
 	var base_span := float(base_radius * World.CHUNK_SIZE * 2 + World.CHUNK_SIZE)
 	cam_zoom_max = max(CAMERA_ORTHO_SIZE_DEFAULT, base_span * CAMERA_ORTHO_SIZE_MULT * CAMERA_ZOOM_MAX_MULT)
 	_apply_isometric_rotation()
+	_clamp_camera_to_world()
 
 
 func update_camera(dt: float) -> void:
 	_apply_isometric_rotation()
 	_update_camera_pan()
 	_update_camera_keyboard_movement(dt)
+	_clamp_camera_to_world()
 
 
 func handle_zoom_input(event: InputEvent) -> void:
@@ -198,6 +202,15 @@ func _update_camera_keyboard_movement(dt: float) -> void:
 	if Input.is_key_pressed(KEY_SHIFT):
 		speed *= cam_fast_multiplier
 	camera.position += move_dir.normalized() * speed * dt
+
+
+func _clamp_camera_to_world() -> void:
+	if camera == null or world_ref == null:
+		return
+	var target := get_stream_target(float(world_ref.top_render_y))
+	var clamped := world_ref.clamp_block_xz(target)
+	camera.position.x += clamped.x - target.x
+	camera.position.z += clamped.z - target.z
 
 
 func _get_keyboard_movement_direction() -> Vector3:

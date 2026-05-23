@@ -9,6 +9,7 @@ var blocked_tasks: Array = []
 var blocked_recheck_timer := 1.0
 var reassign_timer := 1.0
 const REASSIGN_INTERVAL := 1.0
+const BLOCKED_RECHECK_INTERVAL := 0.5
 const BLOCKED_RECHECK_BUDGET := 8
 #endregion
 
@@ -29,7 +30,7 @@ func update_blocked_tasks(dt: float) -> void:
 	blocked_recheck_timer -= dt
 	if blocked_recheck_timer <= 0.0:
 		recheck_blocked_tasks()
-		blocked_recheck_timer = 0.5
+		blocked_recheck_timer = BLOCKED_RECHECK_INTERVAL
 
 
 func update_reassign_tasks(dt: float) -> void:
@@ -58,6 +59,8 @@ func reassess_waiting_tasks() -> void:
 
 #region Task Queueing
 func queue_task_request(task_type: int, pos: Vector3i, material: int) -> void:
+	if world == null or not world.is_block_coord_valid(pos.x, pos.y, pos.z):
+		return
 	if is_task_already_queued(task_type, pos):
 		return
 	# Queue task immediately without blocking pathfinding check.
@@ -98,6 +101,8 @@ func recheck_blocked_tasks() -> void:
 #region Accessibility Checking
 func is_task_accessible(task_type: int, pos: Vector3i) -> bool:
 	if world == null or world.workers.is_empty():
+		return false
+	if not world.is_block_coord_valid(pos.x, pos.y, pos.z):
 		return false
 	for worker: Worker in world.workers:
 		var start: Vector3i = worker.get_block_coord()

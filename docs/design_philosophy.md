@@ -17,7 +17,7 @@ Toolchain-agnostic design intent for the project. The original Zig-era context h
 - **Deterministic sim:** fixed timestep; non-blocking asset loading is a long-term goal.
 
 ## Key Design Decisions (Carry Forward)
-- **Chunked world storage** with a 1-byte block ID and a static block registry table.
+- **Finite chunked world storage** with a 1-byte block ID and a static block registry table.
 - **Flat task array** (no designation wrapper).
 - **Path caching on worker** (short segments, recompute when exhausted/blocked).
 - **Pathfinding radius cap** (128 blocks) for long-distance targets.
@@ -26,5 +26,5 @@ Toolchain-agnostic design intent for the project. The original Zig-era context h
 - **Fixed timestep:** 60 Hz baseline.
 
 ## Current Divergences / Open Questions
-- **Chunk size:** current Godot prototype uses `World.CHUNK_SIZE = 8` (256^3 total via 32 chunks per axis). Treat as authoritative unless explicitly changed.
+- **World bounds:** current Godot prototype uses `World.CHUNK_SIZE = 8` and a finite 32x32x32 chunk world centered on origin (`x/z = -128..127`, `y = 0..255`). Treat as authoritative unless explicitly changed.
 - **Path caching:** design calls for short path segments; current pathfinder returns full paths.

@@ -8,7 +8,7 @@ const STREAM_QUEUE_BUDGET_DEFAULT := 100
 const STREAM_RADIUS_DEFAULT := 12
 const RENDER_RADIUS_DEFAULT := 0
 const RENDER_VIEW_SCALE_DEFAULT := 0.5
-const STREAM_HEIGHT_DEFAULT := 4
+const STREAM_VERTICAL_MARGIN_BLOCKS_DEFAULT := 20
 const STREAM_LEAD_TIME_DEFAULT := 0.4
 const STREAM_BASE_BUFFER_CHUNKS_DEFAULT := 32
 const STREAM_MAX_BUFFER_CHUNKS_DEFAULT := 128
@@ -42,7 +42,7 @@ var stream_radius_base: int = STREAM_RADIUS_DEFAULT
 var stream_radius_chunks: int = STREAM_RADIUS_DEFAULT
 var render_radius_chunks: int = RENDER_RADIUS_DEFAULT
 var render_view_scale: float = RENDER_VIEW_SCALE_DEFAULT
-var stream_height_chunks: int = STREAM_HEIGHT_DEFAULT
+var stream_vertical_margin_blocks: int = STREAM_VERTICAL_MARGIN_BLOCKS_DEFAULT
 var stream_lead_time: float = STREAM_LEAD_TIME_DEFAULT
 var stream_base_buffer_chunks: int = STREAM_BASE_BUFFER_CHUNKS_DEFAULT
 var stream_max_buffer_chunks: int = STREAM_MAX_BUFFER_CHUNKS_DEFAULT
@@ -225,8 +225,8 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
 	var center_x: float = rect.position.x + rect.size.x * 0.5
 	var center_z: float = rect.position.y + rect.size.y * 0.5
 	throttle_frame_ms = dt * 1000.0
-	_update_idle_tracking(Vector2(center_x, center_z), plane_y, dt)
-	var view_center := Vector3(center_x, plane_y, center_z)
+	var view_center: Vector3 = world.clamp_block_xz(Vector3(center_x, plane_y, center_z))
+	_update_idle_tracking(Vector2(view_center.x, view_center.z), plane_y, dt)
 	var velocity := _compute_motion(view_center, dt)
 
 	# Compute buffer region
@@ -247,16 +247,19 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
 		buffer_world_z = maxf(buffer_world_z, rect.size.y * view_scale)
 	last_buffer_chunks = int(ceil(maxf(buffer_world_x, buffer_world_z) / float(chunk_size)))
 
-	# Compute Y range
-	var max_cy: int = int(floor(float(world.top_render_y) / float(chunk_size)))
-	if max_cy < 0:
-		return
-	var min_cy: int = 0
-	if stream_height_chunks > 0:
-		min_cy = maxi(0, max_cy - stream_height_chunks + 1)
+	# Compute Y range centered on the current render level.
+	var world_max_cy: int = int(floor(float(world.world_size_y - 1) / float(chunk_size)))
+	var center_y: int = int(floor(plane_y))
+	var margin_blocks: int = maxi(stream_vertical_margin_blocks, 0)
+	var min_stream_y: int = center_y - margin_blocks
+	var max_stream_y: int = center_y + margin_blocks
+	var min_cy: int = clampi(int(floor(float(min_stream_y) / float(chunk_size))), 0, world_max_cy)
+	var max_cy: int = clampi(int(floor(float(max_stream_y) / float(chunk_size))), 0, world_max_cy)
 	var min_render_y: int = world.get_min_render_y()
 	var min_cy_limit: int = maxi(0, int(floor(float(min_render_y) / float(chunk_size))))
 	min_cy = maxi(min_cy, min_cy_limit)
+	if min_cy > max_cy:
+		return
 
 	# Compute render zone bounds
 	var render_pad: float = float(render_radius_chunks * chunk_size)
@@ -274,6 +277,10 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
 	var render_max_cx: int = _chunk_coord_from_world(render_max_x, chunk_size)
 	var render_min_cz: int = _chunk_coord_from_world(render_min_z, chunk_size)
 	var render_max_cz: int = _chunk_coord_from_world(render_max_z, chunk_size)
+	render_min_cx = clampi(render_min_cx, world.WORLD_MIN_CHUNK_X, world.WORLD_MAX_CHUNK_X)
+	render_max_cx = clampi(render_max_cx, world.WORLD_MIN_CHUNK_X, world.WORLD_MAX_CHUNK_X)
+	render_min_cz = clampi(render_min_cz, world.WORLD_MIN_CHUNK_Z, world.WORLD_MAX_CHUNK_Z)
+	render_max_cz = clampi(render_max_cz, world.WORLD_MIN_CHUNK_Z, world.WORLD_MAX_CHUNK_Z)
 
 	# Compute stream region with velocity lead offset
 	var lead_offset: Vector2 = Vector2(velocity.x, velocity.z) * stream_lead_time
@@ -286,10 +293,16 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
 	var max_cx: int = _chunk_coord_from_world(stream_pos_2d.x + stream_size_2d.x, chunk_size)
 	var min_cz: int = _chunk_coord_from_world(stream_pos_2d.y, chunk_size)
 	var max_cz: int = _chunk_coord_from_world(stream_pos_2d.y + stream_size_2d.y, chunk_size)
+	min_cx = clampi(min_cx, world.WORLD_MIN_CHUNK_X, world.WORLD_MAX_CHUNK_X)
+	max_cx = clampi(max_cx, world.WORLD_MIN_CHUNK_X, world.WORLD_MAX_CHUNK_X)
+	min_cz = clampi(min_cz, world.WORLD_MIN_CHUNK_Z, world.WORLD_MAX_CHUNK_Z)
+	max_cz = clampi(max_cz, world.WORLD_MIN_CHUNK_Z, world.WORLD_MAX_CHUNK_Z)
 	var stream_center_x: float = stream_pos_2d.x + stream_size_2d.x * 0.5
 	var stream_center_z: float = stream_pos_2d.y + stream_size_2d.y * 0.5
 	var anchor_cx: int = _chunk_coord_from_world(stream_center_x, chunk_size)
 	var anchor_cz: int = _chunk_coord_from_world(stream_center_z, chunk_size)
+	anchor_cx = clampi(anchor_cx, world.WORLD_MIN_CHUNK_X, world.WORLD_MAX_CHUNK_X)
+	anchor_cz = clampi(anchor_cz, world.WORLD_MIN_CHUNK_Z, world.WORLD_MAX_CHUNK_Z)
 	stream_radius_chunks = maxi(
 		maxi(absi(max_cx - anchor_cx), absi(anchor_cx - min_cx)),
 		maxi(absi(max_cz - anchor_cz), absi(anchor_cz - min_cz))
@@ -300,6 +313,7 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
 		anchor_cx != last_stream_chunk.x
 		or anchor_cz != last_stream_chunk.y
 		or max_cy != last_stream_max_cy
+		or min_cy != stream_min_y
 		or min_cx != stream_min_x
 		or max_cx != stream_max_x
 		or min_cz != stream_min_z
@@ -398,6 +412,9 @@ func process_chunk_queue(override_limit: int = -1) -> void:
 		chunk_build_set.erase(key)
 		var high_priority: bool = chunk_build_priority.get(key, false)
 		chunk_build_priority.erase(key)
+		if not world.is_chunk_coord_valid(key):
+			_decrement_stream_layer(key.y)
+			continue
 		var ready: bool = bool(world.request_chunk_generation_async(key, high_priority))
 		if ready:
 			world.renderer.queue_chunk_mesh_build(key, -1, false, high_priority)
@@ -557,6 +574,9 @@ func _partition_spiral_offsets(render_min_cx: int, render_max_cx: int, render_mi
 
 func _queue_stream_offset(offset: Vector2i, high_priority: bool) -> void:
 	var key := Vector3i(stream_min_x + offset.x, stream_layer_y, stream_min_z + offset.y)
+	if not world.is_chunk_coord_valid(key):
+		_decrement_stream_layer(stream_layer_y)
+		return
 	var existing: ChunkData = world.get_chunk(key)
 	if existing != null and existing.mesh_state == ChunkData.MESH_STATE_PENDING:
 		if high_priority:

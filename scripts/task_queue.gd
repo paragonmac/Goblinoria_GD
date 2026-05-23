@@ -142,4 +142,12 @@ func active_count() -> int:
 		if task.status != TaskStatus.COMPLETED:
 			count += 1
 	return count
+
+
+func count_active_by_type_and_material(task_type: int, material: int) -> int:
+	var count := 0
+	for task in tasks:
+		if task.status != TaskStatus.COMPLETED and task.type == task_type and task.material == material:
+			count += 1
+	return count
 #endregion

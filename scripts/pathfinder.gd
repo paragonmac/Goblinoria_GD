@@ -35,7 +35,7 @@ func is_blocking(world, block_id: int) -> bool:
 
 
 func is_walkable(world, x: int, y: int, z: int) -> bool:
-	if y < 0 or y >= world.world_size_y:
+	if not world.is_block_coord_valid(x, y, z):
 		return false
 	if y < MIN_WALKABLE_Y:
 		return false
@@ -51,6 +51,10 @@ func is_walkable(world, x: int, y: int, z: int) -> bool:
 func can_change_level(world, from: Vector3i, to: Vector3i) -> bool:
 	if from.y == to.y:
 		return true
+	if not world.is_block_coord_valid(from.x, from.y, from.z):
+		return false
+	if not world.is_block_coord_valid(to.x, to.y, to.z):
+		return false
 	var from_block: int = world.get_block_no_generate(from.x, from.y, from.z)
 	var to_block: int = world.get_block_no_generate(to.x, to.y, to.z)
 	return world.is_ramp_block_id(from_block) or world.is_ramp_block_id(to_block)
@@ -166,6 +170,10 @@ func _heap_sift_down(idx: int) -> void:
 
 #region Pathfinding
 func find_path(world, start: Vector3i, goal: Vector3i, allow_near_goal: bool = true, return_best_effort: bool = false) -> Array:
+	if not world.is_block_coord_valid(start.x, start.y, start.z):
+		return []
+	if not world.is_block_coord_valid(goal.x, goal.y, goal.z):
+		return []
 	var profiler: DebugProfiler = debug_profiler
 	if profiler != null and profiler.enabled:
 		profiler.begin("Pathfinder.find_path")
