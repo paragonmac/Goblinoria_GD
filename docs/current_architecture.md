@@ -68,7 +68,8 @@ It currently owns:
 - Lazy `ArrayMesh` creation when a cached chunk becomes visible.
 - Render-height rebuild queueing through `WorldRendererRenderLevel`, plus render-zone visibility.
 - Block shader material and atlas setup through `WorldRendererMaterials`.
-- Overlay forwarding and renderer/debug statistics.
+- Draw and mesh statistics through `WorldRendererStats`.
+- Overlay forwarding and renderer/debug statistic composition.
 
 Raw mesh-cache entries store packed arrays and metrics, not `ArrayMesh` resources. `WorldRendererMeshCache` centralizes raw mesh-cache entry construction, validation, export, import shaping, and lazy `ArrayMesh` construction. `WorldRendererMeshScheduler` centralizes async mesh job ownership; `WorldRendererRenderLevel` owns render-height rebuild queue ordering. `WorldRenderer` still builds job dictionaries and applies completed results to visible chunks. Persistent mesh cache saves those raw arrays with `store_var(..., false)` and validates them against world dimensions, chunk size, block table hash, mesher cache version, chunk block hash, and neighbor hashes.
 
@@ -94,7 +95,7 @@ Workers pull tasks from `TaskQueue` through `TaskManager`, pathfind with `Pathfi
 The largest coupling hotspots are:
 
 - `Main.gd`: menu actions and frame orchestration still share one file. Loading UI, HUD, render-level readiness, and Y-transition profiling are split into controllers/helpers.
-- `WorldRenderer`: render-zone visibility, overlays, and stats still share one class. Mesh-cache data contracts are split into `WorldRendererMeshCache`, runtime mesh queue/thread ownership is split into `WorldRendererMeshScheduler`, render-height queue ownership is split into `WorldRendererRenderLevel`, and material ownership is split into `WorldRendererMaterials`.
+- `WorldRenderer`: render-zone visibility, overlays, and stat composition still share one class. Mesh-cache data contracts are split into `WorldRendererMeshCache`, runtime mesh queue/thread ownership is split into `WorldRendererMeshScheduler`, render-height queue ownership is split into `WorldRendererRenderLevel`, and material ownership is split into `WorldRendererMaterials`.
 - `ChunkMesher`: greedy cube meshing, ramp meshing, and mesh resource fallback still share one class. Padded-buffer/index helpers, UV helpers, and color/noise/shading helpers are split into `ChunkMesherPaddedBuffer`, `ChunkMesherUv`, and `ChunkMesherVisuals`.
 - `WorldSaveLoad`: legacy chunk files, block-table hashing, and migration checks still share one class. Metadata, bulk block data, inventory, and persistent mesh-cache file handling are split out.
 - `DebugOverlay`: live HUD stats, CSV captures, timing logs, map exports, and ramp debug tools share one class.
