@@ -1,389 +1,430 @@
-# Voxel Colony Sim - Design Document v0.1
+# Goblinoria Game Design Document v0.2
 
-Current prototype: Godot 4.5 / GDScript. Code samples are schematic.
+Current prototype: Godot 4.6.x / GDScript.
+
+This document describes the major design pillars and systems for Goblinoria. It is inspired by Dwarf Fortress-style colony simulation, but the goal is not to clone a specific game. The goal is to capture the core fantasy: a living settlement carved into a reactive voxel world, where simple systems combine into surprising outcomes.
+
+Implementation details, formulas, balancing, UI flows, and edge-case rules should become focused GitHub issues or deeper design notes when a system enters active development.
 
 ## Vision
 
-Dwarf Fortress-style colony management game. Isometric 3D voxel world. Workers dig, build, and fight based on player commands. Emergent gameplay from simple systems interacting.
-
-Core loop: Player issues commands → Workers claim and execute tasks → World changes → New possibilities emerge
-
----
-
-## Architecture Philosophy
-
-- **Data-Oriented Design (DOD)** - Data separated by access pattern, not by "what it belongs to"
-- **Urban Planner, not Architect** - High-level zoning and traffic, not rigid blueprints
-- **Fluidity over perfection** - Don't lock down architecture until proven
-- **Prove risk first** - Milestones target novel/risky systems, not content
-- **Workers are chess pieces** - Systems move them, they don't "think"
-
----
-
-## Data Model
-
-### World
-
-```
-- 256³ total blocks
-- 32³ chunks (32×32×32 = 32768 chunks)
-- 1 byte per block (type ID)
-- BlockInfo[256] static lookup table
-```
-
-```zig
-const BlockType = u8;
-
-const BlockInfo = struct {
-    name: []const u8,
-    solid: bool,
-    hardness: u8,        // 0 = indestructible, 1-255 = mine time
-    drop_type: u8,       // item type spawned when mined
-    replaceable: bool,   // can stairs be placed here?
-};
-
-const CHUNK_SIZE = 8;
-
-const Chunk = struct {
-    blocks: [CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]BlockType,
-    dirty: bool,         // needs remesh?
-};
-```
-
-**Block type blacklist for stairs:** AIR, LAVA, WATER, OBSIDIAN (explicit list, not derived from hardness)
-
-### Workers
-
-```
-- 128 max (toy version)
-- u16 IDs (room to scale to 65k)
-- Move X/Y freely, Z via stairs only
-```
-
-```zig
-const WorkerState = enum { idle, moving, working, fighting };
-const JobType = enum { miner, builder, hauler };
-
-const Worker = struct {
-    id: u16,
-    position: Vec3i,
-    job_type: JobType,
-    state: WorkerState,
-    current_task: u16,        // task index or NONE
-    work_progress: f32,       // 0.0 to 1.0
-    path: [8]Vec3i,           // next 8 steps
-    path_length: u8,
-    path_index: u8,
-};
-```
-
-### Tasks
-
-```
-- 4096 max (flat array, no hierarchy)
-- No "Designation" wrapper - just tasks
-- Player adds/removes tasks directly
-```
-
-```zig
-const TaskType = enum { mine, build_stairs };
-const TaskState = enum { unclaimed, claimed, complete };
-
-const Task = struct {
-    task_type: TaskType,
-    planned: bool,            // true = inactive (red), false = active (green)
-    state: TaskState,
-    position: Vec3i,
-    assigned_worker: u16,     // worker index or NONE
-};
-```
-
-### Items
-
-```
-- Spawn from mining
-- Sit on ground (no hauling in milestone 1)
-```
-
-```zig
-const Item = struct {
-    item_type: u8,
-    position: Vec3i,
-};
-```
-
----
-
-## Systems
-
-Run each frame in order. Each system does update + render prep in one pass (not separate).
-
-```zig
-fn game_update(world: *World, workers: []Worker, tasks: []Task, dt: f32) void {
-    assign_tasks(workers, tasks);
-    calculate_paths(workers, world, tasks);
-    move_workers(workers, dt);
-    do_work(workers, tasks, dt);
-    complete_tasks(workers, tasks, world);
-}
-```
+Goblinoria is a 3D voxel colony simulation about founding, expanding, and protecting an underground settlement.
 
-### 1. assign_tasks()
-- Idle workers scan for nearest unclaimed task they can do
-- Claim task, set worker state to moving
-- O(workers × tasks) - ~500k comparisons, microseconds
+The player does not directly control individuals. Instead, the player gives high-level instructions: dig here, build there, store this, defend that, prioritize this job. Workers interpret those instructions through job, pathing, resource, and survival systems.
 
-### 2. calculate_paths()
-- Workers with task but no valid path get A* pathfinding
-- 128 block search radius limit
-- If goal farther: path toward goal, recalculate when path exhausted
-- Stairs required for Z movement
-
-### 3. move_workers()
-- Follow path array
-- Increment path_index
-- If blocked (unexpected wall), recalculate
+The game should feel like managing a messy living machine:
 
-### 4. do_work()
-- Workers at task destination increment work_progress
-- Progress rate based on BlockInfo.hardness
+- The world has physical shape and material consequences.
+- Workers are limited by access, time, skills, needs, and danger.
+- Resources move through the colony as items, stockpiles, and production chains.
+- Threats and hazards emerge from the map and from player choices.
+- The best stories come from interacting systems, not scripted events.
 
-### 5. complete_tasks()
-- work_progress >= 1.0 triggers completion
-- Mine: destroy block, spawn item
-- Build stairs: replace block with stair
-- Task marked complete, worker goes idle
+## Design Pillars
 
----
+### Indirect Control
 
-## Pathfinding
+The player manages through designations, zones, priorities, policies, and alerts. Workers remain autonomous enough that planning matters, but predictable enough that failures feel diagnosable.
 
-```
-- A* with sparse visited set (HashMap)
-- Search radius: 128 blocks max
-- Heuristic: Manhattan distance
-- Cost: 1 per move (uniform, expand later)
-- Z movement: stairs only
-- Blocked path: ignore until worker hits wall, then recalculate
-```
+### Physical World
 
-Path stored on worker (8 steps). When exhausted or blocked, recalculate.
+The voxel world is not just scenery. Terrain blocks access, supports structures, contains resources, carries hazards, and records player history through digging and building.
 
-Future expansion: Octree for long-range queries (not milestone 1).
+### Small Rules, Large Outcomes
 
----
+Systems should be individually simple: tasks, items, needs, rooms, fluids, threats. Complexity should come from their overlap.
 
-## Timing
-
-```
-- Fixed timestep: 60hz (DT = 1/60 ≈ 0.0167)
-- Fallback: 30hz (DT = 1/30 ≈ 0.0333)
-- Deterministic simulation within each mode
-```
+### Readable Simulation
 
-```zig
-const TARGET_FPS = 60;
-const DT: f32 = 1.0 / @as(f32, TARGET_FPS);
-```
+The player should be able to understand why something happened. Debug overlays can exist during development, but the finished game needs visible state, alerts, and inspectable objects.
 
----
+### Risk-First Development
 
-## Asset Loading
+Milestones should prove risky interactions early: world editing, pathing, task execution, save/load, rendering correctness, and worker state recovery.
 
-Non-blocking. Never hitch.
+## Player Fantasy
 
-```zig
-const AssetState = enum { not_loaded, loading, loaded };
+The player fantasy is to build a functional underground settlement in a hostile, material-rich world.
 
-const Asset = struct {
-    state: AssetState,
-    data: ?*AssetData,
-};
+Core verbs:
 
-fn get_texture(asset_id: u16) *Texture {
-    const asset = &assets[asset_id];
-    
-    if (asset.state == .loaded) return asset.data.texture;
-    
-    if (asset.state == .not_loaded) {
-        queue_load(asset_id);  // non-blocking
-        asset.state = .loading;
-    }
-    
-    return &default_white_texture;  // fallback
-}
-```
+- Dig tunnels, rooms, shafts, and defensive works.
+- Build walls, floors, stairs, doors, bridges, workshops, storage, and traps.
+- Assign zones and priorities.
+- Manage workers, resources, rooms, and production.
+- React to floods, collapses, enemies, shortages, and pathing mistakes.
+- Watch the settlement develop its own logistical and social problems.
 
-**Default assets (always in memory):**
-- White texture (fallback block)
-- Magenta texture (debug "missing")
-- Silent audio buffer
+## Core Game Loop
 
----
+The core loop is:
 
-## Threading Strategy (Future)
+1. Survey the world.
+2. Designate work.
+3. Workers claim tasks.
+4. Workers path, gather resources, and perform work.
+5. The world changes.
+6. New resources, hazards, and constraints appear.
+7. The player adapts the colony plan.
 
-Not for milestone 1. When needed:
+The first playable slice should prove:
 
-**Thread by element, not by step:**
+- Designate digging.
+- Workers reach jobs.
+- Blocks are removed.
+- Terrain redraws correctly.
+- Workers recover from world changes.
+- Save/load preserves the changed world.
 
-```
-GOOD:
-  Thread 1: update+render workers 0-63
-  Thread 2: update+render workers 64-127
+## World Model
 
-BAD:
-  Thread 1: update all workers
-  Thread 2: render all workers (waits on thread 1)
-```
+The world is a finite voxel map for the current prototype. It is chunked, persistent, and editable.
 
-Keeps data in cache, avoids dependencies between threads.
+Major world responsibilities:
 
----
+- Terrain shape: surface, underground layers, caves, ramps, and entrances.
+- Materials: soil, stone, ores, wood, water, and future special materials.
+- Bounds: hard finite world limits for generation, pathing, rendering, and selection.
+- Persistence: saves store final block data and relevant colony state.
+- Render state: block changes invalidate and rebuild affected chunk meshes.
+- Simulation hooks: blocks affect access, mining time, drops, support, fluids, and hazards.
 
-## Toolchain
+World generation should support identity and replayability:
 
-```
-- Engine: Godot 4.5
-- Language: GDScript
-- Profiler: ProProfiler addon (optional)
-- IDE: Godot editor
-```
+- Biomes and surface context.
+- Underground geology.
+- Ore and resource distribution.
+- Caves and natural openings.
+- Water or fluid features once visually and mechanically readable.
 
----
+The current priority is stable, readable generation over maximum variety.
 
-# Milestones
+## Colony Model
 
-## Milestone 1: Core Loop (Current)
+The colony is the player-created organization layered on top of the world.
 
-**Goal:** Prove the risky/novel systems work.
+Major colony parts:
 
-**Scope:**
-- [ ] World: chunks, blocks, get/set
-- [ ] Workers: spawn, move X/Y, move Z via stairs
-- [ ] Tasks: mine, build stairs
-- [ ] Pathfinding: A* with stairs constraint
-- [ ] Items: drop from mining (sit on ground)
-- [ ] Debug render: blocks as cubes, workers as colored cubes
+- Workers: individual agents that execute jobs.
+- Tasks: concrete work items workers can claim.
+- Zones: player-defined areas such as stockpiles, rooms, farms, and defenses.
+- Items: physical resources that sit in the world, move through hauling, and feed production.
+- Rooms: functional spaces created from zones, furniture, access, and materials.
+- Policies: priority rules, allowed work, alerts, and future scheduling.
 
-**NOT in scope:**
-- Hauling
-- Stockpiles
-- Combat
-- Enemies
-- Fluids
-- Lighting
-- UI
+The colony should become more difficult to manage as it grows, but the difficulty should come from logistics and risk rather than opaque worker behavior.
 
-**Success criteria:** Click area → workers dig it out → stairs let them go up/down.
+## Workers
 
----
+Workers are not free-form characters in the first version. They are reliable game pieces with enough individuality to create planning pressure later.
 
-## Milestone 2: Hauling & Stockpiles
+Major worker responsibilities:
 
-**Goal:** Items have purpose.
+- Find claimable tasks.
+- Path to work.
+- Perform work over time.
+- Carry items when hauling exists.
+- React to blocked paths, missing support, falling, threats, and inaccessible tasks.
+- Report why work cannot proceed.
 
-**Scope:**
-- [ ] Stockpile zones with material flags
-- [ ] Haul task type
-- [ ] Worker carrying state
-- [ ] Items moved to stockpiles
+Future worker depth can include:
 
-**Success criteria:** Mined rocks get hauled to designated dump zones.
+- Skills and professions.
+- Needs such as hunger, rest, safety, and morale.
+- Injuries and death.
+- Preferences or personality.
+- Schedules and squads.
 
----
+Worker identity should eventually come from learned capability, not fixed character classes. A worker can become valuable because they survived, practiced, trained, fought, healed, crafted, or repeatedly solved a type of colony problem.
 
-## Milestone 3: Building & Production
+Major worker progression ideas:
 
-**Goal:** Players can construct things.
+- Skills improve over time through use, training, and survival.
+- Roles emerge from skill, equipment, assignment, and experience.
+- Workers can specialize without becoming locked forever.
+- Experienced workers should feel worth protecting.
+- Losing a skilled worker should matter to the colony.
 
-**Scope:**
-- [ ] Build task (place blocks)
-- [ ] Multi-block structures (prefabs)
-- [ ] Resource requirements (need rocks to build wall)
-- [ ] Basic production chains
+Long-term combat and support roles:
 
-**Success criteria:** Workers haul rocks to build site, construct walls.
+- Fighters: melee workers who hold chokepoints, protect civilians, and use heavy weapons or shields.
+- Rangers: ranged workers who attack from distance, scout, hunt, or defend from prepared positions.
+- Clerics: support workers who heal injuries, cure poison, protect allies, and stabilize fights.
+- Specialists: rare or advanced workers with powerful learned abilities.
 
----
+Advanced abilities can become a major differentiator from a pure management sim. Examples include mass healing, cure poison, ranged volleys, shield walls, and an AOE storm blade attack that cleaves through groups. These should be earned through progression and should create tactical planning opportunities without turning the game into direct unit micro.
 
-## Milestone 4: Combat
+The early rule is simple: workers must be predictable before they become complex.
 
-**Goal:** Threats exist.
+## Jobs And Designations
 
-**Scope:**
-- [ ] Enemy spawning
-- [ ] Combat state for workers
-- [ ] Damage, health, death
-- [ ] Basic AI for enemies
+Player intent enters the simulation through designations and zones. Designations become tasks when they are valid and reachable.
 
-**Success criteria:** Enemies attack, workers fight back or flee.
+Major job categories:
 
----
+- Dig: remove blocks and expose new terrain.
+- Build: place blocks, structures, furniture, and stairs.
+- Haul: move items between sources, stockpiles, workshops, and construction sites.
+- Operate: use workshops or production buildings.
+- Maintain: repair, clean, restock, and recover.
+- Defend: fight, flee, guard, or operate traps.
 
-## Milestone 5: Fluids
+Important job rules:
 
-**Goal:** Environmental hazards.
+- Tasks should be inspectable.
+- Tasks should explain blocked state.
+- Workers should not reserve impossible tasks forever.
+- Player priority should matter without requiring constant micromanagement.
 
-**Scope:**
-- [ ] Fluid simulation (block-based)
-- [ ] Lava, water
-- [ ] Damage from fluids
-- [ ] Flooding mechanics
+## Items, Materials, And Economy
 
-**Success criteria:** Dig into water pocket, it floods tunnels.
+The economy starts physical: mined blocks become items, items occupy positions, and workers move them.
 
----
+Major resource concepts:
 
-## Milestone 6: Polish & Systems Interaction
+- Raw materials: stone, soil, ore, logs, food, water, and future special materials.
+- Items: discrete physical objects on the map or in stockpiles.
+- Stockpiles: zones that accept item categories and materials.
+- Inventory: carried items or stored quantities where abstraction is needed.
+- Production inputs and outputs: workshops consume items and create goods.
 
-**Goal:** Emergent gameplay.
+The economy should remain understandable:
 
-**Scope:**
-- [ ] Traps
-- [ ] Doors
-- [ ] Pressure plates / triggers
-- [ ] Systems interacting (flood trap kills enemies)
+- If a workshop cannot produce, the player should know which input is missing.
+- If a building cannot be placed, the player should know which material is missing.
+- If hauling is slow, the bottleneck should be visible through distance, priority, or worker availability.
 
-**Success criteria:** Player builds trap system that kills invaders with lava.
+## Building And Rooms
 
----
+Building turns gathered resources into a designed settlement.
 
-## Future Milestones (TBD)
+Major construction concepts:
 
-- Lighting
-- Proper UI
-- Save/Load
-- Larger worlds
-- Z-level visualization
-- Worker attributes/skills
-- Jobs specialization
-- Audio
-- Music
+- Constructed blocks: walls, floors, ramps, stairs, bridges, and supports.
+- Furniture and fixtures: doors, beds, tables, workshops, storage, traps.
+- Rooms: player-defined or detected spaces with function and quality.
+- Access control: doors, restricted zones, safe paths, and future alerts.
+- Structural rules: support, cave-ins, and fluid containment when those systems exist.
 
----
+Rooms should matter because they organize the colony:
 
-# Open Questions
+- Bedrooms and dormitories.
+- Dining halls and meeting spaces.
+- Workshops.
+- Storage rooms.
+- Barracks and defensive areas.
+- Medical or recovery rooms in later versions.
 
-1. **Intra-system dependencies:** If worker A blocks worker B, how do we handle within move_workers()?
+## Production
 
-2. **Chunk boundaries:** Worker pathing across chunk boundaries - any special handling?
+Production gives resources purpose.
 
-3. **Memory budget:** How many items can exist? Cap? Pool?
+Major production stages:
 
-4. **Render strategy:** Isometric 2D sprites or actual 3D voxels?
+- Extraction: mining, chopping, gathering, farming, or hunting.
+- Refinement: ore to bars, logs to planks, raw food to meals.
+- Crafting: tools, furniture, weapons, containers, trade goods.
+- Construction: buildings and structures consume materials.
+- Maintenance: replacement, repair, and restocking.
 
----
+Production should be job-driven and spatial:
 
-# References
+- Workshops need input items.
+- Workers must haul resources.
+- Output items must go somewhere.
+- Poor layout should create visible inefficiency.
 
-- Casey Muratori - Handmade Hero (architecture, DOD)
-- Casey Muratori - "The Big OOPs" (OOP critique)
-- Mike Acton - CppCon 2014 "Data-Oriented Design"
-- Andrew Kelley - Zig talks
-- Dwarf Fortress, Gnomoria (gameplay reference)
+## Needs, Morale, And Colony Health
 
----
+Needs make workers and colony layout matter.
 
-*Document version: 0.1*
-*Last updated: Session 1*
+Early needs can be minimal. Long-term needs can include:
+
+- Food.
+- Drink or water.
+- Sleep.
+- Safety.
+- Shelter.
+- Social spaces.
+- Job satisfaction or morale.
+
+The intent is not to simulate every emotion early. The intent is to create understandable pressure that rewards good planning.
+
+Colony health can be expressed through:
+
+- Worker availability.
+- Injuries and deaths.
+- Shortage alerts.
+- Unsafe paths.
+- Room quality.
+- Production bottlenecks.
+- Threat readiness.
+
+## Threats And Combat
+
+Threats create stakes for building and logistics.
+
+Major threat sources:
+
+- Hostile creatures or factions.
+- Wildlife.
+- Underground discoveries.
+- Environmental hazards.
+- Player-created failures such as floods or collapses.
+
+Major defense tools:
+
+- Worker combat behavior.
+- Squads or guard assignments.
+- Learned fighter, ranger, cleric, and specialist roles.
+- Doors, walls, chokepoints, and bridges.
+- Traps.
+- Alerts and burrows/restricted zones.
+
+Combat should be readable before it is deep:
+
+- Who is fighting?
+- Who is injured?
+- Why did someone flee or die?
+- Which path did the enemy use?
+- Which defenses worked?
+- Which skill, role, or ability changed the fight?
+
+Combat depth should grow from worker progression:
+
+- Melee skills improve holding, blocking, cleaving, and surviving.
+- Ranged skills improve accuracy, range, target choice, and volleys.
+- Cleric skills improve healing, poison removal, protection, and recovery.
+- Advanced skills can unlock AOE attacks, mass healing, cures, and other high-impact abilities.
+- Equipment and terrain should interact with skill instead of replacing it.
+
+## Fluids And Environmental Hazards
+
+Fluids and hazards are key to emergent colony stories, but they should arrive after world editing, pathing, and rendering are stable.
+
+Major hazard categories:
+
+- Water and flooding.
+- Lava or damaging fluids.
+- Cave-ins or support failure.
+- Fire or smoke if added later.
+- Poison gas or other special underground features.
+- Temperature or pressure only if they add clear gameplay.
+
+Fluid simulation should be simple enough to reason about and visual enough to plan around.
+
+## User Interface And Player Tools
+
+The UI should help the player plan and diagnose, not hide the simulation.
+
+Major UI surfaces:
+
+- Dig/build designation tools.
+- Selection and inspection.
+- Worker list and worker details.
+- Task/job list.
+- Stockpile and zone tools.
+- Alerts and blocked-work messages.
+- Overlay modes for access, jobs, resources, danger, and fluids.
+- Debug overlays during development.
+
+Important UI principles:
+
+- The player should see what command mode they are in.
+- Designations should preview validity.
+- Blocked tasks should explain why they are blocked.
+- Repeated actions should be efficient.
+- Debug-only information should become player-facing only when it helps decision-making.
+
+## Save, Load, And Persistence
+
+Persistence is core because colony games create long-running stories.
+
+Major persistence requirements:
+
+- World seed and dimensions.
+- Edited block data.
+- Workers and their state.
+- Tasks and zones.
+- Items and stockpiles.
+- Inventory and production state.
+- Renderer caches only as optional acceleration.
+- Version checks and migration stubs.
+
+Save/load must fail loudly on incompatible formats. Silent corruption is worse than a clear error.
+
+## Simulation And Technical Direction
+
+Goblinoria should favor data-oriented, inspectable systems.
+
+Technical principles:
+
+- Keep world data chunked and bounded.
+- Keep systems deterministic where practical.
+- Keep worker behavior state-machine driven before adding personality.
+- Prefer flat, inspectable task data over deep object hierarchies.
+- Keep save format changes explicit and versioned.
+- Use metrics before major optimization rewrites.
+- Keep rendering correctness ahead of rendering cleverness.
+
+## Milestone Direction
+
+Milestones should represent playable outcomes, not just system names.
+
+Suggested milestone track:
+
+| Milestone | Tracker | Theme | Player-Facing Goal |
+|---|---|---|---|
+| [M0](https://github.com/paragonmac/Goblinoria_GD/milestone/1) | [#15](https://github.com/paragonmac/Goblinoria_GD/issues/15) | Technical Foundation | World loads, saves, renders, and can be edited safely. |
+| [M1](https://github.com/paragonmac/Goblinoria_GD/milestone/2) | [#16](https://github.com/paragonmac/Goblinoria_GD/issues/16) | Core Digging Loop | Player marks terrain, workers dig it, pathing updates, world changes persist. |
+| [M2](https://github.com/paragonmac/Goblinoria_GD/milestone/3) | [#17](https://github.com/paragonmac/Goblinoria_GD/issues/17) | Hauling And Stockpiles | Mined resources become items and workers move them to stockpiles. |
+| [M3](https://github.com/paragonmac/Goblinoria_GD/milestone/4) | [#18](https://github.com/paragonmac/Goblinoria_GD/issues/18) | Building And Rooms | Player constructs walls, floors, doors, and useful spaces. |
+| [M4](https://github.com/paragonmac/Goblinoria_GD/milestone/5) | [#19](https://github.com/paragonmac/Goblinoria_GD/issues/19) | Basic Colony Needs | Workers need food, rest, and safety enough to create pressure. |
+| [M5](https://github.com/paragonmac/Goblinoria_GD/milestone/6) | [#20](https://github.com/paragonmac/Goblinoria_GD/issues/20) | Production Chains | Raw materials become crafted goods through workshops. |
+| [M6](https://github.com/paragonmac/Goblinoria_GD/milestone/7) | [#21](https://github.com/paragonmac/Goblinoria_GD/issues/21) | Hazards And Fluids | Water, lava, collapses, and hazards create emergent risk. |
+| [M7](https://github.com/paragonmac/Goblinoria_GD/milestone/8) | [#22](https://github.com/paragonmac/Goblinoria_GD/issues/22) | Threats And Combat | Enemies exist, workers can fight, flee, heal, shoot, and defend. |
+| [M8](https://github.com/paragonmac/Goblinoria_GD/milestone/9) | [#23](https://github.com/paragonmac/Goblinoria_GD/issues/23) | Settlement Management | UI, priorities, job controls, alerts, and diagnostics make the colony manageable. |
+| [M9](https://github.com/paragonmac/Goblinoria_GD/milestone/10) | [#24](https://github.com/paragonmac/Goblinoria_GD/issues/24) | World Depth | Biomes, caves, ores, and underground features create map identity. |
+| [M10](https://github.com/paragonmac/Goblinoria_GD/milestone/11) | [#25](https://github.com/paragonmac/Goblinoria_GD/issues/25) | Emergent Systems | Traps, flooding, production, combat roles, learned abilities, morale, and failures interact. |
+
+Current development should focus on M0 and M1 until the core loop is reliable.
+
+The current planning timeline is documented in `docs/project_management.md` and mirrored in the `Goblinoria Roadmap` GitHub Project through `Start Date` and `Target Date` fields.
+
+## First Playable Slice
+
+The first strong slice is:
+
+Player starts a world, designates a dig area, workers dig it, the terrain redraws correctly, workers recover from terrain changes, and the modified world persists through save/load.
+
+This slice proves:
+
+- Player intent.
+- Task creation.
+- Worker assignment.
+- Pathing.
+- World mutation.
+- Renderer invalidation.
+- Save/load.
+- Basic diagnostics.
+
+Everything else builds on this.
+
+## Deferred Detail
+
+The following areas need deeper design later:
+
+- Exact worker skill model.
+- Fighter, ranger, cleric, and specialist progression.
+- Advanced ability design such as mass healing, cure poison, and AOE cleave attacks.
+- Exact pathing costs and movement rules.
+- Room detection and room quality.
+- Workshop recipes.
+- Item stack and container rules.
+- Combat model.
+- Fluid algorithm.
+- Social and morale systems.
+- UI wireframes.
+- World-generation biome/resource tuning.
+
+Those details should be designed when the corresponding milestone becomes active, not all at once.

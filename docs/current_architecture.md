@@ -38,6 +38,8 @@ Full-map new-world creation uses `WorldGenerationPipeline` through `WorldGenerat
 
 Generation pass order is serial and explicit: climate maps, biome, geology, solid terrain fill, caves, static underground water, ores, surface blocks, ramps, trees, flowers, cleanup, then chunk baking. The result is still ordinary `ChunkData.blocks`; intermediate maps are not saved yet. Persistent saves continue to store final block data and optional raw mesh-cache entries only.
 
+`WorldGenerationPipeline` owns configuration, pass ordering and timing, climate and biome maps, generation statistics, and final chunk baking. Deterministic generation details are split by responsibility: `WorldTerrainHeightSampler` samples terrain, `WorldRampRules` selects ramp IDs, `WorldCaveGenerator` carves caves, `WorldTerrainMaterialGenerator` applies geology and block materials, and `WorldVegetationGenerator` places trees and flowers. Runtime fallback chunks use `WorldTerrainChunkBuilder` and `WorldTerrainRampBuilder`; `WorldGenerationJobQueue` owns asynchronous queue state.
+
 The richer layered pipeline is used for the full-map arena cook. Runtime on-demand chunk generation remains compatible as a fallback path for non-full-map startup modes.
 ## Load Flow
 

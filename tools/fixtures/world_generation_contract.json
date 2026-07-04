@@ -1,0 +1,438 @@
+{
+	"cases": [
+		{
+			"name": "centered_32x64x32_seed_12345",
+			"summary": {
+				"chunks": {
+					"block_counts": {
+						"0": 23307,
+						"1": 14893,
+						"10": 977,
+						"100": 1,
+						"101": 1,
+						"102": 2,
+						"103": 1,
+						"104": 3,
+						"105": 2,
+						"106": 3,
+						"107": 2,
+						"108": 1,
+						"109": 1,
+						"110": 1,
+						"111": 1,
+						"12": 15,
+						"13": 262,
+						"14": 40,
+						"2": 3063,
+						"4": 10209,
+						"5": 9068,
+						"6": 3102,
+						"7": 187,
+						"8": 161,
+						"9": 233
+					},
+					"block_hash": 1679684512,
+					"coord_hash": 987847621,
+					"count": 128,
+					"samples": [
+						{
+							"coord": "-2,0,-2",
+							"hash": 3197049313
+						},
+						{
+							"coord": "0,0,-2",
+							"hash": 3461477555
+						},
+						{
+							"coord": "1,7,1",
+							"hash": 77416063
+						}
+					],
+					"volume": 512
+				},
+				"config": {
+					"chunk_size": 8,
+					"sea_level": 40,
+					"world_chunks_x": 4,
+					"world_chunks_y": 8,
+					"world_chunks_z": 4,
+					"world_max_chunk_x": 1,
+					"world_max_chunk_z": 1,
+					"world_min_chunk_x": -2,
+					"world_min_chunk_z": -2,
+					"world_seed": 12345,
+					"world_size_y": 64
+				},
+				"generation_stats": {
+					"biome_cold": 0,
+					"biome_dry": 0,
+					"biome_forest": 188,
+					"biome_plains": 836,
+					"biome_wetland": 0,
+					"cave_branches_spawned": 0,
+					"cave_brush_calls": 7,
+					"cave_carved_cells": 56,
+					"cave_rooms_carved": 0,
+					"cave_systems_started": 1,
+					"cave_walker_steps": 7,
+					"coal_blocks": 233,
+					"coal_ore_cells_placed": 233,
+					"flower_blocks": 40,
+					"flowers_placed": 41,
+					"iron_blocks": 161,
+					"iron_ore_cells_placed": 161,
+					"leaf_blocks": 262,
+					"log_blocks": 15,
+					"moss_blocks": 0,
+					"static_water_enabled": 0,
+					"trees_placed": 4,
+					"water_blocks": 0,
+					"water_cells_placed": 0
+				},
+				"maps": {
+					"biome": {
+						"hash": 2291608239,
+						"max": 1,
+						"min": 0,
+						"size": 1024,
+						"sum": 188
+					},
+					"elevation": {
+						"hash": 1352984741,
+						"max": 41,
+						"min": 40,
+						"size": 1024,
+						"sum": 40972
+					},
+					"feature_reserved": {
+						"hash": 4192439913,
+						"max": 1,
+						"min": 0,
+						"size": 1024,
+						"sum": 90
+					},
+					"moisture": {
+						"hash": 632131756,
+						"max_scaled": 708703,
+						"min_scaled": 318583,
+						"size": 1024,
+						"sum_scaled": 494907447
+					},
+					"soil_region": {
+						"hash": 1500160053,
+						"max": 7,
+						"min": 1,
+						"size": 1024,
+						"sum": 4210
+					},
+					"temperature": {
+						"hash": 3946163830,
+						"max_scaled": 743089,
+						"min_scaled": 469046,
+						"size": 1024,
+						"sum_scaled": 658174822
+					},
+					"tree_density": {
+						"hash": 757696178,
+						"max_scaled": 1000000,
+						"min_scaled": 0,
+						"size": 1024,
+						"sum_scaled": 208887778
+					}
+				},
+				"passes": {
+					"pass_count": 14,
+					"pass_names": [
+						"climate_maps",
+						"biome_map",
+						"geology_maps",
+						"fill_solid_terrain",
+						"carve_caves",
+						"add_static_water",
+						"add_ores",
+						"apply_surface_blocks",
+						"apply_ramps",
+						"place_trees",
+						"place_flowers",
+						"final_cleanup",
+						"collect_generation_stats",
+						"bake_chunks"
+					],
+					"pass_total": 14
+				},
+				"progress": {
+					"done_count": 14,
+					"final_generation_stats": {
+						"biome_cold": 0,
+						"biome_dry": 0,
+						"biome_forest": 188,
+						"biome_plains": 836,
+						"biome_wetland": 0,
+						"cave_branches_spawned": 0,
+						"cave_brush_calls": 7,
+						"cave_carved_cells": 56,
+						"cave_rooms_carved": 0,
+						"cave_systems_started": 1,
+						"cave_walker_steps": 7,
+						"coal_blocks": 233,
+						"coal_ore_cells_placed": 233,
+						"flower_blocks": 40,
+						"flowers_placed": 41,
+						"iron_blocks": 161,
+						"iron_ore_cells_placed": 161,
+						"leaf_blocks": 262,
+						"log_blocks": 15,
+						"moss_blocks": 0,
+						"static_water_enabled": 0,
+						"trees_placed": 4,
+						"water_blocks": 0,
+						"water_cells_placed": 0
+					},
+					"row_count": 28,
+					"running_count": 14,
+					"sequence": [
+						"running:climate_maps:0/14",
+						"done:climate_maps:1/14",
+						"running:biome_map:1/14",
+						"done:biome_map:2/14",
+						"running:geology_maps:2/14",
+						"done:geology_maps:3/14",
+						"running:fill_solid_terrain:3/14",
+						"done:fill_solid_terrain:4/14",
+						"running:carve_caves:4/14",
+						"done:carve_caves:5/14",
+						"running:add_static_water:5/14",
+						"done:add_static_water:6/14",
+						"running:add_ores:6/14",
+						"done:add_ores:7/14",
+						"running:apply_surface_blocks:7/14",
+						"done:apply_surface_blocks:8/14",
+						"running:apply_ramps:8/14",
+						"done:apply_ramps:9/14",
+						"running:place_trees:9/14",
+						"done:place_trees:10/14",
+						"running:place_flowers:10/14",
+						"done:place_flowers:11/14",
+						"running:final_cleanup:11/14",
+						"done:final_cleanup:12/14",
+						"running:collect_generation_stats:12/14",
+						"done:collect_generation_stats:13/14",
+						"running:bake_chunks:13/14",
+						"done:bake_chunks:14/14"
+					],
+					"stats_row_count": 3
+				}
+			}
+		},
+		{
+			"name": "edge_16x24x16_seed_98765",
+			"summary": {
+				"chunks": {
+					"block_counts": {
+						"0": 2743,
+						"1": 752,
+						"10": 244,
+						"12": 3,
+						"13": 70,
+						"14": 12,
+						"2": 768,
+						"4": 886,
+						"5": 644,
+						"9": 22
+					},
+					"block_hash": 201439875,
+					"coord_hash": 2408553589,
+					"count": 12,
+					"samples": [
+						{
+							"coord": "-1,0,-1",
+							"hash": 510273055
+						},
+						{
+							"coord": "0,0,-1",
+							"hash": 1183398680
+						},
+						{
+							"coord": "0,2,0",
+							"hash": 77416063
+						}
+					],
+					"volume": 512
+				},
+				"config": {
+					"chunk_size": 8,
+					"sea_level": 12,
+					"world_chunks_x": 2,
+					"world_chunks_y": 3,
+					"world_chunks_z": 2,
+					"world_max_chunk_x": 0,
+					"world_max_chunk_z": 0,
+					"world_min_chunk_x": -1,
+					"world_min_chunk_z": -1,
+					"world_seed": 98765,
+					"world_size_y": 24
+				},
+				"generation_stats": {
+					"biome_cold": 0,
+					"biome_dry": 0,
+					"biome_forest": 143,
+					"biome_plains": 113,
+					"biome_wetland": 0,
+					"cave_branches_spawned": 0,
+					"cave_brush_calls": 0,
+					"cave_carved_cells": 0,
+					"cave_rooms_carved": 0,
+					"cave_systems_started": 0,
+					"cave_walker_steps": 0,
+					"coal_blocks": 22,
+					"coal_ore_cells_placed": 22,
+					"flower_blocks": 12,
+					"flowers_placed": 12,
+					"iron_blocks": 0,
+					"iron_ore_cells_placed": 0,
+					"leaf_blocks": 70,
+					"log_blocks": 3,
+					"moss_blocks": 0,
+					"static_water_enabled": 0,
+					"trees_placed": 1,
+					"water_blocks": 0,
+					"water_cells_placed": 0
+				},
+				"maps": {
+					"biome": {
+						"hash": 1358056632,
+						"max": 1,
+						"min": 0,
+						"size": 256,
+						"sum": 143
+					},
+					"elevation": {
+						"hash": 2178911685,
+						"max": 12,
+						"min": 12,
+						"size": 256,
+						"sum": 3072
+					},
+					"feature_reserved": {
+						"hash": 2006995710,
+						"max": 1,
+						"min": 0,
+						"size": 256,
+						"sum": 25
+					},
+					"moisture": {
+						"hash": 153897910,
+						"max_scaled": 765348,
+						"min_scaled": 285573,
+						"size": 256,
+						"sum_scaled": 141014461
+					},
+					"soil_region": {
+						"hash": 1299626960,
+						"max": 6,
+						"min": 1,
+						"size": 256,
+						"sum": 1097
+					},
+					"temperature": {
+						"hash": 4069201236,
+						"max_scaled": 758688,
+						"min_scaled": 452548,
+						"size": 256,
+						"sum_scaled": 161830380
+					},
+					"tree_density": {
+						"hash": 2205222363,
+						"max_scaled": 1000000,
+						"min_scaled": 0,
+						"size": 256,
+						"sum_scaled": 61774898
+					}
+				},
+				"passes": {
+					"pass_count": 14,
+					"pass_names": [
+						"climate_maps",
+						"biome_map",
+						"geology_maps",
+						"fill_solid_terrain",
+						"carve_caves",
+						"add_static_water",
+						"add_ores",
+						"apply_surface_blocks",
+						"apply_ramps",
+						"place_trees",
+						"place_flowers",
+						"final_cleanup",
+						"collect_generation_stats",
+						"bake_chunks"
+					],
+					"pass_total": 14
+				},
+				"progress": {
+					"done_count": 14,
+					"final_generation_stats": {
+						"biome_cold": 0,
+						"biome_dry": 0,
+						"biome_forest": 143,
+						"biome_plains": 113,
+						"biome_wetland": 0,
+						"cave_branches_spawned": 0,
+						"cave_brush_calls": 0,
+						"cave_carved_cells": 0,
+						"cave_rooms_carved": 0,
+						"cave_systems_started": 0,
+						"cave_walker_steps": 0,
+						"coal_blocks": 22,
+						"coal_ore_cells_placed": 22,
+						"flower_blocks": 12,
+						"flowers_placed": 12,
+						"iron_blocks": 0,
+						"iron_ore_cells_placed": 0,
+						"leaf_blocks": 70,
+						"log_blocks": 3,
+						"moss_blocks": 0,
+						"static_water_enabled": 0,
+						"trees_placed": 1,
+						"water_blocks": 0,
+						"water_cells_placed": 0
+					},
+					"row_count": 28,
+					"running_count": 14,
+					"sequence": [
+						"running:climate_maps:0/14",
+						"done:climate_maps:1/14",
+						"running:biome_map:1/14",
+						"done:biome_map:2/14",
+						"running:geology_maps:2/14",
+						"done:geology_maps:3/14",
+						"running:fill_solid_terrain:3/14",
+						"done:fill_solid_terrain:4/14",
+						"running:carve_caves:4/14",
+						"done:carve_caves:5/14",
+						"running:add_static_water:5/14",
+						"done:add_static_water:6/14",
+						"running:add_ores:6/14",
+						"done:add_ores:7/14",
+						"running:apply_surface_blocks:7/14",
+						"done:apply_surface_blocks:8/14",
+						"running:apply_ramps:8/14",
+						"done:apply_ramps:9/14",
+						"running:place_trees:9/14",
+						"done:place_trees:10/14",
+						"running:place_flowers:10/14",
+						"done:place_flowers:11/14",
+						"running:final_cleanup:11/14",
+						"done:final_cleanup:12/14",
+						"running:collect_generation_stats:12/14",
+						"done:collect_generation_stats:13/14",
+						"running:bake_chunks:13/14",
+						"done:bake_chunks:14/14"
+					],
+					"stats_row_count": 3
+				}
+			}
+		}
+	],
+	"schema": 1
+}

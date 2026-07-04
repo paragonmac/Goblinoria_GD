@@ -5,13 +5,14 @@ class_name WorldRenderer
 #region Preloads
 const ChunkMesherScript = preload("res://scripts/rendering/chunk_mesher.gd")
 const ChunkCacheScript = preload("res://scripts/rendering/chunk_cache.gd")
-const WorldRendererMeshCacheScript = preload("res://scripts/rendering/world_renderer_mesh_cache.gd")
 const WorldRendererMeshSchedulerScript = preload("res://scripts/rendering/world_renderer_mesh_scheduler.gd")
 const WorldRendererRenderLevelScript = preload("res://scripts/rendering/world_renderer_render_level.gd")
 const WorldRendererMaterialsScript = preload("res://scripts/rendering/world_renderer_materials.gd")
 const WorldRendererStatsScript = preload("res://scripts/rendering/world_renderer_stats.gd")
 const OverlayRendererScript = preload("res://scripts/rendering/overlay_renderer.gd")
 const FrustumCullerScript = preload("res://scripts/rendering/frustum_culler.gd")
+const ChunkMeshJobBuilderScript = preload("res://scripts/rendering/chunk_mesh_job_builder.gd")
+const WorldRendererMeshCacheStoreScript = preload("res://scripts/rendering/world_renderer_mesh_cache_store.gd")
 #endregion
 
 #region Constants
@@ -32,24 +33,19 @@ var world: World
 var mesher = ChunkMesherScript.new()
 var mesher_thread = ChunkMesherScript.new()
 var chunk_cache = ChunkCacheScript.new()
-var mesh_cache_helper = WorldRendererMeshCacheScript.new()
 var mesh_scheduler = WorldRendererMeshSchedulerScript.new()
 var render_level_helper = WorldRendererRenderLevelScript.new()
 var material_helper = WorldRendererMaterialsScript.new()
 var render_stats = WorldRendererStatsScript.new()
 var overlay_renderer = OverlayRendererScript.new()
 var frustum_culler = FrustumCullerScript.new()
-var chunk_mesh_cache: Dictionary = {}
+var mesh_job_builder = ChunkMeshJobBuilderScript.new()
+var mesh_cache_store = WorldRendererMeshCacheStoreScript.new()
 var use_async_meshing: bool = true
 var render_zone_visible: Dictionary = {}
 var block_solid_table := PackedByteArray()
 var block_color_table := PackedColorArray()
 var block_ramp_table := PackedByteArray()
-var mesh_cache_hits: int = 0
-var mesh_cache_misses: int = 0
-var mesh_cache_imports: int = 0
-var mesh_build_ms_total: float = 0.0
-var mesh_upload_ms_total: float = 0.0
 var pending_neighbor_remesh: Dictionary = {}
 var chunk_missing_neighbors: Dictionary = {}
 var neighbor_remesh_queued_total: int = 0
@@ -66,6 +62,7 @@ func initialize(world_ref: World) -> void:
 	overlay_renderer.initialize(world_ref)
 	material_helper.initialize(world_ref)
 	_ensure_block_tables()
+	mesh_job_builder.configure(world_ref, mesher)
 	mesh_scheduler.configure(Callable(self, "_build_mesh_result_on_worker"), MESH_RESULT_BACKLOG_MAX, MESH_RESULT_BACKLOG_SLEEP_USEC)
 	render_level_helper.configure(self, chunk_cache, mesh_scheduler)
 	_start_mesh_worker()
@@ -90,7 +87,7 @@ func clear_chunks() -> void:
 	pending_neighbor_remesh.clear()
 	chunk_missing_neighbors.clear()
 	render_level_helper.clear()
-	chunk_mesh_cache.clear()
+	mesh_cache_store.clear()
 	render_zone_visible.clear()
 	_clear_mesh_jobs()
 	if world == null:
@@ -106,8 +103,7 @@ func clear_chunk(coord: Vector3i) -> void:
 	render_level_helper.remove_coord(coord)
 	_clear_chunk_render_stats(coord)
 	_clear_neighbor_remesh_dependencies(coord)
-	if chunk_mesh_cache.has(coord):
-		chunk_mesh_cache.erase(coord)
+	mesh_cache_store.erase(coord)
 	if chunk_cache != null:
 		chunk_cache.remove_chunk(coord)
 
@@ -525,12 +521,12 @@ func _apply_mesh_result(result: Dictionary) -> bool:
 		_queue_prefetch_layers(coord, local_top)
 
 	var build_ms := float(result.get("build_ms", 0.0))
-	mesh_build_ms_total += build_ms
+	mesh_cache_store.record_build_ms(build_ms)
 	if build_ms > 0.0 and world.debug_profiler != null:
 		world.debug_profiler.add_sample("Renderer.build_chunk_mesh", build_ms)
 		if build_ms >= MESH_BUILD_LOG_THRESHOLD_MS:
 			print("Chunk mesh build %d,%d,%d: %.2f ms" % [coord.x, coord.y, coord.z, build_ms])
-	mesh_upload_ms_total += float(Time.get_ticks_usec() - apply_start_usec) / 1000.0
+	mesh_cache_store.record_upload_ms(float(Time.get_ticks_usec() - apply_start_usec) / 1000.0)
 	if prefetch:
 		_clear_prefetch_job_record(coord, local_top, revision)
 	else:
@@ -559,60 +555,16 @@ func _prefetch_key(coord: Vector3i, local_top: int) -> String:
 
 
 func _build_mesh_job(coord: Vector3i, revision: int, top_render_y: int, prefetch: bool, respect_top: bool) -> Dictionary:
-	if world == null:
-		return {}
-	if not world.is_chunk_coord_valid(coord):
-		return {}
-	var chunk: ChunkData = world.get_chunk(coord)
-	if chunk == null:
-		return {}
-	if top_render_y < 0:
-		top_render_y = world.top_render_y
-	var chunk_base_y: int = coord.y * World.CHUNK_SIZE
-	if top_render_y < chunk_base_y:
-		return {}
-	var local_top: int = World.CHUNK_SIZE - 1
-	var missing_neighbors: Array = []
-	var neighbors: Dictionary = {
-		"x_neg": _copy_neighbor_blocks(Vector3i(coord.x - 1, coord.y, coord.z), missing_neighbors),
-		"x_pos": _copy_neighbor_blocks(Vector3i(coord.x + 1, coord.y, coord.z), missing_neighbors),
-		"y_neg": _copy_neighbor_blocks(Vector3i(coord.x, coord.y - 1, coord.z), missing_neighbors),
-		"y_pos": _copy_neighbor_blocks(Vector3i(coord.x, coord.y + 1, coord.z), missing_neighbors),
-		"z_neg": _copy_neighbor_blocks(Vector3i(coord.x, coord.y, coord.z - 1), missing_neighbors),
-		"z_pos": _copy_neighbor_blocks(Vector3i(coord.x, coord.y, coord.z + 1), missing_neighbors),
-	}
-	var padded_blocks := mesher.build_padded_block_buffer(World.CHUNK_SIZE, chunk.blocks, neighbors, World.BLOCK_ID_AIR)
-	return {
-		"coord": coord,
-		"cx": coord.x,
-		"cy": coord.y,
-		"cz": coord.z,
-		"chunk_size": World.CHUNK_SIZE,
-		"top_render_y": top_render_y,
-		"air_id": World.BLOCK_ID_AIR,
-		"blocks": chunk.blocks.duplicate(),
-		"padded_blocks": padded_blocks,
-		"solid_table": block_solid_table,
-		"ramp_table": block_ramp_table,
-		"color_table": block_color_table,
-		"mesh_revision": revision,
-		"local_top": local_top,
-		"prefetch": prefetch,
-		"respect_top": respect_top,
-		"missing_neighbors": missing_neighbors,
-	}
-
-
-func _copy_neighbor_blocks(coord: Vector3i, missing_neighbors: Array) -> Variant:
-	if world == null:
-		return null
-	if not world.is_chunk_coord_valid(coord):
-		return null
-	var chunk: ChunkData = world.get_chunk(coord)
-	if chunk == null or not chunk.generated:
-		missing_neighbors.append(coord)
-		return null
-	return chunk.blocks.duplicate()
+	return mesh_job_builder.build_mesh_job(
+		coord,
+		revision,
+		top_render_y,
+		prefetch,
+		respect_top,
+		block_solid_table,
+		block_ramp_table,
+		block_color_table
+	)
 
 
 func _build_mesh_result_on_worker(job: Dictionary) -> Dictionary:
@@ -711,26 +663,15 @@ func update_render_height_anchor(anchor: Vector3) -> void:
 
 #region Mesh Cache
 func invalidate_chunk_mesh_cache(coord: Vector3i) -> void:
-	if chunk_mesh_cache.has(coord):
-		chunk_mesh_cache.erase(coord)
+	mesh_cache_store.erase(coord)
 
 
 func reset_mesh_cache_metrics() -> void:
-	mesh_cache_hits = 0
-	mesh_cache_misses = 0
-	mesh_cache_imports = 0
-	mesh_build_ms_total = 0.0
-	mesh_upload_ms_total = 0.0
+	mesh_cache_store.reset_metrics()
 
 
 func get_mesh_cache_metrics() -> Dictionary:
-	return {
-		"hits": mesh_cache_hits,
-		"misses": mesh_cache_misses,
-		"imports": mesh_cache_imports,
-		"mesh_build_ms": mesh_build_ms_total,
-		"mesh_upload_ms": mesh_upload_ms_total,
-	}
+	return mesh_cache_store.get_metrics()
 
 func get_mesher_table_snapshot() -> Dictionary:
 	_ensure_block_tables()
@@ -739,14 +680,6 @@ func get_mesher_table_snapshot() -> Dictionary:
 		"color_table": block_color_table.duplicate(),
 		"ramp_table": block_ramp_table.duplicate(),
 	}
-
-func _get_chunk_mesh_cache(coord: Vector3i) -> Dictionary:
-	if chunk_mesh_cache.has(coord):
-		return chunk_mesh_cache[coord]
-	var entry: Dictionary = {}
-	chunk_mesh_cache[coord] = entry
-	return entry
-
 
 func _store_mesh_cache_from_arrays(
 	coord: Vector3i,
@@ -763,9 +696,8 @@ func _store_mesh_cache_from_arrays(
 	mesh_metrics: Dictionary = {},
 	missing_neighbors: Array = []
 ) -> void:
-	if local_top < 0:
-		return
-	var entry: Dictionary = _mesh_cache_entry_from_arrays(
+	mesh_cache_store.store_from_arrays(
+		coord,
 		local_top,
 		vertices,
 		normals,
@@ -779,153 +711,40 @@ func _store_mesh_cache_from_arrays(
 		mesh_metrics,
 		missing_neighbors
 	)
-	_store_mesh_cache_entry(coord, local_top, entry)
-
-
-func _mesh_cache_entry_from_arrays(
-	local_top: int,
-	vertices: PackedVector3Array,
-	normals: PackedVector3Array,
-	colors: PackedColorArray,
-	uvs: PackedVector2Array,
-	uv2s: PackedVector2Array,
-	visible_faces: int,
-	occluded_faces: int,
-	has_geometry: bool,
-	revision: int,
-	mesh_metrics: Dictionary = {},
-	missing_neighbors: Array = []
-) -> Dictionary:
-	return mesh_cache_helper.entry_from_arrays(
-		local_top,
-		vertices,
-		normals,
-		colors,
-		uvs,
-		uv2s,
-		visible_faces,
-		occluded_faces,
-		has_geometry,
-		revision,
-		mesh_metrics,
-		missing_neighbors
-	)
-
-func _store_mesh_cache_entry(coord: Vector3i, local_top: int, entry: Dictionary) -> void:
-	if local_top < 0:
-		return
-	var cache := _get_chunk_mesh_cache(coord)
-	cache[local_top] = entry
 
 
 func export_persistent_mesh_cache_entry(coord: Vector3i, local_top: int) -> Dictionary:
-	if local_top < 0:
-		return {}
-	if not chunk_mesh_cache.has(coord):
-		return {}
-	var cache = chunk_mesh_cache[coord]
-	if typeof(cache) != TYPE_DICTIONARY:
-		return {}
-	if not cache.has(local_top):
-		return {}
-	var entry = cache[local_top]
-	if typeof(entry) != TYPE_DICTIONARY:
-		return {}
-	var typed_entry: Dictionary = entry
-	return mesh_cache_helper.export_persistent_entry(typed_entry, local_top)
+	return mesh_cache_store.export_persistent_entry(coord, local_top)
 
 func import_persistent_mesh_cache_entry(coord: Vector3i, entry: Dictionary) -> bool:
-	if world == null:
-		return false
-	if not world.is_chunk_coord_valid(coord):
-		return false
-	var chunk: ChunkData = world.get_chunk(coord)
-	if chunk == null:
-		return false
-	var local_top: int = int(entry.get("local_top", -1))
-	if local_top < 0 or local_top >= World.CHUNK_SIZE:
-		return false
-	if not mesh_cache_helper.validate_arrays(entry):
-		return false
-	var stored_entry: Dictionary = mesh_cache_helper.entry_from_persistent(entry, chunk.mesh_revision)
-	_store_mesh_cache_entry(coord, local_top, stored_entry)
-	mesh_cache_imports += 1
-	return true
+	return mesh_cache_store.import_persistent_entry(world, coord, entry)
 
 func _validate_mesh_cache_arrays(entry: Dictionary) -> bool:
-	return mesh_cache_helper.validate_arrays(entry)
+	return mesh_cache_store.validate_arrays(entry)
 
 func _array_mesh_from_entry(entry: Dictionary) -> ArrayMesh:
-	return mesh_cache_helper.array_mesh_from_entry(entry)
+	return mesh_cache_store.array_mesh_from_entry(entry)
 
 func has_cached_chunk_mesh(coord: Vector3i, local_top: int) -> bool:
 	return _has_cached_mesh(coord, local_top)
 
 
 func _has_cached_mesh(coord: Vector3i, local_top: int) -> bool:
-	if world == null:
-		return false
-	if local_top < 0:
-		return false
-	if not chunk_mesh_cache.has(coord):
-		return false
-	var cache = chunk_mesh_cache[coord]
-	if typeof(cache) != TYPE_DICTIONARY:
-		return false
-	var cache_local_top: int = _resolve_cached_local_top(cache, local_top)
-	if cache_local_top < 0:
-		return false
-	var entry = cache[cache_local_top]
-	if typeof(entry) != TYPE_DICTIONARY:
-		return false
-	var chunk: ChunkData = world.get_chunk(coord)
-	if chunk == null:
-		return false
-	if int(entry.get("revision", -1)) != chunk.mesh_revision:
-		cache.erase(cache_local_top)
-		return false
-	return true
+	return mesh_cache_store.has_cached_mesh(world, coord, local_top)
 
 
 func _apply_cached_mesh(coord: Vector3i, local_top: int) -> bool:
-	if local_top < 0:
+	var cached := mesh_cache_store.get_valid_entry_for_apply(world, coord, local_top)
+	if cached.is_empty():
 		return false
-	if not chunk_mesh_cache.has(coord):
-		mesh_cache_misses += 1
-		return false
-	var cache = chunk_mesh_cache[coord]
-	if typeof(cache) != TYPE_DICTIONARY:
-		mesh_cache_misses += 1
-		return false
-	var cache_local_top: int = _resolve_cached_local_top(cache, local_top)
-	if cache_local_top < 0:
-		mesh_cache_misses += 1
-		return false
-	var entry = cache[cache_local_top]
-	if typeof(entry) != TYPE_DICTIONARY:
-		mesh_cache_misses += 1
-		return false
+	var entry: Dictionary = cached["entry"]
+	var cache_local_top: int = int(cached["local_top"])
 	var chunk: ChunkData = world.get_chunk(coord)
 	if chunk == null:
-		mesh_cache_misses += 1
 		return false
-	if int(entry.get("revision", -1)) != chunk.mesh_revision:
-		cache.erase(cache_local_top)
-		mesh_cache_misses += 1
-		return false
-	mesh_cache_hits += 1
 	_apply_mesh_entry(coord, entry, chunk)
 	_queue_prefetch_layers(coord, cache_local_top)
 	return true
-
-
-func _resolve_cached_local_top(cache: Dictionary, local_top: int) -> int:
-	if cache.has(local_top):
-		return local_top
-	var full_local_top: int = World.CHUNK_SIZE - 1
-	if local_top != full_local_top and cache.has(full_local_top):
-		return full_local_top
-	return -1
 
 
 func _mesh_request_local_top(coord: Vector3i, top_render_y: int) -> int:
@@ -1070,16 +889,17 @@ func get_chunk_draw_stats() -> Dictionary:
 
 func get_mesh_work_stats() -> Dictionary:
 	var scheduler_stats := mesh_scheduler.get_stats()
+	var cache_metrics := mesh_cache_store.get_metrics()
 	var stats: Dictionary = render_stats.get_mesh_work_stats()
 	stats["job_queue"] = int(scheduler_stats.get("job_queue", 0))
 	stats["result_queue"] = int(scheduler_stats.get("result_queue", 0))
 	stats["job_set"] = int(scheduler_stats.get("job_set", 0))
 	stats["prefetch_set"] = int(scheduler_stats.get("prefetch_set", 0))
-	stats["cache_hits"] = mesh_cache_hits
-	stats["cache_misses"] = mesh_cache_misses
-	stats["cache_imports"] = mesh_cache_imports
-	stats["mesh_build_ms"] = mesh_build_ms_total
-	stats["mesh_upload_ms"] = mesh_upload_ms_total
+	stats["cache_hits"] = int(cache_metrics.get("hits", 0))
+	stats["cache_misses"] = int(cache_metrics.get("misses", 0))
+	stats["cache_imports"] = int(cache_metrics.get("imports", 0))
+	stats["mesh_build_ms"] = float(cache_metrics.get("mesh_build_ms", 0.0))
+	stats["mesh_upload_ms"] = float(cache_metrics.get("mesh_upload_ms", 0.0))
 	stats["pending_neighbor_remesh_chunks"] = pending_neighbor_remesh.size()
 	stats["pending_neighbor_remesh_dependents"] = _count_pending_neighbor_remesh_dependents()
 	stats["neighbor_remesh_queued"] = neighbor_remesh_queued_total

@@ -2,6 +2,8 @@ extends RefCounted
 class_name MainYTransitionProfiler
 ## Records Y-level transition diagnostics for render-level changes.
 
+const WorldChunkSpaceScript = preload("res://scripts/world/world_chunk_space.gd")
+
 #region State
 var owner_node: Node
 var world: World
@@ -134,8 +136,7 @@ func _snapshot_float(snapshot: Dictionary, key: String) -> float:
 func _chunk_y_for_render_y(render_y: int) -> int:
 	if world == null:
 		return 0
-	var clamped_y: int = clampi(render_y, 0, world.world_size_y - 1)
-	return clampi(int(floor(float(clamped_y) / float(World.CHUNK_SIZE))), 0, World.WORLD_CHUNKS_Y - 1)
+	return WorldChunkSpaceScript.chunk_y_for_render_y(render_y, world.world_size_y)
 
 
 func _debug_overlay() -> DebugOverlay:

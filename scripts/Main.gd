@@ -848,8 +848,9 @@ func _format_arena_cook_status(status_prefix: String, phase: String, progress: D
 
 
 func _format_arena_generation_detail(phase: String, progress: Dictionary) -> String:
+	var stats_line: String = _format_generation_stats_line(progress)
 	if not phase.begins_with("Generating"):
-		return ""
+		return stats_line
 	var pass_name: String = str(progress.get("pipeline_pass_name", ""))
 	if pass_name.is_empty():
 		return "Layers: climate, biome, strata, caves, water, ores, trees, flowers"
@@ -859,10 +860,35 @@ func _format_arena_generation_detail(phase: String, progress: Dictionary) -> Str
 	var pass_number: int = clampi(pass_completed + 1, 1, pass_total)
 	if pass_state == "done":
 		pass_number = clampi(pass_completed, 1, pass_total)
-	return "Now: %s (%d/%d)\nLayers: climate, biome, strata, caves, water, ores, trees, flowers" % [
-		_humanize_generation_pass(pass_name),
-		pass_number,
-		pass_total,
+	var lines: Array[String] = [
+		"Now: %s (%d/%d)" % [_humanize_generation_pass(pass_name), pass_number, pass_total],
+		"Layers: climate, biome, strata, caves, water, ores, trees, flowers",
+	]
+	if not stats_line.is_empty():
+		lines.append(stats_line)
+	var result: String = lines[0]
+	for i in range(1, lines.size()):
+		result += "\n%s" % lines[i]
+	return result
+
+
+func _format_generation_stats_line(progress: Dictionary) -> String:
+	var stats_value = progress.get("generation_stats", {})
+	if typeof(stats_value) != TYPE_DICTIONARY:
+		return ""
+	var stats: Dictionary = stats_value
+	if stats.is_empty():
+		return ""
+	return "Stats: trees %d | flowers %d | water %d | coal %d | iron %d | caves %d cells, %d rooms | cave steps %d | brushes %d" % [
+		int(stats.get("trees_placed", 0)),
+		int(stats.get("flower_blocks", stats.get("flowers_placed", 0))),
+		int(stats.get("water_blocks", 0)),
+		int(stats.get("coal_blocks", 0)),
+		int(stats.get("iron_blocks", 0)),
+		int(stats.get("cave_carved_cells", 0)),
+		int(stats.get("cave_rooms_carved", 0)),
+		int(stats.get("cave_walker_steps", 0)),
+		int(stats.get("cave_brush_calls", 0)),
 	]
 
 

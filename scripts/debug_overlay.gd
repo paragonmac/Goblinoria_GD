@@ -4,6 +4,7 @@ extends CanvasLayer
 
 #region Preloads
 const CPUProfilerUIScript = preload("res://addons/proprofiler/cpu_profiler/ui/cpu_profiler_ui.gd")
+const DiagnosticsCsvWriterScript = preload("res://scripts/diagnostics/csv_writer.gd")
 #endregion
 
 #region References
@@ -284,7 +285,7 @@ func update_streaming_stats() -> void:
 		return
 	last_streaming_stats_ms = Time.get_ticks_msec()
 	var stats := _collect_streaming_stats()
-	streaming_stats_label.text = "Streaming chunks:%d build:%d pending:%s y:%d..%d\nMesh q:%d res:%d act:%d pre:%d nbr:%d/%d q:%d\nNodes a:%d p:%d/%d new:%d reuse:%d free:%d\nGeo v:%d tri:%d faces:%d/%d\nGreedy %d/%d saved:%.0f%% ramp:%d\nCache h:%d m:%d i:%d ms:%.0f/%.0f\nRadii s:%d r:%d u:%d\nBuffer %d (base %d max %d)" % [
+	streaming_stats_label.text = "Streaming chunks:%d build:%d pending:%s y:%d..%d\nMesh q:%d res:%d act:%d pre:%d nbr:%d/%d q:%d\nNodes a:%d p:%d/%d new:%d reuse:%d free:%d\nGeo v:%d tri:%d faces:%d/%d\nGreedy %d/%d saved:%.0f%% ramp:%d\nCache h:%d m:%d i:%d ms:%.0f/%.0f\nRadii s:%d r:%d\nBuffer %d (base %d max %d)" % [
 		int(stats["loaded_chunks"]),
 		int(stats["build_queue"]),
 		"true" if int(stats["stream_pending"]) != 0 else "false",
@@ -318,7 +319,6 @@ func update_streaming_stats() -> void:
 		float(stats["mesh_upload_ms"]),
 		int(stats["stream_radius"]),
 		int(stats["render_radius"]),
-		int(stats["unload_radius"]),
 		int(stats["buffer_last"]),
 		int(stats["buffer_base"]),
 		int(stats["buffer_max"]),
@@ -355,7 +355,6 @@ func update_streaming_capture(dt: float) -> void:
 		str(int(stats["stream_max_y"])),
 		str(int(stats["stream_radius"])),
 		str(int(stats["render_radius"])),
-		str(int(stats["unload_radius"])),
 		str(int(stats["buffer_last"])),
 		str(int(stats["buffer_base"])),
 		str(int(stats["buffer_max"])),
@@ -391,8 +390,7 @@ func update_streaming_capture(dt: float) -> void:
 		str(int(overlay_stats.get("task_count", 0))),
 		str(int(overlay_stats.get("task_visible_count", 0))),
 	]
-	var escaped_overlay_positions := overlay_positions_str.replace("\"", "\"\"")
-	var line := "%s,\"%s\"" % [",".join(csv_parts), escaped_overlay_positions]
+	var line := "%s,%s" % [",".join(csv_parts), DiagnosticsCsvWriterScript.escape(overlay_positions_str, true)]
 	streaming_capture_lines.append(line)
 
 
@@ -401,7 +399,7 @@ func _start_streaming_capture() -> void:
 	streaming_capture_start_ms = Time.get_ticks_msec()
 	streaming_capture_lines.clear()
 	streaming_capture_path = "user://streaming_capture_%d.csv" % streaming_capture_start_ms
-	streaming_capture_lines.append("t_ms,cam_x,cam_y,cam_z,top_render_y,loaded_chunks,build_queue,stream_pending,stream_min_y,stream_max_y,stream_radius,render_radius,unload_radius,buffer_last,buffer_base,buffer_max,mesh_job_queue,mesh_result_queue,mesh_job_set,mesh_prefetch_set,pending_neighbor_remesh_chunks,pending_neighbor_remesh_dependents,neighbor_remesh_queued,chunk_node_active,chunk_node_pooled,chunk_node_pool_max,chunk_node_created,chunk_node_reused,chunk_node_freed,mesh_vertices,mesh_triangles,mesh_visible_faces,mesh_occluded_faces,greedy_visible_faces,greedy_source_visible_faces,greedy_reduction_percent,ramp_visible_faces,mesh_cache_hits,mesh_cache_misses,mesh_cache_imports,mesh_build_ms,mesh_upload_ms,mem_static_mb,drag_count,drag_visible,task_count,task_visible,overlay_positions")
+	streaming_capture_lines.append("t_ms,cam_x,cam_y,cam_z,top_render_y,loaded_chunks,build_queue,stream_pending,stream_min_y,stream_max_y,stream_radius,render_radius,buffer_last,buffer_base,buffer_max,mesh_job_queue,mesh_result_queue,mesh_job_set,mesh_prefetch_set,pending_neighbor_remesh_chunks,pending_neighbor_remesh_dependents,neighbor_remesh_queued,chunk_node_active,chunk_node_pooled,chunk_node_pool_max,chunk_node_created,chunk_node_reused,chunk_node_freed,mesh_vertices,mesh_triangles,mesh_visible_faces,mesh_occluded_faces,greedy_visible_faces,greedy_source_visible_faces,greedy_reduction_percent,ramp_visible_faces,mesh_cache_hits,mesh_cache_misses,mesh_cache_imports,mesh_build_ms,mesh_upload_ms,mem_static_mb,drag_count,drag_visible,task_count,task_visible,overlay_positions")
 	print("Streaming capture started: %s" % streaming_capture_path)
 
 
@@ -422,18 +420,14 @@ func _stop_streaming_capture() -> void:
 func record_y_transition(row: Dictionary) -> void:
 	if not _ensure_y_transition_profile_file():
 		return
-	var values: Array = []
-	for column in Y_TRANSITION_PROFILE_COLUMNS:
-		values.append(_csv_escape(row.get(column, "")))
-	y_transition_profile_file.store_line(",".join(values))
+	y_transition_profile_file.store_line(DiagnosticsCsvWriterScript.row_from_columns(row, Y_TRANSITION_PROFILE_COLUMNS))
 	y_transition_profile_file.flush()
 
 
 func _ensure_y_transition_profile_file() -> bool:
 	if y_transition_profile_file != null:
 		return true
-	var result := DirAccess.make_dir_recursive_absolute(Y_TRANSITION_PROFILE_DIR)
-	if result != OK:
+	if not DiagnosticsCsvWriterScript.ensure_dir(Y_TRANSITION_PROFILE_DIR):
 		push_warning("Y transition profile directory failed: %s" % Y_TRANSITION_PROFILE_DIR)
 		return false
 	var stamp := Time.get_datetime_string_from_system().replace(":", "-").replace(" ", "_")
@@ -442,17 +436,10 @@ func _ensure_y_transition_profile_file() -> bool:
 	if y_transition_profile_file == null:
 		push_warning("Y transition profile failed: %s" % y_transition_profile_path)
 		return false
-	y_transition_profile_file.store_line(",".join(Y_TRANSITION_PROFILE_COLUMNS))
+	y_transition_profile_file.store_line(DiagnosticsCsvWriterScript.row_from_values(Y_TRANSITION_PROFILE_COLUMNS))
 	y_transition_profile_file.flush()
 	print("Y transition profile: %s" % ProjectSettings.globalize_path(y_transition_profile_path))
 	return true
-
-
-func _csv_escape(value: Variant) -> String:
-	var text := str(value)
-	if text.contains("\"") or text.contains(",") or text.contains("\n"):
-		return "\"%s\"" % text.replace("\"", "\"\"")
-	return text
 
 
 func _collect_overlay_stats() -> Dictionary:
@@ -510,7 +497,6 @@ func _collect_streaming_stats() -> Dictionary:
 		"stream_max_y": 0,
 		"stream_radius": 0,
 		"render_radius": 0,
-		"unload_radius": 0,
 		"buffer_base": 0,
 		"buffer_max": 0,
 		"buffer_last": 0,
@@ -559,7 +545,6 @@ func _collect_streaming_stats() -> Dictionary:
 			stats["stream_max_y"] = ((streaming.stream_max_y + 1) * World.CHUNK_SIZE) - 1
 		stats["stream_radius"] = streaming.stream_radius_chunks
 		stats["render_radius"] = streaming.render_radius_chunks
-		stats["unload_radius"] = streaming.unload_radius_chunks
 		stats["buffer_base"] = streaming.stream_base_buffer_chunks
 		stats["buffer_max"] = streaming.stream_max_buffer_chunks
 		stats["buffer_last"] = streaming.last_buffer_chunks
@@ -771,16 +756,7 @@ func _maybe_append_debug_timings_log() -> void:
 
 
 func _append_line(path: String, line: String) -> void:
-	var file: FileAccess
-	if FileAccess.file_exists(path):
-		file = FileAccess.open(path, FileAccess.READ_WRITE)
-		if file != null:
-			file.seek_end()
-	else:
-		file = FileAccess.open(path, FileAccess.WRITE)
-	if file == null:
-		return
-	file.store_line(line)
+	DiagnosticsCsvWriterScript.append_line(path, line)
 
 
 func _poll_due(last_ms: int) -> bool:

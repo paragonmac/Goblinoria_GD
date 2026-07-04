@@ -10,6 +10,8 @@ const WorldSaveLoadScript = preload("res://scripts/world_save_load.gd")
 const WorldArenaCookerScript = preload("res://scripts/world_arena_cooker.gd")
 const WorldStreamingScript = preload("res://scripts/world_streaming.gd")
 const WorldRaycasterScript = preload("res://scripts/world_raycaster.gd")
+const WorldInventoryScript = preload("res://scripts/world/world_inventory.gd")
+const WorldChunkSpaceScript = preload("res://scripts/world/world_chunk_space.gd")
 const ChunkDataType = ChunkDataScript
 #endregion
 
@@ -173,7 +175,8 @@ var deepest_structure_y: int = UNINITIALIZED_Y
 #endregion
 
 #region Inventory
-var inventory: Dictionary = {}
+var inventory_store = WorldInventoryScript.new()
+var inventory: Dictionary = inventory_store.items
 #endregion
 
 #region Ramp Lookup Table
@@ -255,28 +258,19 @@ func load_world(path: String) -> bool:
 
 #region Chunk Utilities
 func world_to_chunk_coords(x: int, y: int, z: int) -> Vector3i:
-	return Vector3i(
-		floor_div(x, CHUNK_SIZE),
-		floor_div(y, CHUNK_SIZE),
-		floor_div(z, CHUNK_SIZE)
-	)
+	return WorldChunkSpaceScript.world_to_chunk_coords(x, y, z)
 
 func chunk_to_local_coords(x: int, y: int, z: int) -> Vector3i:
-	return Vector3i(
-		positive_mod(x, CHUNK_SIZE),
-		positive_mod(y, CHUNK_SIZE),
-		positive_mod(z, CHUNK_SIZE)
-	)
+	return WorldChunkSpaceScript.chunk_to_local_coords(x, y, z)
 
 func floor_div(a: int, b: int) -> int:
-	return int(floor(float(a) / float(b)))
+	return WorldChunkSpaceScript.floor_div(a, b)
 
 func positive_mod(a: int, b: int) -> int:
-	var r := a % b
-	return r + b if r < 0 else r
+	return WorldChunkSpaceScript.positive_mod(a, b)
 
 func chunk_index(lx: int, ly: int, lz: int) -> int:
-	return (lz * CHUNK_SIZE + ly) * CHUNK_SIZE + lx
+	return WorldChunkSpaceScript.chunk_index(lx, ly, lz)
 
 func get_chunk(coord: Vector3i) -> ChunkDataType:
 	if not is_chunk_coord_valid(coord):
@@ -327,17 +321,6 @@ func request_chunk_generation_async(coord: Vector3i, high_priority: bool = false
 	return false
 
 
-func unload_chunk(coord: Vector3i) -> void:
-	var chunk: ChunkDataType = get_chunk(coord)
-	if chunk == null:
-		return
-	if chunk.dirty and save_load != null:
-		save_load.save_chunk_current(coord, chunk)
-	if renderer != null:
-		renderer.clear_chunk(coord)
-	chunks.erase(coord)
-
-
 func notify_chunk_loaded(coord: Vector3i) -> void:
 	if renderer != null:
 		renderer.notify_chunk_loaded(coord)
@@ -349,39 +332,23 @@ func touch_chunk(chunk: ChunkDataType) -> void:
 
 
 func is_chunk_coord_valid(coord: Vector3i) -> bool:
-	var max_cy: int = int(floor(float(world_size_y) / float(CHUNK_SIZE)))
-	return coord.x >= WORLD_MIN_CHUNK_X \
-		and coord.x <= WORLD_MAX_CHUNK_X \
-		and coord.y >= 0 \
-		and coord.y < max_cy \
-		and coord.z >= WORLD_MIN_CHUNK_Z \
-		and coord.z <= WORLD_MAX_CHUNK_Z
+	return WorldChunkSpaceScript.is_chunk_coord_valid_for_height(coord, world_size_y)
 
 
 func is_block_xz_valid(x: int, z: int) -> bool:
-	return x >= WORLD_MIN_BLOCK_X \
-		and x <= WORLD_MAX_BLOCK_X \
-		and z >= WORLD_MIN_BLOCK_Z \
-		and z <= WORLD_MAX_BLOCK_Z
+	return WorldChunkSpaceScript.is_block_xz_valid(x, z)
 
 
 func is_block_coord_valid(x: int, y: int, z: int) -> bool:
-	return is_block_xz_valid(x, z) and y >= 0 and y < world_size_y
+	return WorldChunkSpaceScript.is_block_coord_valid(x, y, z, world_size_y)
 
 
 func clamp_block_xz(pos: Vector3) -> Vector3:
-	return Vector3(
-		clampf(pos.x, float(WORLD_MIN_BLOCK_X), float(WORLD_MAX_BLOCK_X)),
-		pos.y,
-		clampf(pos.z, float(WORLD_MIN_BLOCK_Z), float(WORLD_MAX_BLOCK_Z))
-	)
+	return WorldChunkSpaceScript.clamp_block_xz(pos)
 
 
 func get_world_bounds_rect() -> Rect2:
-	return Rect2(
-		Vector2(float(WORLD_MIN_BLOCK_X), float(WORLD_MIN_BLOCK_Z)),
-		Vector2(float(world_size_x), float(world_size_z))
-	)
+	return WorldChunkSpaceScript.world_bounds_rect(world_size_x, world_size_z)
 
 
 func ensure_chunk_buffer_for_pos(pos: Vector3i) -> void:
@@ -712,29 +679,19 @@ func queue_task_request(task_type: int, pos: Vector3i, material: int) -> void:
 
 #region Inventory
 func add_to_inventory(block_id: int, count: int = 1) -> void:
-	if block_id <= 0 or count <= 0:
-		return
-	inventory[block_id] = inventory.get(block_id, 0) + count
+	inventory_store.add(block_id, count)
 
 
 func remove_from_inventory(block_id: int, count: int = 1) -> bool:
-	var current: int = inventory.get(block_id, 0)
-	if current < count:
-		return false
-	var remaining: int = current - count
-	if remaining <= 0:
-		inventory.erase(block_id)
-	else:
-		inventory[block_id] = remaining
-	return true
+	return inventory_store.remove(block_id, count)
 
 
 func get_inventory_count(block_id: int) -> int:
-	return inventory.get(block_id, 0)
+	return inventory_store.count(block_id)
 
 
 func clear_inventory() -> void:
-	inventory.clear()
+	inventory_store.clear()
 #endregion
 
 

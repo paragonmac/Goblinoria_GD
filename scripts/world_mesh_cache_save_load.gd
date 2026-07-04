@@ -2,6 +2,8 @@ extends RefCounted
 class_name WorldMeshCacheSaveLoad
 ## Handles optional persistent raw mesh-cache acceleration data.
 
+const WorldChunkSpaceScript = preload("res://scripts/world/world_chunk_space.gd")
+
 #region Constants
 const MESH_CACHE_MAGIC := 0x474D4553
 const MESH_CACHE_VERSION := 1
@@ -149,13 +151,7 @@ func _build_persistent_mesh_cache_coords(world: World) -> Array[Vector3i]:
 	var coords: Array[Vector3i] = []
 	if world == null:
 		return coords
-	for cy: int in range(World.WORLD_CHUNKS_Y):
-		for cx: int in range(World.WORLD_MIN_CHUNK_X, World.WORLD_MAX_CHUNK_X + 1):
-			for cz: int in range(World.WORLD_MIN_CHUNK_Z, World.WORLD_MAX_CHUNK_Z + 1):
-				var coord := Vector3i(cx, cy, cz)
-				if world.is_chunk_coord_valid(coord):
-					coords.append(coord)
-	return coords
+	return WorldChunkSpaceScript.all_world_chunk_targets()
 
 
 func _persistent_mesh_cache_entry_for_coord(world: World, bulk_chunk_blocks: Dictionary, coord: Vector3i, blocks: PackedByteArray) -> Dictionary:

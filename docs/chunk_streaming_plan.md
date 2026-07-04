@@ -2,11 +2,13 @@
 
 This is the working plan for chunked storage, streaming, and persistence.
 
+Active follow-up work is tracked in GitHub Issues. Historical completed checklist items remain here for context; open work is linked to issues instead of tracked as local TODO checkboxes.
+
 ## Goals
 - Finite chunked in-memory storage (no full-world array).
 - Deterministic on-demand generation (seed + coord).
 - Versioned save/load with explicit mismatch detection.
-- Streaming with load priorities and unload policy.
+- Streaming with load priorities for the current finite resident world.
 - Render meshes tied to loaded chunk state.
 
 ## Constraints / Notes
@@ -48,64 +50,62 @@ This is the working plan for chunked storage, streaming, and persistence.
   `data_len:u32`, `compression:u8`, `block_table_hash:u32`.
 - [x] Data payload: blocks as `u8` (compressed or raw).
 - [x] Implement `serialize_chunk()` / `deserialize_chunk()` with version checks.
-- [ ] Add migration stub (future).
+- Tracked in [#6](https://github.com/paragonmac/Goblinoria_GD/issues/6): Add migration stub (future).
 - [x] Bulk save compression: `world_blocks.dat` v2 stores fill chunks, raw chunks, or ZSTD-compressed chunks and still reads the previous raw bulk layout.
 
-## Milestone 4: Disk-Backed Cache (Save on Unload)
+## Milestone 4: Disk-Backed Cache
 - [x] File path scheme: `user://saves/<world_id>/chunks/x_y_z.chunk`.
 - [x] Track dirty flag per chunk.
 - [x] Implement `save_chunk()` (only if dirty).
 - [x] Implement `load_chunk()` (read from disk or generate).
-- [x] Implement `unload_chunk()` (save + free memory).
-- [ ] Unload policy: memory budget + hybrid (distance + recent access).
-- [ ] Memory pressure thresholds: soft cap increases unload rate, hard cap pauses new loads.
-- [x] Add periodic unload sweep (frame budget).
+- Tracked in [#4](https://github.com/paragonmac/Goblinoria_GD/issues/4): Add explicit destructive chunk handling if gameplay needs whole-chunk removal, such as explosions.
+- Tracked in [#7](https://github.com/paragonmac/Goblinoria_GD/issues/7): Decide whether runtime cache eviction is needed for worlds larger than the current finite map.
 
 ## Milestone 5: Load/Stream Scheduling (Priority Queue)
 - [x] Chunk load queue with priority by distance to camera target (center-spiral order).
 - [x] Process N loads per frame (configurable).
 - [x] Prioritize render zone loads before buffer zone loads.
-- [ ] Prevent starvation (age bump).
+- Tracked in [#8](https://github.com/paragonmac/Goblinoria_GD/issues/8): Prevent starvation (age bump).
 - [x] Cancel queued loads for chunks that leave range (queue reset on range change).
 - [x] Clamp X/Z streaming and world access to the finite 32x32 chunk map scope.
 - [x] Add a user-settable startup flag to choose limited streaming or whole finite-map generation.
 
 ## Zone Configuration
-- [x] Define constants: render radius, buffer (base/max), unload radius.
+- [x] Define constants: render radius and buffer (base/max).
 - [x] Render zone: actively drawn chunks.
 - [x] Buffer zone: meshed and cached, but `visible = false`.
-- [x] Unload zone: chunks outside `UNLOAD_RADIUS` are candidates for unload.
+- Tracked in [#7](https://github.com/paragonmac/Goblinoria_GD/issues/7): Decide whether runtime cache eviction is needed for worlds larger than the current finite map.
 - [x] View-scaled buffer expansion for stream/render bounds.
 - [x] Vertical streaming uses a centered render-level margin of +/-20 blocks, rounded to chunk boundaries.
 - [x] Y-level reveal gate prepares only the camera-visible bounds plus a 1-chunk X/Z safety margin.
 - [x] Directional Y prewarm queues the next chunk-height ahead using broader buffered render bounds.
 - [x] New-world full-map mode uses the arena cooker: parallel block generation, parallel raw mesh-cache builds, frame-budgeted merge, and a diagnostics CSV under `user://diagnostics`.
-- [ ] Tighten the blocking Y-level reveal gate to the actual visible chunk set, targeting roughly 100 chunks at max zoom instead of the current axis-aligned camera rectangle.
+- Tracked in [#9](https://github.com/paragonmac/Goblinoria_GD/issues/9): Tighten the blocking Y-level reveal gate to the actual visible chunk set, targeting roughly 100 chunks at max zoom instead of the current axis-aligned camera rectangle.
 
 ## Milestone 6: Render Streaming Tied to Chunk State
 - [x] Mesh state per chunk: `NONE | PENDING | READY`.
 - [x] Only mesh when chunk is loaded + in stream range (render + buffer).
-- [x] Clear mesh on unload.
+- Tracked in [#10](https://github.com/paragonmac/Goblinoria_GD/issues/10): Clear mesh when chunks are explicitly destroyed or reloaded.
 - [x] Rebuild neighbor meshes when block edits hit chunk edges.
 - [x] Track missing neighbor data when meshing and remesh affected chunks when those neighbors load.
 - [x] Track neighbor-triggered remesh in `pending_neighbor_remesh: Dictionary`.
-- [ ] Decide whether to delay visible meshing until all valid neighbors are loaded, or keep current quick mesh + refresh behavior.
+- Tracked in [#10](https://github.com/paragonmac/Goblinoria_GD/issues/10): Decide whether to delay visible meshing until all valid neighbors are loaded, or keep current quick mesh + refresh behavior.
 
 ## Milestone 7: Compression (Per Chunk)
 - [x] Use Godot ZSTD compression for normal bulk chunk payloads when it beats raw storage.
 - [x] Store per-entry kind/compression flags in the bulk block file.
-- [ ] Benchmark CPU vs disk savings.
+- Tracked in [#11](https://github.com/paragonmac/Goblinoria_GD/issues/11): Benchmark CPU vs disk savings.
 
 ## Milestone 8: Async IO
-- [ ] Background thread for load/save.
+- Tracked in [#12](https://github.com/paragonmac/Goblinoria_GD/issues/12): Background thread for load/save.
 - [x] Thread-safe request queue.
 - [x] Main-thread handoff for chunk data.
 - [x] Placeholder state for in-flight chunks.
 
 ## Milestone 9: Region Files (Optional)
-- [ ] Decide region layout: 2D (x/z) + vertical slabs or full 3D cubes.
-- [ ] Define region header + offset table.
-- [ ] Implement read/write + compaction strategy.
+- Tracked in [#13](https://github.com/paragonmac/Goblinoria_GD/issues/13): Decide region layout: 2D (x/z) + vertical slabs or full 3D cubes.
+- Tracked in [#13](https://github.com/paragonmac/Goblinoria_GD/issues/13): Define region header + offset table.
+- Tracked in [#13](https://github.com/paragonmac/Goblinoria_GD/issues/13): Implement read/write + compaction strategy.
 
 ## Milestone 10: Async Meshing (Optional)
 - [x] Snapshot chunk + neighbor data (thread-safe).
@@ -118,10 +118,10 @@ This is the working plan for chunked storage, streaming, and persistence.
 - [x] Store mesh cache as raw packed arrays and create `ArrayMesh` lazily only when a chunk becomes visible.
 
 ## Milestone 11: Higher-Risk Rendering Optimizations
-- [ ] Use debug metrics to decide whether packed custom vertex data is worth the shader complexity.
+- Tracked in [#14](https://github.com/paragonmac/Goblinoria_GD/issues/14): Use debug metrics to decide whether packed custom vertex data is worth the shader complexity.
 - [x] Add bounded chunk `MeshInstance3D` pooling to reduce allocation/free churn during streaming.
-- [ ] Use debug metrics and chunk node pool stats to decide whether SceneTree chunk instance overhead justifies a RenderingServer migration.
-- [ ] Keep current ArrayMesh output path until vertex count, triangle count, upload time, or node overhead is measured as the next bottleneck.
+- Tracked in [#14](https://github.com/paragonmac/Goblinoria_GD/issues/14): Use debug metrics and chunk node pool stats to decide whether SceneTree chunk instance overhead justifies a RenderingServer migration.
+- Tracked in [#14](https://github.com/paragonmac/Goblinoria_GD/issues/14): Keep current ArrayMesh output path until vertex count, triangle count, upload time, or node overhead is measured as the next bottleneck.
 
 ## Open Decisions
 - Chunk size (current: 8).
@@ -133,5 +133,5 @@ This is the working plan for chunked storage, streaming, and persistence.
 
 ## Suggested Defaults (Tunable)
 - Chunk size: 16 (balances mesh granularity vs overhead).
-- Zone radii: `RENDER_RADIUS = 8`, `BUFFER_RADIUS = 10`, `UNLOAD_RADIUS = 12` (chunks).
+- Zone radii: `RENDER_RADIUS = 8`, `BUFFER_RADIUS = 10` (chunks).
 - Memory budget: soft cap 2000 chunks, hard cap 2500 chunks.

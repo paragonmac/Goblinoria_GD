@@ -1,6 +1,8 @@
 extends RefCounted
 class_name MainRenderLevelTargetBuilder
 
+const WorldChunkSpaceScript = preload("res://scripts/world/world_chunk_space.gd")
+
 const STARTUP_REVEAL_BAND_RADIUS := 1
 const STARTUP_GENERATION_NEIGHBOR_BAND_RADIUS := 1
 const Y_REVEAL_READY_MARGIN_CHUNKS := 1
@@ -65,32 +67,24 @@ func build_chunk_targets_for_bands(bands: Array[int]) -> Array[Vector3i]:
 	var targets: Array[Vector3i] = []
 	if world == null:
 		return targets
-	for cy_value in bands:
-		var cy: int = int(cy_value)
-		for cx: int in range(World.WORLD_MIN_CHUNK_X, World.WORLD_MAX_CHUNK_X + 1):
-			for cz: int in range(World.WORLD_MIN_CHUNK_Z, World.WORLD_MAX_CHUNK_Z + 1):
-				var coord := Vector3i(cx, cy, cz)
-				if world.is_chunk_coord_valid(coord):
-					targets.append(coord)
-	return targets
+	return WorldChunkSpaceScript.chunk_targets_for_bands(bands)
 
 
 func build_all_world_chunk_targets() -> Array[Vector3i]:
-	var bands: Array[int] = []
-	for cy: int in range(World.WORLD_CHUNKS_Y):
-		bands.append(cy)
-	return build_chunk_targets_for_bands(bands)
+	if world == null:
+		var targets: Array[Vector3i] = []
+		return targets
+	return WorldChunkSpaceScript.all_world_chunk_targets()
 
 
 func chunk_y_for_render_y(render_y: int) -> int:
 	if world == null:
 		return 0
-	var clamped_y: int = clampi(render_y, 0, world.world_size_y - 1)
-	return clampi(int(floor(float(clamped_y) / float(World.CHUNK_SIZE))), 0, World.WORLD_CHUNKS_Y - 1)
+	return WorldChunkSpaceScript.chunk_y_for_render_y(render_y, world.world_size_y)
 
 
 func chunk_full_top_y(coord: Vector3i) -> int:
-	return coord.y * World.CHUNK_SIZE + World.CHUNK_SIZE - 1
+	return WorldChunkSpaceScript.full_top_y(coord)
 
 
 func get_stream_view_rect_for_y(render_y: int) -> Rect2:
@@ -107,12 +101,7 @@ func _build_reveal_mesh_bands(render_y: int) -> Array[int]:
 
 
 func _build_band_range(center_cy: int, radius: int) -> Array[int]:
-	var bands: Array[int] = []
-	var min_cy: int = maxi(0, center_cy - radius)
-	var max_cy: int = mini(World.WORLD_CHUNKS_Y - 1, center_cy + radius)
-	for cy: int in range(min_cy, max_cy + 1):
-		bands.append(cy)
-	return bands
+	return WorldChunkSpaceScript.band_range(center_cy, radius)
 
 
 func _build_reveal_chunk_xz_bounds(render_y: int, include_render_buffer: bool) -> Dictionary:
@@ -142,24 +131,11 @@ func _build_reveal_chunk_xz_bounds(render_y: int, include_render_buffer: bool) -
 
 
 func _chunk_coord_from_world_value(value: float) -> int:
-	return int(floor(value / float(World.CHUNK_SIZE)))
+	return WorldChunkSpaceScript.chunk_coord_from_world(value)
 
 
 func _build_chunk_targets_for_bands_in_bounds(bands: Array[int], bounds: Dictionary) -> Array[Vector3i]:
 	var targets: Array[Vector3i] = []
 	if world == null:
 		return targets
-	var min_cx: int = int(bounds.get("min_x", World.WORLD_MIN_CHUNK_X))
-	var max_cx: int = int(bounds.get("max_x", World.WORLD_MAX_CHUNK_X))
-	var min_cz: int = int(bounds.get("min_z", World.WORLD_MIN_CHUNK_Z))
-	var max_cz: int = int(bounds.get("max_z", World.WORLD_MAX_CHUNK_Z))
-	if min_cx > max_cx or min_cz > max_cz:
-		return targets
-	for cy_value in bands:
-		var cy: int = int(cy_value)
-		for cx: int in range(min_cx, max_cx + 1):
-			for cz: int in range(min_cz, max_cz + 1):
-				var coord := Vector3i(cx, cy, cz)
-				if world.is_chunk_coord_valid(coord):
-					targets.append(coord)
-	return targets
+	return WorldChunkSpaceScript.chunk_targets_for_bands_in_bounds(bands, bounds)

@@ -1,0 +1,68 @@
+name: Research
+description: Track investigation where the output is a decision, recommendation, or prototype notes.
+title: "[Research] "
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Research Question
+      description: What decision or uncertainty should this answer?
+      placeholder: State the question tightly enough that the result can become implementation work.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Existing repo facts, constraints, prior experiments, or source material.
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: When should this be worked on?
+      options:
+        - Blocker
+        - High
+        - Normal
+        - Low
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Worker
+        - World Generation
+        - World Destruction
+        - Streaming
+        - Rendering
+        - Save Load
+        - Tooling
+        - Project Management
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Expected Output
+      description: What artifact should this produce?
+      placeholder: Decision note, benchmark result, prototype branch, implementation ticket list, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation Plan
+      description: How the research result should be checked.
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes / Links
+      description: Optional links to papers, docs, screenshots, or related issues.
+    validations:
+      required: false

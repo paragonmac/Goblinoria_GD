@@ -4,6 +4,8 @@ class_name WorldArenaCooker
 const WorldGeneratorScript = preload("res://scripts/world_generator.gd")
 const ChunkMesherScript = preload("res://scripts/rendering/chunk_mesher.gd")
 const WorldRendererMeshCacheScript = preload("res://scripts/rendering/world_renderer_mesh_cache.gd")
+const DiagnosticsCsvWriterScript = preload("res://scripts/diagnostics/csv_writer.gd")
+const WorldChunkSpaceScript = preload("res://scripts/world/world_chunk_space.gd")
 
 const PROGRESS_UPDATE_INTERVAL := 16
 const DIAGNOSTIC_DIR := "user://diagnostics"
@@ -238,6 +240,12 @@ func get_progress() -> Dictionary:
 	var pass_completed: int = int(pipeline_progress.get("pass_completed", 0))
 	var pass_total: int = int(pipeline_progress.get("pass_total", 0))
 	var pass_state: String = str(pipeline_progress.get("state", ""))
+	var generation_stats: Dictionary = {}
+	var stats_value = pipeline_progress.get("generation_stats", {})
+	if typeof(stats_value) != TYPE_DICTIONARY:
+		stats_value = pipeline_metrics.get("generation_stats", {})
+	if typeof(stats_value) == TYPE_DICTIONARY:
+		generation_stats = stats_value.duplicate(true)
 	progress_mutex.unlock()
 	return {
 		"stage": stage,
@@ -251,6 +259,7 @@ func get_progress() -> Dictionary:
 		"pipeline_pass_completed": pass_completed,
 		"pipeline_pass_total": pass_total,
 		"pipeline_pass_state": pass_state,
+		"generation_stats": generation_stats,
 	}
 
 
@@ -280,13 +289,13 @@ func get_diagnostics() -> Dictionary:
 		"generation_mode": generation_mode,
 		"pipeline_total_ms": float(pipeline_metrics.get("total_ms", 0.0)),
 		"pipeline_pass_count": int(pipeline_metrics.get("pass_count", 0)),
+		"generation_stat_count": _generation_stat_count(),
 		"diagnostic_path": diagnostic_path,
 	}
 
 
 func write_diagnostics() -> String:
-	var dir_ok: int = DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(DIAGNOSTIC_DIR))
-	if dir_ok != OK:
+	if not DiagnosticsCsvWriterScript.ensure_dir(DIAGNOSTIC_DIR):
 		push_warning("Arena cook diagnostics skipped: cannot create diagnostics dir")
 		return ""
 	var timestamp: String = Time.get_datetime_string_from_system(false, true).replace(":", "-")
@@ -295,26 +304,45 @@ func write_diagnostics() -> String:
 	if file == null:
 		push_warning("Arena cook diagnostics skipped: cannot open %s" % path)
 		return ""
-	file.store_line("metric,value")
+	file.store_line(DiagnosticsCsvWriterScript.row_from_values(["metric", "value"]))
 	var metrics: Dictionary = get_diagnostics()
 	for key in metrics.keys():
 		if key == "diagnostic_path":
 			continue
-		file.store_line("%s,%s" % [str(key), str(metrics[key])])
+		file.store_line(DiagnosticsCsvWriterScript.row_from_values([key, metrics[key]]))
+	var generation_stats: Dictionary = _generation_stats_snapshot()
+	for stat_key in generation_stats.keys():
+		var stat_metric := "generation_stat_%s" % [str(stat_key)]
+		file.store_line(DiagnosticsCsvWriterScript.row_from_values([stat_metric, generation_stats[stat_key]]))
 	var pass_entries: Array = pipeline_metrics.get("passes", [])
 	for pass_index in range(pass_entries.size()):
 		var pass_value = pass_entries[pass_index]
 		if typeof(pass_value) == TYPE_DICTIONARY:
 			var pass_entry: Dictionary = pass_value
-			file.store_line("pipeline_pass_%d_%s_ms,%s" % [pass_index, str(pass_entry.get("name", "unknown")), str(pass_entry.get("ms", 0.0))])
+			var pass_metric := "pipeline_pass_%d_%s_ms" % [pass_index, str(pass_entry.get("name", "unknown"))]
+			file.store_line(DiagnosticsCsvWriterScript.row_from_values([pass_metric, pass_entry.get("ms", 0.0)]))
 	for i in range(worker_count):
-		file.store_line("worker_%d_generation_ms,%s" % [i, str(_worker_float(worker_generation_ms, i))])
-		file.store_line("worker_%d_mesh_ms,%s" % [i, str(_worker_float(worker_mesh_ms, i))])
-		file.store_line("worker_%d_chunks,%s" % [i, str(_worker_int(worker_totals, i))])
+		var generation_metric := "worker_%d_generation_ms" % [i]
+		var mesh_metric := "worker_%d_mesh_ms" % [i]
+		var chunks_metric := "worker_%d_chunks" % [i]
+		file.store_line(DiagnosticsCsvWriterScript.row_from_values([generation_metric, _worker_float(worker_generation_ms, i)]))
+		file.store_line(DiagnosticsCsvWriterScript.row_from_values([mesh_metric, _worker_float(worker_mesh_ms, i)]))
+		file.store_line(DiagnosticsCsvWriterScript.row_from_values([chunks_metric, _worker_int(worker_totals, i)]))
 	file.flush()
 	diagnostic_path = ProjectSettings.globalize_path(path)
 	print("Arena world cook diagnostics: %s" % diagnostic_path)
 	return diagnostic_path
+
+func _generation_stats_snapshot() -> Dictionary:
+	var stats_value = pipeline_metrics.get("generation_stats", {})
+	if typeof(stats_value) == TYPE_DICTIONARY:
+		return stats_value.duplicate()
+	return {}
+
+
+func _generation_stat_count() -> int:
+	return _generation_stats_snapshot().size()
+
 
 func _worker_float(values: Array, index: int) -> float:
 	if index < 0 or index >= values.size():
@@ -419,12 +447,7 @@ func _split_coords(source: Array[Vector3i], count: int) -> Array:
 
 
 func _build_all_world_chunk_targets() -> Array[Vector3i]:
-	var targets: Array[Vector3i] = []
-	for cy in range(World.WORLD_CHUNKS_Y):
-		for cx in range(World.WORLD_MIN_CHUNK_X, World.WORLD_MAX_CHUNK_X + 1):
-			for cz in range(World.WORLD_MIN_CHUNK_Z, World.WORLD_MAX_CHUNK_Z + 1):
-				targets.append(Vector3i(cx, cy, cz))
-	return targets
+	return WorldChunkSpaceScript.all_world_chunk_targets()
 
 
 func _run_layered_generation_worker(worker_index: int) -> void:
@@ -451,7 +474,7 @@ func _record_pipeline_progress(row: Dictionary) -> void:
 	var total_chunks: int = coords.size()
 	var chunk_equivalent_progress: int = clampi(int(round(float(total_chunks) * float(pass_completed) / float(pass_total))), 0, total_chunks)
 	progress_mutex.lock()
-	pipeline_progress = row.duplicate()
+	pipeline_progress = row.duplicate(true)
 	if worker_totals.size() > 0:
 		worker_totals[0] = total_chunks
 	if worker_progress.size() > 0:
@@ -579,12 +602,7 @@ func _arena_blocks_for_coord(coord: Vector3i) -> PackedByteArray:
 
 
 func _is_chunk_coord_valid(coord: Vector3i) -> bool:
-	return coord.x >= World.WORLD_MIN_CHUNK_X \
-		and coord.x <= World.WORLD_MAX_CHUNK_X \
-		and coord.y >= 0 \
-		and coord.y < World.WORLD_CHUNKS_Y \
-		and coord.z >= World.WORLD_MIN_CHUNK_Z \
-		and coord.z <= World.WORLD_MAX_CHUNK_Z
+	return WorldChunkSpaceScript.is_chunk_coord_valid(coord)
 
 
 func _make_air_blocks() -> PackedByteArray:
@@ -633,7 +651,11 @@ func _store_generation_result(worker_index: int, result: Dictionary) -> void:
 	progress_mutex.lock()
 	worker_generation_ms[worker_index] = float(result.get("generation_ms", 0.0))
 	if result.has("pipeline_metrics"):
-		pipeline_metrics = result.get("pipeline_metrics", {})
+		var metrics_value = result.get("pipeline_metrics", {})
+		if typeof(metrics_value) == TYPE_DICTIONARY:
+			pipeline_metrics = metrics_value.duplicate(true)
+		else:
+			pipeline_metrics = {}
 	progress_mutex.unlock()
 	result_mutex.unlock()
 

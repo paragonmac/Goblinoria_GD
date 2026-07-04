@@ -1,5 +1,5 @@
 # TODO
 
-## Gameplay
+Active project work is tracked in GitHub Issues and the `Goblinoria Roadmap` GitHub Project.
 
-- [ ] Workers should fall when the block they are standing on is removed. Re-check pathing/task state after the fall so workers do not remain visually or logically suspended in air.
+See `docs/project_management.md` for the ticket schema, priority/severity labels, project fields, and agent workflow.

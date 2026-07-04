@@ -1,0 +1,84 @@
+name: Work Item
+description: Track a feature, tech-debt task, design task, docs task, or process task.
+title: "[Work] "
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What outcome should this ticket produce?
+      placeholder: Describe the target outcome, not just the implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Why this matters and what repo facts matter before implementation.
+      placeholder: Include relevant systems, constraints, prior decisions, or links.
+    validations:
+      required: true
+  - type: dropdown
+    id: type
+    attributes:
+      label: Type
+      options:
+        - Feature
+        - Tech Debt
+        - Design
+        - Docs
+        - Tooling
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: When should this be worked on?
+      options:
+        - Blocker
+        - High
+        - Normal
+        - Low
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Worker
+        - World Generation
+        - World Destruction
+        - Streaming
+        - Rendering
+        - Save Load
+        - Tooling
+        - Project Management
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: Concrete observable outcomes required to close the ticket.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation Plan
+      description: Commands or manual checks required.
+      placeholder: Static only, Godot headless, manual editor run, playtest, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes / Links
+      description: Optional links to PRs, commits, docs, screenshots, or related issues.
+    validations:
+      required: false

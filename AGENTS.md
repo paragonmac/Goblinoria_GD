@@ -8,8 +8,13 @@ Local instructions for coding agents working in this repo.
 - Keep changes minimal and scoped to the request.
 - Avoid editing binary/asset files unless asked.
 
+## Project Tracking
+- GitHub Issues and the `Goblinoria Roadmap` GitHub Project are the source of truth for active work.
+- Use `docs/project_management.md` for ticket schema, priority/severity labels, project fields, and workflow.
+- Do not add active task lists to `TODO.md` or `docs/todo.md`; keep those files as pointers only.
+
 ## Godot / GDScript
-- Engine: Godot 4.5 (`project.godot`).
+- Engine: Godot 4.6.x (`project.godot` is authoritative).
 - Avoid hand-editing `.tscn`/`.tres` unless explicitly requested.
 - Use tabs for indentation, snake_case names, and ASCII only.
 

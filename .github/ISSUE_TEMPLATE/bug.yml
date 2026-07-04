@@ -1,0 +1,83 @@
+name: Bug
+description: Report a reproducible defect or broken behavior.
+title: "[Bug] "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is broken, and what should happen instead?
+      placeholder: Describe the observed behavior, expected behavior, and why it matters.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Include relevant files, systems, repro notes, screenshots, logs, or saves.
+      placeholder: "Example: scripts/world.gd, rendering/world_renderer.gd, occurs after digging..."
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: When should this be worked on?
+      options:
+        - Blocker
+        - High
+        - Normal
+        - Low
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      description: How bad is the user-visible impact?
+      options:
+        - Critical
+        - Major
+        - Minor
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Worker
+        - World Generation
+        - World Destruction
+        - Streaming
+        - Rendering
+        - Save Load
+        - Tooling
+        - Project Management
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: Concrete checks that prove the bug is fixed.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation Plan
+      description: Commands or manual checks required.
+      placeholder: Static only, Godot headless, manual editor run, playtest, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes / Links
+      description: Optional links to PRs, commits, docs, screenshots, or related issues.
+    validations:
+      required: false

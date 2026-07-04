@@ -13,10 +13,6 @@ const STREAM_LEAD_TIME_DEFAULT := 0.4
 const STREAM_BASE_BUFFER_CHUNKS_DEFAULT := 32
 const STREAM_MAX_BUFFER_CHUNKS_DEFAULT := 128
 const STREAM_BUFFER_VIEW_SCALE_DEFAULT := 0.5
-const UNLOAD_RADIUS_DEFAULT := 16
-const UNLOAD_BUDGET_DEFAULT := 8
-const UNLOAD_INTERVAL_DEFAULT := 0.25
-const UNLOAD_HYSTERESIS_DEFAULT := 4
 const RENDER_ZONE_INTERVAL_DEFAULT := 0.1
 const DUMMY_INT := 999_999
 const THROTTLE_IDLE_SEC := 1.0
@@ -47,11 +43,6 @@ var stream_lead_time: float = STREAM_LEAD_TIME_DEFAULT
 var stream_base_buffer_chunks: int = STREAM_BASE_BUFFER_CHUNKS_DEFAULT
 var stream_max_buffer_chunks: int = STREAM_MAX_BUFFER_CHUNKS_DEFAULT
 var stream_buffer_view_scale: float = STREAM_BUFFER_VIEW_SCALE_DEFAULT
-var unload_radius_chunks: int = UNLOAD_RADIUS_DEFAULT
-var unload_budget: int = UNLOAD_BUDGET_DEFAULT
-var unload_interval: float = UNLOAD_INTERVAL_DEFAULT
-var unload_timer: float = 0.0
-var unload_hysteresis: int = UNLOAD_HYSTERESIS_DEFAULT
 var render_zone_interval: float = RENDER_ZONE_INTERVAL_DEFAULT
 var render_zone_timer: float = 0.0
 var last_speed_buffer_chunks: int = 0
@@ -148,7 +139,6 @@ func reset_state() -> void:
 	buffer_spiral_offsets.clear()
 	last_spiral_x_range = -1
 	last_spiral_z_range = -1
-	unload_timer = 0.0
 	render_zone_timer = render_zone_interval
 	last_render_zone_min_cx = DUMMY_INT
 	last_render_zone_max_cx = -DUMMY_INT
@@ -361,12 +351,6 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
 	if _should_allow_stream_work(dt, render_plane_complete):
 		enqueue_stream_chunks()
 		process_chunk_queue()
-
-	# Periodic unloading
-	unload_timer += dt
-	if unload_timer >= unload_interval:
-		_unload_distant_chunks(anchor_cx, anchor_cz)
-		unload_timer = 0.0
 
 	# Periodic render zone update
 	render_zone_timer += dt
@@ -593,30 +577,3 @@ func _queue_stream_offset(offset: Vector2i, high_priority: bool) -> void:
 		chunk_build_queue.append(key)
 		var chunk: ChunkData = existing if existing != null else world.ensure_chunk(key)
 		chunk.mesh_state = ChunkData.MESH_STATE_PENDING
-
-
-func _unload_distant_chunks(center_cx: int, center_cz: int) -> void:
-	if unload_budget <= 0 or unload_radius_chunks <= 0:
-		return
-	var effective_unload: int = maxi(unload_radius_chunks, stream_radius_chunks + unload_hysteresis)
-	var candidates: Array = []
-	for key in world.chunks:
-		var coord: Vector3i = key
-		var dist: int = maxi(absi(coord.x - center_cx), absi(coord.z - center_cz))
-		if dist > effective_unload:
-			candidates.append(coord)
-	if candidates.is_empty():
-		return
-	# Sort farthest first so the most distant chunks are unloaded within budget
-	candidates.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
-		var da: int = maxi(absi(a.x - center_cx), absi(a.z - center_cz))
-		var db: int = maxi(absi(b.x - center_cx), absi(b.z - center_cz))
-		return da > db
-	)
-	var count: int = mini(unload_budget, candidates.size())
-	for i in range(count):
-		var coord: Vector3i = candidates[i]
-		# Lazy deletion: remove from set so stale queue entries are skipped during processing
-		chunk_build_set.erase(coord)
-		chunk_build_priority.erase(coord)
-		world.unload_chunk(coord)
