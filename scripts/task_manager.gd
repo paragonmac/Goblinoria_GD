@@ -439,6 +439,30 @@ func queue_task_request(task_type: int, pos: Vector3i, material: int) -> bool:
 	return true
 
 
+func cancel_pending_task_requests_at(pos: Vector3i) -> Array:
+	if world == null or not world.is_block_coord_valid(pos.x, pos.y, pos.z):
+		return []
+	var removed: Array = task_queue.remove_pending_tasks_at(pos, ASSIGNMENT_TASK_TYPES)
+	if removed.is_empty():
+		return removed
+	for task in removed:
+		world.trace_task_event(task, "task_cancelled", "reason=player_erase")
+		if task.id == assignment_task_id:
+			_reset_assignment_auction()
+	_remove_blocked_task_requests_at(pos)
+	return removed
+
+
+func _remove_blocked_task_requests_at(pos: Vector3i) -> void:
+	var i := 0
+	while i < blocked_tasks.size():
+		var blocked: Dictionary = blocked_tasks[i]
+		if Vector3i(blocked.get("pos", Vector3i.ZERO)) == pos:
+			blocked_tasks.remove_at(i)
+		else:
+			i += 1
+
+
 func add_task_to_queue(task_type: int, pos: Vector3i, material: int) -> void:
 	match task_type:
 		TaskQueue.TaskType.DIG:

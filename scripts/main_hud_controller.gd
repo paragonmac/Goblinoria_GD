@@ -93,8 +93,12 @@ func _get_mode_display_name(world: World) -> String:
 			return "Dig"
 		World.PlayerMode.PLACE:
 			return "Place"
-		World.PlayerMode.STAIRS:
-			return "Stairs"
+		World.PlayerMode.UP_STAIRS:
+			return "Up Stairs"
+		World.PlayerMode.DOWN_STAIRS:
+			return "Down Stairs"
+		World.PlayerMode.ERASE:
+			return "Erase"
 		_:
 			return "?"
 
@@ -130,4 +134,3 @@ func update_inventory(world: World) -> void:
 		var block_name: String = world.block_registry.get_name(block_id)
 		lines.append("%s: %d" % [block_name, count])
 	inventory_label.text = "\n".join(lines)
-

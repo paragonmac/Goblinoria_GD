@@ -67,7 +67,7 @@ func update_hover_preview() -> void:
 		return
 	if is_dragging:
 		return
-	if world.player_mode != World.PlayerMode.STAIRS:
+	if not _uses_hover_preview():
 		world.clear_drag_preview()
 		return
 
@@ -77,8 +77,18 @@ func update_hover_preview() -> void:
 		return
 
 	var hit_pos: Vector3i = hit["pos"]
-	var pos: Vector3i = _stair_target_from_hit(hit_pos)
-	if not world.can_place_stairs_at(pos.x, pos.y, pos.z):
+	var pos := hit_pos
+	var valid := true
+	if world.player_mode == World.PlayerMode.UP_STAIRS:
+		pos = _up_stair_target_from_hit(hit_pos)
+		valid = _can_place_up_stairs_at(pos)
+	elif world.player_mode == World.PlayerMode.DOWN_STAIRS:
+		pos = _down_stair_target_from_hit(hit_pos)
+		valid = _can_place_down_stairs_at(pos)
+	else:
+		pos = _erase_target_from_hit(hit_pos)
+		valid = world.has_pending_task_request_at(pos)
+	if not valid:
 		world.clear_drag_preview()
 		return
 
@@ -132,6 +142,12 @@ func _update_drag_preview() -> void:
 	if world.player_mode == World.PlayerMode.DIG:
 		world.set_drag_preview_entries(_build_drag_preview_entries(drag_rect), world.player_mode)
 		return
+	if _is_stair_mode():
+		world.set_drag_preview_entries(_build_stair_preview_entries(drag_rect), world.player_mode)
+		return
+	if world.player_mode == World.PlayerMode.ERASE:
+		world.set_drag_preview_entries(_build_erase_preview_entries(drag_rect), world.player_mode)
+		return
 	world.set_drag_preview(drag_rect, world.player_mode)
 
 
@@ -158,8 +174,12 @@ func _get_drag_plane_y(screen_pos: Vector2) -> float:
 		var base_y := float(hit_pos.y)
 		if world != null and world.player_mode == World.PlayerMode.PLACE:
 			base_y += PLACE_HEIGHT_OFFSET
-		elif world != null and world.player_mode == World.PlayerMode.STAIRS:
-			base_y = float(_stair_target_from_hit(hit_pos).y)
+		elif world != null and world.player_mode == World.PlayerMode.UP_STAIRS:
+			base_y = float(_up_stair_target_from_hit(hit_pos).y)
+		elif world != null and world.player_mode == World.PlayerMode.DOWN_STAIRS:
+			base_y = float(_down_stair_target_from_hit(hit_pos).y)
+		elif world != null and world.player_mode == World.PlayerMode.ERASE:
+			base_y = float(_erase_target_from_hit(hit_pos).y)
 		return base_y
 	return float(world.top_render_y) if world != null else 0.0
 
@@ -220,8 +240,12 @@ func _handle_click(screen_pos: Vector2) -> void:
 	var pos: Vector3i = hit["pos"]
 	if world != null and world.player_mode == World.PlayerMode.PLACE:
 		pos.y += 1
-	elif world != null and world.player_mode == World.PlayerMode.STAIRS:
-		pos = _stair_target_from_hit(pos)
+	elif world != null and world.player_mode == World.PlayerMode.UP_STAIRS:
+		pos = _up_stair_target_from_hit(pos)
+	elif world != null and world.player_mode == World.PlayerMode.DOWN_STAIRS:
+		pos = _down_stair_target_from_hit(pos)
+	elif world != null and world.player_mode == World.PlayerMode.ERASE:
+		pos = _erase_target_from_hit(pos)
 	var result := _enqueue_task_at(pos.x, pos.y, pos.z)
 	_trace_selection("click", pos.x, pos.x, pos.z, pos.z, pos.y, [result])
 
@@ -258,12 +282,22 @@ func _enqueue_task_at(x: int, y: int, z: int) -> Dictionary:
 				result["reason"] = "not_empty"
 			else:
 				result["reason"] = "no_stock"
-		World.PlayerMode.STAIRS:
-			if world.can_place_stairs_at(x, y, z):
+		World.PlayerMode.UP_STAIRS:
+			if _can_place_up_stairs_at(pos):
 				result["queued"] = world.queue_task_request(TaskQueue.TaskType.STAIRS, pos, _stair_material_for(pos))
 				result["reason"] = "queued" if result["queued"] else "duplicate"
 			else:
-				result["reason"] = "stairs_not_placeable"
+				result["reason"] = "up_stairs_not_placeable"
+		World.PlayerMode.DOWN_STAIRS:
+			if _can_place_down_stairs_at(pos):
+				result["queued"] = world.queue_task_request(TaskQueue.TaskType.STAIRS, pos, _stair_material_for(pos))
+				result["reason"] = "queued" if result["queued"] else "duplicate"
+			else:
+				result["reason"] = "down_stairs_not_placeable"
+		World.PlayerMode.ERASE:
+			var removed: Array = world.cancel_pending_task_requests_at(pos)
+			result["queued"] = not removed.is_empty()
+			result["reason"] = "cancelled:%d" % removed.size() if result["queued"] else "no_pending_designation"
 	return result
 
 
@@ -312,12 +346,46 @@ func _has_place_stock() -> bool:
 	return stock - committed > 0
 
 
+func _uses_hover_preview() -> bool:
+	return world != null and (
+		_is_stair_mode()
+		or world.player_mode == World.PlayerMode.ERASE
+	)
+
+
+func _is_stair_mode() -> bool:
+	return world != null and (
+		world.player_mode == World.PlayerMode.UP_STAIRS
+		or world.player_mode == World.PlayerMode.DOWN_STAIRS
+	)
+
+
 func _build_drag_preview_entries(rect: Dictionary) -> Array[Dictionary]:
 	var entries: Array[Dictionary] = []
 	for pos: Vector3i in _rect_positions(rect):
 		entries.append({
 			"pos": pos,
 			"valid": _dig_preview_is_currently_workable(pos),
+		})
+	return entries
+
+
+func _build_stair_preview_entries(rect: Dictionary) -> Array[Dictionary]:
+	var entries: Array[Dictionary] = []
+	for pos: Vector3i in _rect_positions(rect):
+		entries.append({
+			"pos": pos,
+			"valid": _stair_preview_is_valid(pos),
+		})
+	return entries
+
+
+func _build_erase_preview_entries(rect: Dictionary) -> Array[Dictionary]:
+	var entries: Array[Dictionary] = []
+	for pos: Vector3i in _rect_positions(rect):
+		entries.append({
+			"pos": pos,
+			"valid": world.has_pending_task_request_at(pos),
 		})
 	return entries
 
@@ -358,6 +426,16 @@ func _has_horizontal_dig_work_position(pos: Vector3i) -> bool:
 	return world.pathfinder.has_walkable_adjacent_on_level(world, pos, pos.y)
 
 
+func _stair_preview_is_valid(pos: Vector3i) -> bool:
+	if world == null:
+		return false
+	if world.player_mode == World.PlayerMode.UP_STAIRS:
+		return _can_place_up_stairs_at(pos)
+	if world.player_mode == World.PlayerMode.DOWN_STAIRS:
+		return _can_place_down_stairs_at(pos)
+	return false
+
+
 func _stair_material_for(pos: Vector3i) -> int:
 	# SEE-ADR-007: Stairs convert a planned cell into directional downward access.
 	for high_dir in _stair_high_side_dirs_for_planned_digs(pos):
@@ -369,13 +447,40 @@ func _stair_material_for(pos: Vector3i) -> int:
 	return World.STAIR_BLOCK_ID
 
 
-func _stair_target_from_hit(hit_pos: Vector3i) -> Vector3i:
+func _up_stair_target_from_hit(hit_pos: Vector3i) -> Vector3i:
 	if world == null:
 		return hit_pos
-	if world.task_queue != null and world.task_queue.has_active_task_at(hit_pos, TaskQueue.TaskType.DIG):
+	var above := Vector3i(hit_pos.x, hit_pos.y + 1, hit_pos.z)
+	if _can_place_up_stairs_at(above):
+		return above
+	return hit_pos
+
+
+func _down_stair_target_from_hit(hit_pos: Vector3i) -> Vector3i:
+	return hit_pos
+
+
+func _can_place_up_stairs_at(pos: Vector3i) -> bool:
+	return world != null \
+		and world.is_block_coord_valid(pos.x, pos.y, pos.z) \
+		and world.is_empty(pos.x, pos.y, pos.z) \
+		and world.can_place_stairs_at(pos.x, pos.y, pos.z)
+
+
+func _can_place_down_stairs_at(pos: Vector3i) -> bool:
+	return world != null \
+		and world.is_block_coord_valid(pos.x, pos.y, pos.z) \
+		and not world.is_empty(pos.x, pos.y, pos.z) \
+		and world.can_place_stairs_at(pos.x, pos.y, pos.z)
+
+
+func _erase_target_from_hit(hit_pos: Vector3i) -> Vector3i:
+	if world == null:
+		return hit_pos
+	if world.has_pending_task_request_at(hit_pos):
 		return hit_pos
 	var above := Vector3i(hit_pos.x, hit_pos.y + 1, hit_pos.z)
-	if world.can_place_stairs_at(above.x, above.y, above.z):
+	if world.has_pending_task_request_at(above):
 		return above
 	return hit_pos
 

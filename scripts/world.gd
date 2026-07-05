@@ -167,7 +167,7 @@ var worker_activity_timer: float = 0.0
 #endregion
 
 #region Player State
-enum PlayerMode {INFORMATION, DIG, PLACE, STAIRS}
+enum PlayerMode {INFORMATION, DIG, PLACE, UP_STAIRS, DOWN_STAIRS, ERASE}
 var player_mode := PlayerMode.DIG
 var selected_blocks: Dictionary = {}
 #endregion
@@ -692,6 +692,18 @@ func queue_task_request(task_type: int, pos: Vector3i, material: int) -> bool:
 	if task_manager != null:
 		return task_manager.queue_task_request(task_type, pos, material)
 	return false
+
+
+func cancel_pending_task_requests_at(pos: Vector3i) -> Array:
+	if task_manager == null:
+		return []
+	return task_manager.cancel_pending_task_requests_at(pos)
+
+
+func has_pending_task_request_at(pos: Vector3i) -> bool:
+	if task_queue == null:
+		return false
+	return task_queue.has_pending_task_at(pos)
 #endregion
 
 

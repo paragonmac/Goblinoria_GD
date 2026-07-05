@@ -413,6 +413,22 @@ func _init() -> void:
 		and not reservation_world.task_queue.has_active_task_at(stair_convert_pos, TaskQueue.TaskType.DIG) \
 		and reservation_world.task_queue.has_active_task_at(stair_convert_pos, TaskQueue.TaskType.STAIRS) \
 		and reservation_world.task_queue.get_task(planned_dig_id) == null
+	var cancel_pos := Vector3i(0, 0, 2)
+	var cancel_dig_id := reservation_world.task_queue.add_dig_task(cancel_pos)
+	var cancel_stairs_id := reservation_world.task_queue.add_stairs_task(cancel_pos, World.RAMP_NORTH_ID)
+	var cancelled_tasks: Array = task_manager.cancel_pending_task_requests_at(cancel_pos)
+	var pending_cancel_ok: bool = \
+		cancelled_tasks.size() == 2 \
+		and reservation_world.task_queue.get_task(cancel_dig_id) == null \
+		and reservation_world.task_queue.get_task(cancel_stairs_id) == null \
+		and not reservation_world.task_queue.has_pending_task_at(cancel_pos)
+	var in_progress_cancel_pos := Vector3i(0, 0, 3)
+	var in_progress_cancel_id := reservation_world.task_queue.add_dig_task(in_progress_cancel_pos)
+	var in_progress_cancel_task = reservation_world.task_queue.get_task(in_progress_cancel_id)
+	in_progress_cancel_task.status = TaskQueue.TaskStatus.IN_PROGRESS
+	var in_progress_cancel_blocked_ok: bool = \
+		task_manager.cancel_pending_task_requests_at(in_progress_cancel_pos).is_empty() \
+		and reservation_world.task_queue.get_task(in_progress_cancel_id) != null
 	var stair_world := World.new()
 	stair_world._init_ramp_lookup()
 	stair_world.block_registry.load_from_csv(World.BLOCK_DATA_PATH)
@@ -596,6 +612,14 @@ func _init() -> void:
 		return
 	if not stairs_replaced_pending_dig_ok:
 		push_error("Stairs designation did not replace a pending dig designation")
+		quit(1)
+		return
+	if not pending_cancel_ok:
+		push_error("Erase mode cancellation did not remove pending designations")
+		quit(1)
+		return
+	if not in_progress_cancel_blocked_ok:
+		push_error("Erase mode cancellation removed an in-progress task")
 		quit(1)
 		return
 	if not stairs_on_supported_air_ok:

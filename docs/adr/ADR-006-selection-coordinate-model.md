@@ -19,7 +19,7 @@ Raycast selection respects `top_render_y`; hidden blocks above the current rende
 
 - Changing camera angle should not detach the selection preview from the world grid.
 - A drag selection stays on the Y plane chosen when the drag started.
-- Place, dig, and stairs can share the same coordinate path while applying mode-specific validation.
+- Place, dig, up-stairs, down-stairs, and erase can share the same coordinate path while applying mode-specific validation.
 - Selection traces are the source of truth for requested, queued, and rejected block coordinates.
 
 ## Guardrails

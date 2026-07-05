@@ -116,20 +116,38 @@ func has_active_task_at(pos: Vector3i, task_type: int) -> bool:
 	return false
 
 
+func has_pending_task_at(pos: Vector3i, task_types: Array = []) -> bool:
+	var pos_tasks: Array = _tasks_by_pos.get(pos, [])
+	for task in pos_tasks:
+		if task.status != TaskStatus.PENDING:
+			continue
+		if not task_types.is_empty() and not task_types.has(task.type):
+			continue
+		return true
+	return false
+
+
 func remove_pending_task_at(pos: Vector3i, task_type: int) -> bool:
+	return not remove_pending_tasks_at(pos, [task_type]).is_empty()
+
+
+func remove_pending_tasks_at(pos: Vector3i, task_types: Array = []) -> Array:
+	var removed: Array = []
 	var pos_tasks: Array = _tasks_by_pos.get(pos, [])
 	for task in pos_tasks.duplicate():
-		if task.type != task_type or task.status != TaskStatus.PENDING:
+		if task.status != TaskStatus.PENDING:
+			continue
+		if not task_types.is_empty() and not task_types.has(task.type):
 			continue
 		_tasks_by_id.erase(task.id)
 		pos_tasks.erase(task)
 		tasks.erase(task)
-		if pos_tasks.is_empty():
-			_tasks_by_pos.erase(pos)
-		else:
-			_tasks_by_pos[pos] = pos_tasks
-		return true
-	return false
+		removed.append(task)
+	if pos_tasks.is_empty():
+		_tasks_by_pos.erase(pos)
+	else:
+		_tasks_by_pos[pos] = pos_tasks
+	return removed
 
 
 func find_nearest(task_type: int, from_pos: Vector3) -> Task:
