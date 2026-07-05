@@ -24,6 +24,8 @@ const DRAG_DIG_COLOR := Color(0.2, 1.0, 0.2)
 const DRAG_PLACE_COLOR := Color(0.2, 0.6, 1.0)
 const DRAG_STAIRS_COLOR := Color(1.0, 0.7, 0.2)
 const DRAG_DEFAULT_COLOR := Color(0.8, 0.8, 0.8)
+const DRAG_INVALID_COLOR := Color(1.0, 0.15, 0.15)
+const DRAG_INVALID_MATERIAL_OFFSET := 1000
 const ASSIGNED_OVERLAY_SCALE := Vector3(1.08, 1.0, 1.08)
 const ROUND_HALF := 0.5
 const OVERLAY_Y_OFFSET := 0.0  # 3D box centered at block position (use 0.52 for flat overlays)
@@ -326,12 +328,13 @@ func drag_preview_color(mode: int) -> Color:
 	return Color(DRAG_DEFAULT_COLOR.r, DRAG_DEFAULT_COLOR.g, DRAG_DEFAULT_COLOR.b, DRAG_DEFAULT_ALPHA)
 
 
-func get_drag_material(mode: int) -> ShaderMaterial:
-	if drag_materials.has(mode):
-		return drag_materials[mode]
-	var color := drag_preview_color(mode)
+func get_drag_material(mode: int, valid: bool = true) -> ShaderMaterial:
+	var key: int = mode if valid else mode + DRAG_INVALID_MATERIAL_OFFSET
+	if drag_materials.has(key):
+		return drag_materials[key]
+	var color := drag_preview_color(mode) if valid else Color(DRAG_INVALID_COLOR.r, DRAG_INVALID_COLOR.g, DRAG_INVALID_COLOR.b, DRAG_OVERLAY_ALPHA)
 	var material := _create_overlay_shader_material(color)
-	drag_materials[mode] = material
+	drag_materials[key] = material
 	return material
 
 
@@ -375,8 +378,17 @@ func set_drag_preview(rect: Dictionary, mode: int) -> void:
 
 
 func set_drag_preview_positions(positions: Array[Vector3i], mode: int) -> void:
-	var live_ids: Dictionary = {}
+	var entries: Array[Dictionary] = []
 	for pos: Vector3i in positions:
+		entries.append({"pos": pos, "valid": true})
+	set_drag_preview_entries(entries, mode)
+
+
+func set_drag_preview_entries(entries: Array, mode: int) -> void:
+	var live_ids: Dictionary = {}
+	for entry in entries:
+		var pos: Vector3i = entry["pos"]
+		var valid: bool = bool(entry.get("valid", true))
 		var key := drag_preview_key(pos.x, pos.y, pos.z)
 		live_ids[key] = true
 		var overlay: MeshInstance3D
@@ -385,9 +397,9 @@ func set_drag_preview_positions(positions: Array[Vector3i], mode: int) -> void:
 			drag_previews[key] = overlay
 		else:
 			overlay = drag_previews[key]
-			var desired := get_drag_material(mode)
-			if overlay.material_override != desired:
-				overlay.material_override = desired
+		var desired := get_drag_material(mode, valid)
+		if overlay.material_override != desired:
+			overlay.material_override = desired
 		overlay.position = Vector3(pos.x, pos.y + OVERLAY_Y_OFFSET, pos.z)
 		overlay.visible = world.is_visible_at_level(pos.y)
 

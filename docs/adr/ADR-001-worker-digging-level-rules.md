@@ -15,12 +15,14 @@ Downward excavation is a separate access problem. It should be handled by stairs
 
 ## Consequences
 
-- A selected block can stay queued but blocked until there is a same-level adjacent work position.
+- A queued block can become blocked if later terrain changes remove its same-level adjacent work position.
+- DIG selection may queue planned blocks that are not currently reachable; those designations remain blocked/red until same-level access is opened.
 - Workers can path over ramps to reach another level, then work blocks on that level.
 - This can make large dig selections open gradually as tunnels expose same-level work positions.
 
 ## Guardrails
 
 - Code pointer: `scripts/worker.gd`, `_can_work_task_from_coord()` and `_work_level_for_task()`.
+- Code pointer: `scripts/main_selection_controller.gd`, `_dig_selection_reject_reason()`.
 - Contract: `tools/validate_worker_path_safety.gd` checks horizontal dig work and horizontal dig paths.
 - Runtime trace: `task_waiting`, `task_released_for_repath`, `assignment_bid_failed`, and `task_completed` reveal when a task cannot be worked from the current level.

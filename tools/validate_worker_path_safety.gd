@@ -406,6 +406,21 @@ func _init() -> void:
 	far_blocked.accessibility = TaskQueue.TaskAccessibility.UNREACHABLE
 	near_reachable.accessibility = TaskQueue.TaskAccessibility.REACHABLE
 	var task_manager := TaskManager.new(reservation_world, reservation_world.task_queue)
+	var stair_convert_pos := Vector3i(0, 0, 1)
+	var planned_dig_id := reservation_world.task_queue.add_dig_task(stair_convert_pos)
+	var stairs_replaced_pending_dig_ok: bool = \
+		task_manager.queue_task_request(TaskQueue.TaskType.STAIRS, stair_convert_pos, World.RAMP_NORTH_ID) \
+		and not reservation_world.task_queue.has_active_task_at(stair_convert_pos, TaskQueue.TaskType.DIG) \
+		and reservation_world.task_queue.has_active_task_at(stair_convert_pos, TaskQueue.TaskType.STAIRS) \
+		and reservation_world.task_queue.get_task(planned_dig_id) == null
+	var stair_world := World.new()
+	stair_world._init_ramp_lookup()
+	stair_world.block_registry.load_from_csv(World.BLOCK_DATA_PATH)
+	stair_world.set_block_raw(0, 0, 0, World.BLOCK_ID_GRANITE, true)
+	stair_world.set_block_raw(1, 0, 0, World.RAMP_NORTH_ID, true)
+	var stairs_on_supported_air_ok: bool = stair_world.can_place_stairs_at(0, 1, 0)
+	var unsupported_stairs_blocked_ok: bool = not stair_world.can_place_stairs_at(2, 1, 0)
+	var ramp_supported_stairs_blocked_ok: bool = not stair_world.can_place_stairs_at(1, 1, 0)
 	task_manager.mark_worker_unreachable_for_task(near_reachable, worker)
 	var per_worker_failure_ok: bool = \
 		near_reachable.accessibility == TaskQueue.TaskAccessibility.REACHABLE \
@@ -482,6 +497,7 @@ func _init() -> void:
 	arrived_worker.free()
 	task_manager.shutdown()
 	reservation_world.free()
+	stair_world.free()
 	if not support_reserved:
 		push_error("Worker final standing support was not reserved")
 		quit(1)
@@ -576,6 +592,22 @@ func _init() -> void:
 		return
 	if not batch_classification_ok:
 		push_error("Impossible tasks were not classified in one accessibility update")
+		quit(1)
+		return
+	if not stairs_replaced_pending_dig_ok:
+		push_error("Stairs designation did not replace a pending dig designation")
+		quit(1)
+		return
+	if not stairs_on_supported_air_ok:
+		push_error("Stairs could not be placed in empty air above solid support")
+		quit(1)
+		return
+	if not unsupported_stairs_blocked_ok:
+		push_error("Stairs were allowed in unsupported air")
+		quit(1)
+		return
+	if not ramp_supported_stairs_blocked_ok:
+		push_error("Stairs were allowed above ramp support")
 		quit(1)
 		return
 

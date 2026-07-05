@@ -482,7 +482,14 @@ func can_place_stairs_at(x: int, y: int, z: int) -> bool:
 	if not is_block_coord_valid(x, y, z):
 		return false
 	var block_id := get_block(x, y, z)
-	return not is_ramp_block_id(block_id) and block_registry.is_replaceable(block_id)
+	if is_ramp_block_id(block_id):
+		return false
+	if is_block_empty_id(block_id):
+		if y <= 0:
+			return false
+		var below_block: int = get_block(x, y - 1, z)
+		return is_block_solid_id(below_block) and not is_ramp_block_id(below_block)
+	return block_registry.is_replaceable(block_id)
 
 
 func is_stairs_at(x: int, y: int, z: int) -> bool:
@@ -870,6 +877,11 @@ func is_block_protected_from_dig(pos: Vector3i) -> bool:
 func set_drag_preview(rect: Dictionary, mode: int) -> void:
 	if renderer != null:
 		renderer.set_drag_preview(rect, mode)
+
+
+func set_drag_preview_entries(entries: Array, mode: int) -> void:
+	if renderer != null:
+		renderer.set_drag_preview_entries(entries, mode)
 
 
 func clear_drag_preview() -> void:

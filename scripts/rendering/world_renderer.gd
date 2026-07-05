@@ -924,6 +924,12 @@ func set_drag_preview(rect: Dictionary, mode: int) -> void:
 	overlay_renderer.set_drag_preview(rect, mode)
 
 
+func set_drag_preview_entries(entries: Array, mode: int) -> void:
+	if overlay_renderer == null:
+		return
+	overlay_renderer.set_drag_preview_entries(entries, mode)
+
+
 func clear_drag_preview() -> void:
 	if overlay_renderer == null:
 		return

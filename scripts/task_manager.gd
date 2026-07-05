@@ -430,6 +430,10 @@ func queue_task_request(task_type: int, pos: Vector3i, material: int) -> bool:
 		return false
 	if is_task_already_queued(task_type, pos):
 		return false
+	if task_type == TaskQueue.TaskType.STAIRS \
+		and task_queue.has_active_task_at(pos, TaskQueue.TaskType.DIG) \
+		and not task_queue.remove_pending_task_at(pos, TaskQueue.TaskType.DIG):
+		return false
 	add_task_to_queue(task_type, pos, material)
 	blocked_recheck_timer = 0.0
 	return true

@@ -76,7 +76,8 @@ func update_hover_preview() -> void:
 		world.clear_drag_preview()
 		return
 
-	var pos: Vector3i = hit["pos"]
+	var hit_pos: Vector3i = hit["pos"]
+	var pos: Vector3i = _stair_target_from_hit(hit_pos)
 	if not world.can_place_stairs_at(pos.x, pos.y, pos.z):
 		world.clear_drag_preview()
 		return
@@ -125,6 +126,12 @@ func _update_drag_preview() -> void:
 		return
 	var drag_now := viewport.get_mouse_position()
 	var drag_rect := _get_drag_rect(drag_start, drag_now, drag_plane_y)
+	if drag_rect.is_empty():
+		world.clear_drag_preview()
+		return
+	if world.player_mode == World.PlayerMode.DIG:
+		world.set_drag_preview_entries(_build_drag_preview_entries(drag_rect), world.player_mode)
+		return
 	world.set_drag_preview(drag_rect, world.player_mode)
 
 
@@ -151,6 +158,8 @@ func _get_drag_plane_y(screen_pos: Vector2) -> float:
 		var base_y := float(hit_pos.y)
 		if world != null and world.player_mode == World.PlayerMode.PLACE:
 			base_y += PLACE_HEIGHT_OFFSET
+		elif world != null and world.player_mode == World.PlayerMode.STAIRS:
+			base_y = float(_stair_target_from_hit(hit_pos).y)
 		return base_y
 	return float(world.top_render_y) if world != null else 0.0
 
@@ -211,6 +220,8 @@ func _handle_click(screen_pos: Vector2) -> void:
 	var pos: Vector3i = hit["pos"]
 	if world != null and world.player_mode == World.PlayerMode.PLACE:
 		pos.y += 1
+	elif world != null and world.player_mode == World.PlayerMode.STAIRS:
+		pos = _stair_target_from_hit(pos)
 	var result := _enqueue_task_at(pos.x, pos.y, pos.z)
 	_trace_selection("click", pos.x, pos.x, pos.z, pos.z, pos.y, [result])
 
@@ -233,11 +244,12 @@ func _enqueue_task_at(x: int, y: int, z: int) -> Dictionary:
 
 	match world.player_mode:
 		World.PlayerMode.DIG:
-			if world.is_diggable_at(x, y, z):
+			var reject_reason := _dig_selection_reject_reason(pos)
+			if reject_reason.is_empty():
 				result["queued"] = world.queue_task_request(TaskQueue.TaskType.DIG, pos, 0)
 				result["reason"] = "queued" if result["queued"] else "duplicate"
 			else:
-				result["reason"] = "not_diggable"
+				result["reason"] = reject_reason
 		World.PlayerMode.PLACE:
 			if world.is_empty(x, y, z) and _has_place_stock():
 				result["queued"] = world.queue_task_request(TaskQueue.TaskType.PLACE, pos, PLACE_MATERIAL_ID)
@@ -248,7 +260,7 @@ func _enqueue_task_at(x: int, y: int, z: int) -> Dictionary:
 				result["reason"] = "no_stock"
 		World.PlayerMode.STAIRS:
 			if world.can_place_stairs_at(x, y, z):
-				result["queued"] = world.queue_task_request(TaskQueue.TaskType.STAIRS, pos, World.STAIR_BLOCK_ID)
+				result["queued"] = world.queue_task_request(TaskQueue.TaskType.STAIRS, pos, _stair_material_for(pos))
 				result["reason"] = "queued" if result["queued"] else "duplicate"
 			else:
 				result["reason"] = "stairs_not_placeable"
@@ -298,6 +310,114 @@ func _has_place_stock() -> bool:
 	var stock: int = world.get_inventory_count(PLACE_MATERIAL_ID)
 	var committed: int = world.task_queue.count_active_by_type_and_material(TaskQueue.TaskType.PLACE, PLACE_MATERIAL_ID)
 	return stock - committed > 0
+
+
+func _build_drag_preview_entries(rect: Dictionary) -> Array[Dictionary]:
+	var entries: Array[Dictionary] = []
+	for pos: Vector3i in _rect_positions(rect):
+		entries.append({
+			"pos": pos,
+			"valid": _dig_preview_is_currently_workable(pos),
+		})
+	return entries
+
+
+func _rect_positions(rect: Dictionary) -> Array[Vector3i]:
+	var min_x := int(floor(float(rect["min_x"]) + ROUND_HALF))
+	var max_x := int(floor(float(rect["max_x"]) + ROUND_HALF))
+	var min_z := int(floor(float(rect["min_z"]) + ROUND_HALF))
+	var max_z := int(floor(float(rect["max_z"]) + ROUND_HALF))
+	var y := int(rect["y"])
+	var positions: Array[Vector3i] = []
+	for x in range(min_x, max_x + 1):
+		for z in range(min_z, max_z + 1):
+			positions.append(Vector3i(x, y, z))
+	return positions
+
+
+func _dig_selection_reject_reason(pos: Vector3i) -> String:
+	if world == null:
+		return "missing_world"
+	if not _is_valid_position(pos.x, pos.y, pos.z):
+		return "invalid_position"
+	if not world.is_diggable_at(pos.x, pos.y, pos.z):
+		return "not_diggable"
+	if world.task_queue != null and world.task_queue.has_active_task_at(pos, TaskQueue.TaskType.DIG):
+		return "duplicate"
+	return ""
+
+
+func _dig_preview_is_currently_workable(pos: Vector3i) -> bool:
+	return _dig_selection_reject_reason(pos).is_empty() \
+		and _has_horizontal_dig_work_position(pos)
+
+
+func _has_horizontal_dig_work_position(pos: Vector3i) -> bool:
+	if world == null or world.pathfinder == null:
+		return false
+	return world.pathfinder.has_walkable_adjacent_on_level(world, pos, pos.y)
+
+
+func _stair_material_for(pos: Vector3i) -> int:
+	# SEE-ADR-007: Stairs convert a planned cell into directional downward access.
+	for high_dir in _stair_high_side_dirs_for_planned_digs(pos):
+		if _has_walkable_stair_high_side(pos, high_dir):
+			return _ramp_id_for_high_side(high_dir)
+	for high_dir in _stair_cardinal_dirs():
+		if _has_walkable_stair_high_side(pos, high_dir):
+			return _ramp_id_for_high_side(high_dir)
+	return World.STAIR_BLOCK_ID
+
+
+func _stair_target_from_hit(hit_pos: Vector3i) -> Vector3i:
+	if world == null:
+		return hit_pos
+	if world.task_queue != null and world.task_queue.has_active_task_at(hit_pos, TaskQueue.TaskType.DIG):
+		return hit_pos
+	var above := Vector3i(hit_pos.x, hit_pos.y + 1, hit_pos.z)
+	if world.can_place_stairs_at(above.x, above.y, above.z):
+		return above
+	return hit_pos
+
+
+func _stair_high_side_dirs_for_planned_digs(pos: Vector3i) -> Array[Vector2i]:
+	var dirs: Array[Vector2i] = []
+	if world == null or world.task_queue == null:
+		return dirs
+	for high_dir in _stair_cardinal_dirs():
+		var low_dir := Vector2i(-high_dir.x, -high_dir.y)
+		var low_pos := Vector3i(pos.x + low_dir.x, pos.y, pos.z + low_dir.y)
+		if world.task_queue.has_active_task_at(low_pos, TaskQueue.TaskType.DIG):
+			dirs.append(high_dir)
+	return dirs
+
+
+func _has_walkable_stair_high_side(pos: Vector3i, high_dir: Vector2i) -> bool:
+	if world == null or world.pathfinder == null:
+		return false
+	var high_pos := Vector3i(pos.x + high_dir.x, pos.y + 1, pos.z + high_dir.y)
+	return world.pathfinder.is_walkable(world, high_pos.x, high_pos.y, high_pos.z)
+
+
+func _ramp_id_for_high_side(high_dir: Vector2i) -> int:
+	if high_dir == Vector2i(0, -1):
+		return World.RAMP_NORTH_ID
+	if high_dir == Vector2i(0, 1):
+		return World.RAMP_SOUTH_ID
+	if high_dir == Vector2i(1, 0):
+		return World.RAMP_EAST_ID
+	if high_dir == Vector2i(-1, 0):
+		return World.RAMP_WEST_ID
+	return World.STAIR_BLOCK_ID
+
+
+func _stair_cardinal_dirs() -> Array[Vector2i]:
+	return [
+		Vector2i(0, -1),
+		Vector2i(0, 1),
+		Vector2i(1, 0),
+		Vector2i(-1, 0),
+	]
 
 
 func _is_valid_position(x: int, y: int, z: int) -> bool:
