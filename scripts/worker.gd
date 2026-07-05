@@ -705,7 +705,7 @@ func update_working(dt: float, world, task_queue, pathfinder) -> void:
 				TaskQueue.TaskType.HAUL:
 					if not _advance_haul_task(world, task_queue, pathfinder, task):
 						return
-			task.status = TaskQueue.TaskStatus.COMPLETED
+			task_queue.complete_task(task)
 			_trace(world, "task_completed", task)
 			if task.type == TaskQueue.TaskType.DIG:
 				world.reassess_waiting_tasks()
@@ -724,11 +724,9 @@ func _advance_haul_task(world, task_queue, pathfinder, task) -> bool:
 		var item: Dictionary = world.item_store.get_item(item_id)
 		if item.is_empty():
 			_trace(world, "haul_failed", task, "reason=item_missing")
-			task.status = TaskQueue.TaskStatus.COMPLETED
 			return true
 		if int(item.get("reserved_by_task_id", -1)) != task.id:
 			_trace(world, "haul_failed", task, "reason=item_reservation_lost")
-			task.status = TaskQueue.TaskStatus.COMPLETED
 			return true
 		carried_material_id = int(item.get("material_id", 0))
 		carried_count = int(item.get("count", 0))
@@ -736,7 +734,6 @@ func _advance_haul_task(world, task_queue, pathfinder, task) -> bool:
 		if not world.item_store.mark_carried(item_id):
 			_trace(world, "haul_failed", task, "reason=item_pickup_state_invalid")
 			_release_carried_item(world, task)
-			task.status = TaskQueue.TaskStatus.COMPLETED
 			return true
 		var destination: Vector3i = task.data.get("destination", Vector3i.ZERO)
 		var found_path: Array = pathfinder.find_path(world, get_block_coord(), destination, false, false)

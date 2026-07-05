@@ -1,13 +1,18 @@
 extends RefCounted
 class_name ItemStackStore
 
+signal haul_state_changed(reason: String)
+
 var items: Dictionary = {}
 var next_id := 1
 
 
 func clear() -> void:
+	var had_items := not items.is_empty()
 	items.clear()
 	next_id = 1
+	if had_items:
+		haul_state_changed.emit("items_cleared")
 
 
 func add_stack(material_id: int, count: int, pos: Vector3i, stored_stockpile_id: int = -1) -> int:
@@ -24,6 +29,7 @@ func add_stack(material_id: int, count: int, pos: Vector3i, stored_stockpile_id:
 		"stored_stockpile_id": stored_stockpile_id,
 		"is_carried": false,
 	}
+	haul_state_changed.emit("stack_added")
 	return item_id
 
 
@@ -55,6 +61,7 @@ func remove_item(item_id: int) -> Dictionary:
 	var item: Dictionary = items.get(item_id, {})
 	if not item.is_empty():
 		items.erase(item_id)
+		haul_state_changed.emit("stack_removed")
 	return item
 
 
@@ -78,6 +85,7 @@ func release_reservation(item_id: int, task_id: int = -1) -> void:
 	item["reserved_by_task_id"] = -1
 	item["is_carried"] = false
 	items[item_id] = item
+	haul_state_changed.emit("reservation_released")
 
 
 func mark_carried(item_id: int) -> bool:
@@ -100,6 +108,7 @@ func mark_stored(item_id: int, stockpile_id: int, pos: Vector3i) -> bool:
 	item["reserved_by_task_id"] = -1
 	item["is_carried"] = false
 	items[item_id] = item
+	haul_state_changed.emit("stack_stored")
 	return true
 
 
@@ -112,6 +121,7 @@ func mark_loose(item_id: int, pos: Vector3i) -> bool:
 	item["reserved_by_task_id"] = -1
 	item["is_carried"] = false
 	items[item_id] = item
+	haul_state_changed.emit("stack_loose")
 	return true
 
 
@@ -190,6 +200,7 @@ func deposit_into_cell(item_id: int, stockpile_id: int, pos: Vector3i, capacity:
 		source["stored_stockpile_id"] = -1
 		source["is_carried"] = false
 		items[item_id] = source
+	haul_state_changed.emit("cell_deposit")
 	return {
 		"deposited": deposited,
 		"remaining": remaining,
@@ -241,6 +252,7 @@ func normalize_stored_cells(stockpile_store: StockpileStore) -> void:
 			item["count"] = remaining
 			items[item_id] = item
 			mark_loose(int(item_id), pos)
+	haul_state_changed.emit("storage_normalized")
 
 
 func aggregate_stored_counts() -> Dictionary:
@@ -278,6 +290,7 @@ func remove_stored_material(material_id: int, count: int) -> bool:
 		else:
 			item["count"] = item_count
 			items[item_id] = item
+	haul_state_changed.emit("stored_material_removed")
 	return true
 
 

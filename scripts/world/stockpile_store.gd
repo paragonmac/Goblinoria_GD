@@ -1,6 +1,8 @@
 extends RefCounted
 class_name StockpileStore
 
+signal haul_state_changed(reason: String)
+
 const CATEGORY_SOIL := "soil"
 const CATEGORY_STONE := "stone"
 const CATEGORY_ORE := "ore"
@@ -25,9 +27,12 @@ var next_id := 1
 
 
 func clear() -> void:
+	var had_stockpiles := not stockpiles.is_empty()
 	stockpiles.clear()
 	cells.clear()
 	next_id = 1
+	if had_stockpiles:
+		haul_state_changed.emit("stockpiles_cleared")
 
 
 func create_stockpile(cell_list: Array[Vector3i]) -> int:
@@ -43,6 +48,7 @@ func create_stockpile(cell_list: Array[Vector3i]) -> int:
 		"material_overrides": {},
 	}
 	add_cells(stockpile_id, cell_list)
+	haul_state_changed.emit("stockpile_created")
 	return stockpile_id
 
 
@@ -63,6 +69,7 @@ func restore_stockpile(stockpile: Dictionary) -> void:
 		if typeof(cell) == TYPE_VECTOR3I:
 			restored_cells.append(cell)
 	add_cells(stockpile_id, restored_cells)
+	haul_state_changed.emit("stockpile_restored")
 
 
 func add_cells(stockpile_id: int, cell_list: Array[Vector3i]) -> void:
@@ -70,13 +77,17 @@ func add_cells(stockpile_id: int, cell_list: Array[Vector3i]) -> void:
 		return
 	var stockpile: Dictionary = stockpiles[stockpile_id]
 	var stockpile_cells: Array = stockpile.get("cells", [])
+	var added := false
 	for cell: Vector3i in cell_list:
 		if cells.has(cell):
 			continue
 		cells[cell] = stockpile_id
 		stockpile_cells.append(cell)
+		added = true
 	stockpile["cells"] = stockpile_cells
 	stockpiles[stockpile_id] = stockpile
+	if added:
+		haul_state_changed.emit("stockpile_cells_added")
 
 
 func remove_cells(cell_list: Array[Vector3i]) -> Array[int]:
@@ -98,6 +109,8 @@ func remove_cells(cell_list: Array[Vector3i]) -> Array[int]:
 	var ids: Array[int] = []
 	for stockpile_id in touched.keys():
 		ids.append(int(stockpile_id))
+	if not ids.is_empty():
+		haul_state_changed.emit("stockpile_cells_removed")
 	return ids
 
 
@@ -144,9 +157,12 @@ func set_category_allowed(stockpile_id: int, category: String, allowed_value: bo
 		return
 	var stockpile: Dictionary = stockpiles[stockpile_id]
 	var allowed: Dictionary = stockpile.get("allowed_categories", {})
+	if bool(allowed.get(category, false)) == allowed_value:
+		return
 	allowed[category] = allowed_value
 	stockpile["allowed_categories"] = allowed
 	stockpiles[stockpile_id] = stockpile
+	haul_state_changed.emit("stockpile_category_changed")
 
 
 func set_material_override(stockpile_id: int, material_id: int, allowed_value: bool) -> void:
@@ -154,9 +170,12 @@ func set_material_override(stockpile_id: int, material_id: int, allowed_value: b
 		return
 	var stockpile: Dictionary = stockpiles[stockpile_id]
 	var overrides: Dictionary = stockpile.get("material_overrides", {})
+	if overrides.has(material_id) and bool(overrides[material_id]) == allowed_value:
+		return
 	overrides[material_id] = allowed_value
 	stockpile["material_overrides"] = overrides
 	stockpiles[stockpile_id] = stockpile
+	haul_state_changed.emit("stockpile_material_changed")
 
 
 func category_for_material(material_id: int) -> String:

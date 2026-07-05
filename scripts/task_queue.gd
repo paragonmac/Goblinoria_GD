@@ -2,6 +2,8 @@ extends RefCounted
 class_name TaskQueue
 ## Priority queue for dig, place, and stairs tasks.
 
+signal active_count_changed(count: int)
+
 #region Enums
 enum TaskType {DIG, PLACE, STAIRS, HAUL}
 enum TaskStatus {PENDING, IN_PROGRESS, COMPLETED}
@@ -88,6 +90,7 @@ func add_task(pos: Vector3i, task_type: int, material: int) -> int:
 	if not _tasks_by_pos.has(pos):
 		_tasks_by_pos[pos] = []
 	_tasks_by_pos[pos].append(task)
+	active_count_changed.emit(tasks.size())
 	return task_id
 
 
@@ -161,6 +164,8 @@ func remove_pending_tasks_at(pos: Vector3i, task_types: Array = []) -> Array:
 		_tasks_by_pos.erase(pos)
 	else:
 		_tasks_by_pos[pos] = pos_tasks
+	if not removed.is_empty():
+		active_count_changed.emit(tasks.size())
 	return removed
 
 
@@ -177,7 +182,16 @@ func remove_task(task) -> bool:
 	else:
 		_tasks_by_pos[task.pos] = pos_tasks
 	tasks.erase(task)
+	active_count_changed.emit(tasks.size())
 	return true
+
+
+func complete_task(task) -> bool:
+	# SEE-ADR-009: Completed tasks leave every queue index immediately.
+	if task == null or not _tasks_by_id.has(task.id):
+		return false
+	task.status = TaskStatus.COMPLETED
+	return remove_task(task)
 
 
 func find_nearest(task_type: int, from_pos: Vector3) -> Task:
@@ -280,35 +294,19 @@ func _prune_invalid_assist_waiters() -> void:
 
 #region Task Maintenance
 func clear() -> void:
+	var had_tasks := not tasks.is_empty()
 	tasks.clear()
 	_tasks_by_id.clear()
 	_tasks_by_pos.clear()
 	_assist_waiters.clear()
 	_assist_waiter_seq = 0
 	next_id = 1
-
-
-func cleanup_completed() -> void:
-	var i := 0
-	while i < tasks.size():
-		if tasks[i].status == TaskStatus.COMPLETED:
-			var task: Task = tasks[i]
-			_tasks_by_id.erase(task.id)
-			var pos_tasks: Array = _tasks_by_pos.get(task.pos, [])
-			pos_tasks.erase(task)
-			if pos_tasks.is_empty():
-				_tasks_by_pos.erase(task.pos)
-			tasks.remove_at(i)
-		else:
-			i += 1
+	if had_tasks:
+		active_count_changed.emit(0)
 
 
 func active_count() -> int:
-	var count := 0
-	for task in tasks:
-		if task.status != TaskStatus.COMPLETED:
-			count += 1
-	return count
+	return tasks.size()
 
 
 func count_active_by_type_and_material(task_type: int, material: int) -> int:

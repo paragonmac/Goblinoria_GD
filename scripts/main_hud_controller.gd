@@ -1,6 +1,6 @@
 extends RefCounted
 class_name MainHudController
-## HUD label setup and per-frame HUD updates.
+## HUD label setup and event-driven HUD updates.
 
 #region State
 var y_level_label: Label
@@ -12,6 +12,10 @@ var stockpile_checkboxes: Dictionary = {}
 var current_world: World
 var current_stockpile_id := -1
 var render_level_base_y: int = 0
+var status_refresh_count := 0
+var inventory_refresh_count := 0
+var stockpile_refresh_count := 0
+var generation_refresh_count := 0
 #endregion
 
 
@@ -72,9 +76,11 @@ func set_render_level_base(world: World) -> void:
 	render_level_base_y = world.top_render_y
 
 
-func update_hud(world: World, hud_label: Label, info_block_id: int, info_block_pos: Vector3i) -> void:
+func update_status(world: World, hud_label: Label, info_block_id: int, info_block_pos: Vector3i) -> void:
 	if world == null or hud_label == null:
 		return
+	status_refresh_count += 1
+	current_world = world
 	var mode_name := _get_mode_display_name(world)
 	var info_text := _get_info_display_text(world, info_block_id, info_block_pos)
 	var task_count := world.task_queue.active_count()
@@ -83,6 +89,11 @@ func update_hud(world: World, hud_label: Label, info_block_id: int, info_block_p
 	if y_level_label != null:
 		y_level_label.text = "Level: %d" % (world.top_render_y - render_level_base_y)
 
+
+func update_generation_status(world: World) -> void:
+	if world == null:
+		return
+	generation_refresh_count += 1
 	if gen_status_label != null:
 		var stats := world.get_generation_stats()
 		var queued: int = int(stats.get("queued", 0))
@@ -128,6 +139,7 @@ func _get_info_display_text(world: World, info_block_id: int, info_block_pos: Ve
 func update_inventory(world: World) -> void:
 	if inventory_label == null or world == null:
 		return
+	inventory_refresh_count += 1
 	current_world = world
 	var inv: Dictionary = world.inventory
 	if inv.is_empty():
@@ -143,6 +155,13 @@ func update_inventory(world: World) -> void:
 			var block_name: String = world.block_registry.get_name(block_id)
 			lines.append("%s: %d" % [block_name, count])
 		inventory_label.text = "\n".join(lines)
+
+
+func update_stockpile(world: World) -> void:
+	if world == null:
+		return
+	stockpile_refresh_count += 1
+	current_world = world
 	_update_stockpile_panel(world)
 
 
@@ -203,5 +222,3 @@ func _on_stockpile_category_toggled(pressed: bool, category: String) -> void:
 	if current_world == null or current_stockpile_id < 0:
 		return
 	current_world.stockpile_store.set_category_allowed(current_stockpile_id, category, pressed)
-	if current_world.task_manager != null:
-		current_world.task_manager.rebuild_haul_tasks()

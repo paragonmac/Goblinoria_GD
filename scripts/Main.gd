@@ -12,6 +12,11 @@ const MainRenderLevelControllerScript = preload("res://scripts/main_render_level
 
 #region Constants - Engine & General
 const ENGINE_MAX_FPS := 1000
+const GENERATION_STATUS_INTERVAL_SEC := 0.25
+const HUD_REFRESH_STATUS := 1
+const HUD_REFRESH_INVENTORY := 2
+const HUD_REFRESH_STOCKPILE := 4
+const HUD_REFRESH_ALL := HUD_REFRESH_STATUS | HUD_REFRESH_INVENTORY | HUD_REFRESH_STOCKPILE
 #endregion
 
 #region Constants - Save System
@@ -78,6 +83,9 @@ var loading_active := false
 var world_started := false
 var default_bg_mode: int = -1
 var default_bg_color: Color = Color.BLACK
+var hud_refresh_mask := 0
+var hud_refresh_scheduled := false
+var generation_status_timer: Timer
 #endregion
 
 
@@ -184,19 +192,19 @@ func _handle_worker_window_toggle() -> void:
 
 func _handle_mode_selection() -> void:
 	if is_key_just_pressed(KEY_1):
-		world.player_mode = World.PlayerMode.INFORMATION
+		world.set_player_mode(World.PlayerMode.INFORMATION)
 	elif is_key_just_pressed(KEY_2):
-		world.player_mode = World.PlayerMode.DIG
+		world.set_player_mode(World.PlayerMode.DIG)
 	elif is_key_just_pressed(KEY_3):
-		world.player_mode = World.PlayerMode.PLACE
+		world.set_player_mode(World.PlayerMode.PLACE)
 	elif is_key_just_pressed(KEY_4):
-		world.player_mode = World.PlayerMode.UP_STAIRS
+		world.set_player_mode(World.PlayerMode.UP_STAIRS)
 	elif is_key_just_pressed(KEY_5):
-		world.player_mode = World.PlayerMode.DOWN_STAIRS
+		world.set_player_mode(World.PlayerMode.DOWN_STAIRS)
 	elif is_key_just_pressed(KEY_6):
-		world.player_mode = World.PlayerMode.ERASE
+		world.set_player_mode(World.PlayerMode.ERASE)
 	elif is_key_just_pressed(KEY_7):
-		world.player_mode = World.PlayerMode.STOCKPILE
+		world.set_player_mode(World.PlayerMode.STOCKPILE)
 
 
 func _handle_camera_rotation() -> void:
@@ -280,7 +288,6 @@ func _run_timed_updates(dt: float) -> void:
 	debug_overlay.run_timed("Main.handle_mouse", Callable(self, "handle_mouse"))
 	debug_overlay.run_timed("Main.update_hover_preview", Callable(self, "update_hover_preview"))
 	debug_overlay.run_timed("Main.update_info_hover", Callable(self, "update_info_hover"))
-	debug_overlay.run_timed("Main.update_hud", Callable(self, "update_hud"))
 	debug_overlay.update_draw_burden()
 	debug_overlay.update_streaming_stats()
 	debug_overlay.update_streaming_capture(dt)
@@ -296,7 +303,6 @@ func _run_direct_updates(dt: float) -> void:
 	handle_mouse()
 	update_hover_preview()
 	update_info_hover()
-	update_hud()
 	world.update_world(dt)
 	_update_depth_limit_background()
 #endregion
@@ -336,7 +342,12 @@ func update_hover_preview() -> void:
 
 func update_info_hover() -> void:
 	if selection_controller != null:
+		var previous_id := selection_controller.info_block_id
+		var previous_pos := selection_controller.info_block_pos
 		selection_controller.update_info_hover()
+		if previous_id != selection_controller.info_block_id \
+				or previous_pos != selection_controller.info_block_pos:
+			request_hud_refresh(HUD_REFRESH_STATUS)
 #endregion
 
 
@@ -1109,24 +1120,78 @@ func _setup_hud() -> void:
 	if hud_controller != null:
 		hud_controller.setup(hud_layer)
 	if worker_window_controller != null:
-		worker_window_controller.setup(hud_layer)
+		worker_window_controller.setup(hud_layer, world)
+	if world != null:
+		world.task_queue.active_count_changed.connect(_on_task_count_changed)
+		world.inventory_changed.connect(_on_inventory_changed)
+		world.stockpiles_changed.connect(_on_stockpiles_changed)
+		world.player_mode_changed.connect(_on_player_mode_changed)
+		world.render_level_changed.connect(_on_render_level_changed)
+	generation_status_timer = Timer.new()
+	generation_status_timer.name = "GenerationStatusTimer"
+	generation_status_timer.wait_time = GENERATION_STATUS_INTERVAL_SEC
+	generation_status_timer.one_shot = false
+	generation_status_timer.timeout.connect(_on_generation_status_timeout)
+	add_child(generation_status_timer)
+	generation_status_timer.start()
+	request_hud_refresh(HUD_REFRESH_ALL)
 
 
-func update_hud() -> void:
+func request_hud_refresh(mask: int) -> void:
+	# SEE-ADR-009: HUD sections refresh from state-change events, not the frame loop.
+	hud_refresh_mask |= mask
+	if hud_refresh_scheduled:
+		return
+	hud_refresh_scheduled = true
+	_flush_hud_refresh.call_deferred()
+
+
+func _flush_hud_refresh() -> void:
+	hud_refresh_scheduled = false
 	if hud_controller == null:
 		return
+	var mask := hud_refresh_mask
+	hud_refresh_mask = 0
 	var info_id := -1
 	var info_pos := Vector3i(-1, -1, -1)
 	if selection_controller != null:
 		info_id = selection_controller.info_block_id
 		info_pos = selection_controller.info_block_pos
-	hud_controller.update_hud(world, hud_label, info_id, info_pos)
-	hud_controller.update_inventory(world)
-	if worker_window_controller != null:
-		worker_window_controller.update_window(world)
+	if (mask & HUD_REFRESH_STATUS) != 0:
+		hud_controller.update_status(world, hud_label, info_id, info_pos)
+	if (mask & HUD_REFRESH_INVENTORY) != 0:
+		hud_controller.update_inventory(world)
+	if (mask & HUD_REFRESH_STOCKPILE) != 0:
+		hud_controller.update_stockpile(world)
+
+
+func _on_task_count_changed(_count: int) -> void:
+	request_hud_refresh(HUD_REFRESH_STATUS)
+
+
+func _on_inventory_changed() -> void:
+	request_hud_refresh(HUD_REFRESH_INVENTORY)
+
+
+func _on_stockpiles_changed() -> void:
+	request_hud_refresh(HUD_REFRESH_STOCKPILE)
+
+
+func _on_player_mode_changed(_mode: int) -> void:
+	request_hud_refresh(HUD_REFRESH_STATUS)
+
+
+func _on_render_level_changed(_level: int) -> void:
+	request_hud_refresh(HUD_REFRESH_STATUS)
+
+
+func _on_generation_status_timeout() -> void:
+	if hud_controller != null:
+		hud_controller.update_generation_status(world)
 #endregion
 
 
 func _set_render_level_base() -> void:
 	if hud_controller != null:
 		hud_controller.set_render_level_base(world)
+	request_hud_refresh(HUD_REFRESH_STATUS)

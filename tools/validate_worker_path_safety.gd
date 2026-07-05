@@ -204,7 +204,7 @@ func _init() -> void:
 		return
 
 	var task = world.task_queue.get_task(task_id)
-	task.status = TaskQueue.TaskStatus.COMPLETED
+	world.task_queue.complete_task(task)
 	var direct_path := pathfinder.find_path(
 		world,
 		Vector3i(0, 1, 0),

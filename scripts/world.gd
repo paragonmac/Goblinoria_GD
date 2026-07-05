@@ -2,6 +2,11 @@ extends Node3D
 class_name World
 ## Voxel world managing chunks, blocks, workers, and game state.
 
+signal inventory_changed
+signal stockpiles_changed
+signal player_mode_changed(mode: int)
+signal render_level_changed(level: int)
+
 #region Preloads
 const BlockRegistryScript = preload("res://scripts/block_registry.gd")
 const ChunkDataScript = preload("res://scripts/chunk_data.gd")
@@ -200,6 +205,7 @@ func _ready() -> void:
 	block_registry.load_from_csv(BLOCK_DATA_PATH)
 	block_drop_table.load_from_csv(BLOCK_DROPS_PATH)
 	drop_rng.seed = Time.get_ticks_usec()
+	stockpile_store.haul_state_changed.connect(_on_stockpile_state_changed)
 	task_manager = TaskManager.new(self, task_queue)
 	generator = WorldGeneratorScript.new(self)
 	save_load = WorldSaveLoadScript.new(self)
@@ -722,6 +728,7 @@ func has_pending_task_request_at(pos: Vector3i) -> bool:
 #region Inventory
 func add_to_inventory(block_id: int, count: int = 1) -> void:
 	inventory_store.add(block_id, count)
+	inventory_changed.emit()
 
 
 func remove_from_inventory(block_id: int, count: int = 1) -> bool:
@@ -736,14 +743,31 @@ func get_inventory_count(block_id: int) -> int:
 
 
 func clear_inventory() -> void:
+	var had_inventory := not inventory.is_empty()
 	inventory_store.clear()
+	if had_inventory:
+		inventory_changed.emit()
 
 
 func refresh_inventory_from_stockpiles() -> void:
+	var previous := inventory.duplicate()
 	inventory_store.clear()
 	var counts := item_store.aggregate_stored_counts()
 	for material_id in counts.keys():
 		inventory_store.add(int(material_id), int(counts[material_id]))
+	if previous != inventory:
+		inventory_changed.emit()
+
+
+func _on_stockpile_state_changed(_reason: String) -> void:
+	stockpiles_changed.emit()
+
+
+func set_player_mode(mode: int) -> void:
+	if player_mode == mode:
+		return
+	player_mode = mode
+	player_mode_changed.emit(player_mode)
 
 
 func clear_items_and_stockpiles() -> void:
@@ -772,16 +796,12 @@ func spawn_mining_drops(source_block_id: int, pos: Vector3i) -> Array[int]:
 			pos.z,
 			source_block_id,
 		])
-	if task_manager != null:
-		task_manager.rebuild_haul_tasks()
 	return spawned
 
 
 func create_stockpile(cells: Array[Vector3i]) -> int:
 	var stockpile_id := stockpile_store.create_stockpile(cells)
 	trace_system_event("stockpile_created", "stockpile_id=%d cells=%d" % [stockpile_id, cells.size()])
-	if task_manager != null:
-		task_manager.rebuild_haul_tasks()
 	return stockpile_id
 
 
@@ -793,8 +813,6 @@ func remove_stockpile_cells(cells: Array[Vector3i]) -> Array[int]:
 	if not touched.is_empty():
 		refresh_inventory_from_stockpiles()
 		trace_system_event("stockpile_cells_removed", "stockpiles=%s cells=%d" % [touched, cells.size()])
-		if task_manager != null:
-			task_manager.rebuild_haul_tasks()
 	return touched
 
 
@@ -998,6 +1016,7 @@ func clear_tasks() -> void:
 		task_manager.accessibility_recheck_index = 0
 		task_manager.accessibility_worker_index = 0
 		task_manager.reset_assignment_auction()
+		task_manager.request_haul_rebuild("tasks_cleared")
 
 
 func clear_workers() -> void:
@@ -1077,6 +1096,7 @@ func set_top_render_y(new_y: int) -> void:
 	if renderer != null:
 		renderer.set_top_render_y(top_render_y)
 		renderer.clear_render_height_queue()
+	render_level_changed.emit(top_render_y)
 
 
 func get_render_height_bounds() -> Dictionary:

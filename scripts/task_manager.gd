@@ -38,6 +38,10 @@ var next_assignment_auction_id := 1
 var assist_requests_by_worker: Dictionary = {}
 var assist_requests_by_id: Dictionary = {}
 var next_assist_request_id := 1
+var haul_rebuild_requested := true
+var haul_rebuild_in_progress := false
+var haul_rebuild_reasons: Dictionary = {"initial": true}
+var haul_rebuild_count := 0
 #endregion
 
 
@@ -45,6 +49,9 @@ var next_assist_request_id := 1
 func _init(world_ref: World, queue_ref: TaskQueue) -> void:
 	world = world_ref
 	task_queue = queue_ref
+	if world != null:
+		world.item_store.haul_state_changed.connect(request_haul_rebuild)
+		world.stockpile_store.haul_state_changed.connect(request_haul_rebuild)
 	path_search_scheduler.start()
 
 
@@ -55,8 +62,22 @@ func shutdown() -> void:
 
 #region Task Queue Updates
 func update_task_queue() -> void:
+	# SEE-ADR-009: Haul reconstruction is mutation-driven and coalesced.
+	if not haul_rebuild_requested:
+		return
+	haul_rebuild_requested = false
+	haul_rebuild_reasons.clear()
+	haul_rebuild_in_progress = true
 	rebuild_haul_tasks()
-	task_queue.cleanup_completed()
+	haul_rebuild_in_progress = false
+	haul_rebuild_count += 1
+
+
+func request_haul_rebuild(reason: String = "unspecified") -> void:
+	if haul_rebuild_in_progress:
+		return
+	haul_rebuild_requested = true
+	haul_rebuild_reasons[reason] = true
 
 
 func update_task_assignments() -> void:

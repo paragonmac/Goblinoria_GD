@@ -10,8 +10,10 @@ Normal frame flow is:
 
 1. Global input handles menu toggles.
 2. Gameplay input handles mode keys, debug keys, worker window toggle, and render-level changes.
-3. Camera, selection, streaming, world simulation, workers, tasks, overlays, and HUD update through `Main._run_frame_updates()`.
+3. Camera, selection, streaming, world simulation, workers, tasks, and overlays update through `Main._run_frame_updates()`.
 4. Directional Y prewarm and background level warmup pump after the main update.
+
+HUD status, inventory, and stockpile sections refresh from coalesced state-change signals. Generation status polls every 250 ms, and the worker window polls every 200 ms only while open.
 
 ## New World Flow
 
@@ -102,6 +104,8 @@ Workers pull tasks from `TaskQueue` through `TaskManager`, pathfind with `Pathfi
 
 Mining creates physical item stacks through `BlockDropTable` and `ItemStackStore`. Loose items are not usable inventory. Each stockpile cell stores one material with a base stack capacity of 16, and `world.inventory` is a derived compatibility view over those stored stacks.
 Loose stacks use camera-facing cells from `assets/textures/fantasy_resource_icons_6x6_real_alpha.png`; materials without a mapped cell retain the colored-box fallback.
+
+Haul-task reconstruction is dirty-driven: item and stockpile mutations request one coalesced rebuild. Completed tasks are removed from queue indexes immediately, so neither operation requires an unconditional full scan each frame.
 
 Ordinary DIG work is horizontal-only: the worker and target block must share a Y level. Downward excavation requires the stairs workflow to establish controlled access to the next level.
 

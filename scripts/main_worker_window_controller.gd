@@ -5,7 +5,7 @@ class_name MainWorkerWindowController
 #region Constants
 const WINDOW_TITLE := "Workers"
 const WINDOW_HINT := "Press W to close"
-const POLL_INTERVAL_MSEC := 200
+const POLL_INTERVAL_SEC := 0.2
 #endregion
 
 #region State
@@ -17,13 +17,15 @@ var details_button: Button
 var workers_text: RichTextLabel
 var visible: bool = false
 var details_visible: bool = true
-var last_poll_msec: int = 0
+var current_world: World
+var poll_timer: Timer
 #endregion
 
 
-func setup(hud_layer: CanvasLayer) -> void:
+func setup(hud_layer: CanvasLayer, world: World) -> void:
 	if hud_layer == null:
 		return
+	current_world = world
 
 	panel = PanelContainer.new()
 	panel.name = "WorkerWindow"
@@ -94,6 +96,12 @@ func setup(hud_layer: CanvasLayer) -> void:
 	scroll.add_child(workers_text)
 
 	hud_layer.add_child(panel)
+	poll_timer = Timer.new()
+	poll_timer.name = "WorkerWindowPollTimer"
+	poll_timer.wait_time = POLL_INTERVAL_SEC
+	poll_timer.one_shot = false
+	poll_timer.timeout.connect(_on_poll_timeout)
+	hud_layer.add_child(poll_timer)
 
 
 func toggle() -> void:
@@ -101,20 +109,30 @@ func toggle() -> void:
 	if panel != null:
 		panel.visible = visible
 	if visible:
-		last_poll_msec = 0
+		update_window(current_world)
+		if poll_timer != null:
+			poll_timer.start()
+	elif poll_timer != null:
+		poll_timer.stop()
 
 
 func close() -> void:
 	visible = false
 	if panel != null:
 		panel.visible = false
+	if poll_timer != null:
+		poll_timer.stop()
 
 
 func _on_details_pressed() -> void:
 	details_visible = not details_visible
 	if details_button != null:
 		details_button.text = _details_button_text()
-	last_poll_msec = 0
+	update_window(current_world)
+
+
+func _on_poll_timeout() -> void:
+	update_window(current_world)
 
 
 func update_window(world: World) -> void:
@@ -126,11 +144,6 @@ func update_window(world: World) -> void:
 		summary_label.text = "No world loaded."
 		workers_text.text = ""
 		return
-
-	var now_msec: int = Time.get_ticks_msec()
-	if last_poll_msec > 0 and now_msec - last_poll_msec < POLL_INTERVAL_MSEC:
-		return
-	last_poll_msec = now_msec
 
 	var lines: PackedStringArray = PackedStringArray()
 	lines.append("ID  State    Position       Task                      Status")
