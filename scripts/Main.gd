@@ -170,6 +170,7 @@ func _handle_global_input() -> void:
 func _handle_gameplay_input() -> void:
 	_handle_worker_window_toggle()
 	_handle_mode_selection()
+	_handle_camera_rotation()
 	_handle_debug_keys()
 	_handle_render_layer_keys()
 
@@ -190,6 +191,19 @@ func _handle_mode_selection() -> void:
 		world.player_mode = World.PlayerMode.PLACE
 	elif is_key_just_pressed(KEY_4):
 		world.player_mode = World.PlayerMode.STAIRS
+
+
+func _handle_camera_rotation() -> void:
+	var direction := 0
+	if is_key_just_pressed(KEY_COMMA):
+		direction = -1
+	elif is_key_just_pressed(KEY_PERIOD):
+		direction = 1
+	if direction == 0 or camera_controller == null or world == null:
+		return
+	if selection_controller != null and selection_controller.is_dragging:
+		return
+	camera_controller.rotate_view(direction, float(world.top_render_y))
 
 
 func _handle_debug_keys() -> void:
@@ -214,6 +228,8 @@ func _handle_debug_keys() -> void:
 		debug_overlay.export_map_snapshot()
 	if is_key_just_pressed(KEY_F10):
 		debug_overlay.toggle_debug_timings_log()
+	if is_key_just_pressed(KEY_F11):
+		debug_overlay.toggle_worker_trace()
 
 
 func _handle_render_layer_keys() -> void:

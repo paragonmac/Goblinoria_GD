@@ -5,6 +5,12 @@ class_name TaskQueue
 #region Enums
 enum TaskType {DIG, PLACE, STAIRS}
 enum TaskStatus {PENDING, IN_PROGRESS, COMPLETED}
+enum TaskAccessibility {UNKNOWN, REACHABLE, UNREACHABLE}
+#endregion
+
+#region Constants
+const WORKER_UNREACHABLE_TTL_MSEC := 2500
+const TASK_UNREACHABLE_TTL_MSEC := 2500
 #endregion
 
 
@@ -14,15 +20,46 @@ class Task:
 	var pos: Vector3i
 	var type: int
 	var status: int
+	var accessibility: int
+	var accessibility_updated_msec: int
 	var material: int
 	var assigned_worker = null
+	var unreachable_workers: Dictionary = {}
 
 	func _init(task_id: int, task_pos: Vector3i, task_type: int, task_material: int) -> void:
 		id = task_id
 		pos = task_pos
 		type = task_type
 		status = TaskStatus.PENDING
+		accessibility = TaskAccessibility.UNKNOWN
+		accessibility_updated_msec = 0
 		material = task_material
+
+	func set_accessibility(new_accessibility: int, now_msec: int) -> void:
+		accessibility = new_accessibility
+		accessibility_updated_msec = now_msec
+
+	func mark_worker_unreachable(worker_id: int, now_msec: int) -> void:
+		unreachable_workers[worker_id] = now_msec
+
+	func is_worker_unreachable(worker_id: int, now_msec: int, ttl_msec: int = WORKER_UNREACHABLE_TTL_MSEC) -> bool:
+		if not unreachable_workers.has(worker_id):
+			return false
+		var marked_msec: int = int(unreachable_workers[worker_id])
+		if now_msec - marked_msec <= ttl_msec:
+			return true
+		unreachable_workers.erase(worker_id)
+		return false
+
+	func clear_expired_worker_unreachable(now_msec: int, ttl_msec: int = WORKER_UNREACHABLE_TTL_MSEC) -> bool:
+		var expired := false
+		var worker_ids: Array = unreachable_workers.keys()
+		for worker_id in worker_ids:
+			var marked_msec: int = int(unreachable_workers[worker_id])
+			if now_msec - marked_msec > ttl_msec:
+				unreachable_workers.erase(worker_id)
+				expired = true
+		return expired
 #endregion
 
 
@@ -31,6 +68,8 @@ var tasks: Array = []
 var next_id: int = 1
 var _tasks_by_id: Dictionary = {}      # int -> Task
 var _tasks_by_pos: Dictionary = {}     # Vector3i -> Array[Task]
+var _assist_waiters: Array = []
+var _assist_waiter_seq := 0
 #endregion
 
 
@@ -120,7 +159,71 @@ func find_nearest_stairs_at_level(from_pos: Vector3, y_level: int) -> Task:
 #endregion
 
 
+#region Assist Waiters
+func register_assist_waiter(worker) -> void:
+	if worker == null:
+		return
+	clear_assist_waiter(worker)
+	_assist_waiter_seq += 1
+	_assist_waiters.append({
+		"worker": worker,
+		"worker_id": worker.worker_id,
+		"seq": _assist_waiter_seq,
+		"arrived_msec": Time.get_ticks_msec(),
+	})
+
+
+func clear_assist_waiter(worker) -> void:
+	if worker == null:
+		return
+	var i := 0
+	while i < _assist_waiters.size():
+		if _assist_waiters[i].get("worker") == worker:
+			_assist_waiters.remove_at(i)
+		else:
+			i += 1
+
+
+func has_assist_waiters() -> bool:
+	_prune_invalid_assist_waiters()
+	return not _assist_waiters.is_empty()
+
+
+func is_oldest_assist_waiter(worker) -> bool:
+	_prune_invalid_assist_waiters()
+	if worker == null or _assist_waiters.is_empty():
+		return false
+	return _assist_waiters[0].get("worker") == worker
+
+
+func get_oldest_assist_waiter_id() -> int:
+	_prune_invalid_assist_waiters()
+	if _assist_waiters.is_empty():
+		return -1
+	return int(_assist_waiters[0].get("worker_id", -1))
+
+
+func _prune_invalid_assist_waiters() -> void:
+	var i := 0
+	while i < _assist_waiters.size():
+		var worker = _assist_waiters[i].get("worker")
+		if worker == null or worker.current_task_id >= 0:
+			_assist_waiters.remove_at(i)
+		else:
+			i += 1
+#endregion
+
+
 #region Task Maintenance
+func clear() -> void:
+	tasks.clear()
+	_tasks_by_id.clear()
+	_tasks_by_pos.clear()
+	_assist_waiters.clear()
+	_assist_waiter_seq = 0
+	next_id = 1
+
+
 func cleanup_completed() -> void:
 	var i := 0
 	while i < tasks.size():

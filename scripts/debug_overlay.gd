@@ -178,6 +178,11 @@ func toggle_debug_timings_log() -> void:
 		_stop_debug_timings_log()
 
 
+func toggle_worker_trace() -> void:
+	if world != null:
+		world.toggle_worker_trace()
+
+
 func toggle_streaming_stats() -> void:
 	show_streaming_stats = not show_streaming_stats
 	if streaming_stats_label != null:
@@ -216,6 +221,10 @@ func step_world(dt: float) -> void:
 		debug_profiler.begin("World.update_render_height_queue")
 		world.update_render_height_queue()
 		debug_profiler.end("World.update_render_height_queue")
+
+		debug_profiler.begin("World.update_task_assignments")
+		world.update_task_assignments()
+		debug_profiler.end("World.update_task_assignments")
 
 		debug_profiler.begin("World.update_workers")
 		world.update_workers(dt)

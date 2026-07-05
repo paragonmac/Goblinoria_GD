@@ -21,6 +21,7 @@ func _init(world_ref: World) -> void:
 
 #region Raycasting
 func raycast_block(ray_origin: Vector3, ray_dir: Vector3, max_distance: float) -> Dictionary:
+	# SEE-ADR-006: Click selection raycasts visible world voxels at or below top_render_y.
 	var pos := ray_origin
 	var dir := ray_dir
 

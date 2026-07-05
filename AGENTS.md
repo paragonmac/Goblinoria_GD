@@ -34,4 +34,5 @@ Local instructions for coding agents working in this repo.
 - `docs/design_philosophy.md` is the canonical design intent.
 - `docs/chunk_streaming_plan.md` tracks the chunk streaming roadmap.
 - `docs/game_design_doc.md` captures gameplay/system specs.
+- When you see a `SEE-ADR-###` code comment, read the referenced file in `docs/adr/` before changing that code path.
 - Archived docs in `docs/archive/` are historical only; do not treat as current.

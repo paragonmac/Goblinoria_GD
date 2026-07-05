@@ -12,6 +12,7 @@ const WorldStreamingScript = preload("res://scripts/world_streaming.gd")
 const WorldRaycasterScript = preload("res://scripts/world_raycaster.gd")
 const WorldInventoryScript = preload("res://scripts/world/world_inventory.gd")
 const WorldChunkSpaceScript = preload("res://scripts/world/world_chunk_space.gd")
+const WorkerTraceScript = preload("res://scripts/diagnostics/worker_trace.gd")
 const ChunkDataType = ChunkDataScript
 #endregion
 
@@ -156,6 +157,7 @@ var arena_cooker: WorldArenaCookerScript
 var streaming: WorldStreamingScript
 var raycaster: WorldRaycasterScript
 var debug_profiler: DebugProfiler
+var worker_trace = WorkerTraceScript.new()
 #endregion
 
 #region Worker State
@@ -402,6 +404,8 @@ func set_block_raw(x: int, y: int, z: int, value: int, mark_dirty: bool) -> void
 		chunk.generated = true
 		chunk.mesh_state = ChunkDataScript.MESH_STATE_NONE
 		chunk.mesh_revision += 1
+		if task_manager != null:
+			task_manager.invalidate_task_accessibility(Vector3i(x, y, z))
 		if renderer != null:
 			renderer.invalidate_chunk_mesh_cache(coord)
 		_update_depth_visibility_from_change(y)
@@ -569,11 +573,12 @@ func get_generation_stats() -> Dictionary:
 func update_world(dt: float) -> void:
 	process_generation_results()
 	update_render_height_queue()
+	update_task_assignments()
 	update_workers(dt)
 	update_task_queue()
-	update_task_overlays_phase()
 	update_blocked_tasks(dt)
 	update_reassign_tasks(dt)
+	update_task_overlays_phase()
 
 
 func update_workers(dt: float) -> void:
@@ -587,6 +592,11 @@ func update_workers(dt: float) -> void:
 			worker_chunk_cache[worker] = coord
 			worker_activity_timer = WORKER_ACTIVITY_GRACE_SEC
 			ensure_chunk_buffer_for_pos(coord)
+
+
+func update_task_assignments() -> void:
+	if task_manager != null:
+		task_manager.update_task_assignments()
 
 
 func update_task_queue() -> void:
@@ -668,12 +678,13 @@ func reassess_waiting_tasks() -> void:
 		task_manager.reassess_waiting_tasks()
 
 
-func queue_task_request(task_type: int, pos: Vector3i, material: int) -> void:
+func queue_task_request(task_type: int, pos: Vector3i, material: int) -> bool:
 	if not is_block_coord_valid(pos.x, pos.y, pos.z):
-		return
+		return false
 	ensure_chunk_buffer_for_pos(pos)
 	if task_manager != null:
-		task_manager.queue_task_request(task_type, pos, material)
+		return task_manager.queue_task_request(task_type, pos, material)
+	return false
 #endregion
 
 
@@ -749,22 +760,29 @@ func _prewarm_sync_chunks(view_rect: Rect2, plane_y: float) -> void:
 
 
 func _exit_tree() -> void:
+	worker_trace.stop()
+	if task_manager != null:
+		task_manager.shutdown()
 	if generator != null:
 		generator.shutdown_generation_thread()
 
 
 #region Workers
 func spawn_initial_workers() -> void:
+	_start_worker_trace_for_spawned_workers()
 	var center_x: int = spawn_coord.x
 	var center_z: int = spawn_coord.z
-	for offset in WORKER_SPAWN_OFFSETS:
+	for i in range(WORKER_SPAWN_OFFSETS.size()):
+		var offset: Vector2i = WORKER_SPAWN_OFFSETS[i]
 		var spawn_x: int = center_x + offset.x
 		var spawn_z: int = center_z + offset.y
 		var surface_y := find_surface_y(spawn_x, spawn_z)
 		var worker := Worker.new()
+		worker.worker_id = i + 1
 		worker.position = Vector3(spawn_x, surface_y + WORKER_SPAWN_HEIGHT_OFFSET, spawn_z)
 		add_child(worker)
 		workers.append(worker)
+		trace_worker_event(worker, "spawned")
 
 
 func find_surface_y(x: int, z: int) -> int:
@@ -783,22 +801,69 @@ func clear_and_respawn_workers() -> void:
 #endregion
 
 
+func _start_worker_trace_for_spawned_workers() -> void:
+	if worker_trace == null:
+		return
+	worker_trace.start(workers)
+
+
 func clear_tasks() -> void:
 	selected_blocks.clear()
 	if task_queue != null:
-		task_queue.tasks.clear()
-		task_queue.next_id = 1
+		task_queue.clear()
 	if task_manager != null:
 		task_manager.blocked_tasks.clear()
 		task_manager.blocked_recheck_timer = task_manager.BLOCKED_RECHECK_INTERVAL
 		task_manager.reassign_timer = task_manager.REASSIGN_INTERVAL
+		task_manager.accessibility_recheck_index = 0
+		task_manager.accessibility_worker_index = 0
+		task_manager.reset_assignment_auction()
 
 
 func clear_workers() -> void:
 	for worker in workers:
+		trace_worker_event(worker, "despawned")
 		worker.queue_free()
 	workers.clear()
 	worker_chunk_cache.clear()
+
+
+func toggle_worker_trace() -> bool:
+	if worker_trace.enabled:
+		worker_trace.stop()
+		return false
+	return worker_trace.start(workers)
+
+
+func trace_worker_event(worker: Worker, event: String, task = null, details: String = "") -> void:
+	worker_trace.record(worker, event, task, details)
+
+
+func trace_task_event(task, event: String, details: String = "") -> void:
+	worker_trace.record_task_event(task, event, details)
+
+
+func trace_system_event(event: String, details: String = "") -> void:
+	worker_trace.record_system_event(event, details)
+
+
+func get_workers_blocking_dig(pos: Vector3i) -> Array:
+	var blocking_workers: Array = []
+	for worker: Worker in workers:
+		var worker_pos := worker.get_block_coord()
+		if worker_pos.x == pos.x and worker_pos.y == pos.y + 1 and worker_pos.z == pos.z:
+			blocking_workers.append(worker)
+			continue
+		if worker.current_task_id < 0 or worker.path.is_empty():
+			continue
+		var work_pos: Vector3i = worker.path[worker.path.size() - 1]
+		if work_pos.x == pos.x and work_pos.y == pos.y + 1 and work_pos.z == pos.z:
+			blocking_workers.append(worker)
+	return blocking_workers
+
+
+func is_block_protected_from_dig(pos: Vector3i) -> bool:
+	return not get_workers_blocking_dig(pos).is_empty()
 
 
 #region Drag Preview

@@ -100,6 +100,10 @@ Current save formats are not changed by housekeeping refactors unless explicitly
 
 Workers pull tasks from `TaskQueue` through `TaskManager`, pathfind with `Pathfinder`, mutate blocks through `World`, and update inventory for dig/place work.
 
+Ordinary DIG work is horizontal-only: the worker and target block must share a Y level. Downward excavation requires the stairs workflow to establish controlled access to the next level.
+
+Worker activity tracing is toggled with `F11`. `WorkerTrace` writes transition, block-level movement, and task-overlay color events to timestamped CSV files under `user://diagnostics`, including worker coordinates, task targets, path progress, logical overlay colors, and renderer visibility state.
+
 ## Refactor Pressure Points
 
 The largest coupling hotspots are:

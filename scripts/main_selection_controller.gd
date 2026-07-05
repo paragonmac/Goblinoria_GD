@@ -144,6 +144,7 @@ func _raycast_block_from_screen_pos(screen_pos: Vector2) -> Dictionary:
 
 
 func _get_drag_plane_y(screen_pos: Vector2) -> float:
+	# SEE-ADR-006: Drag selection resolves to one fixed world Y plane at drag start.
 	var hit := _raycast_block_from_screen_pos(screen_pos)
 	if hit.get("hit", false):
 		var hit_pos: Vector3i = hit["pos"]
@@ -155,21 +156,20 @@ func _get_drag_plane_y(screen_pos: Vector2) -> float:
 
 
 func _get_drag_rect(start: Vector2, end: Vector2, plane_y: float) -> Dictionary:
+	# SEE-ADR-006: Screen drag endpoints are projected into world X/Z coordinates.
 	if camera_controller == null:
 		return {}
 	var a: Variant = camera_controller.screen_to_plane(start, plane_y)
 	var b: Variant = camera_controller.screen_to_plane(end, plane_y)
-
 	if a == null or b == null:
 		return {}
-
 	var a_pos: Vector3 = a
 	var b_pos: Vector3 = b
 	return {
-		"min_x": min(a_pos.x, b_pos.x),
-		"max_x": max(a_pos.x, b_pos.x),
-		"min_z": min(a_pos.z, b_pos.z),
-		"max_z": max(a_pos.z, b_pos.z),
+		"min_x": minf(a_pos.x, b_pos.x),
+		"max_x": maxf(a_pos.x, b_pos.x),
+		"min_z": minf(a_pos.z, b_pos.z),
+		"max_z": maxf(a_pos.z, b_pos.z),
 		"y": plane_y,
 	}
 
@@ -188,18 +188,22 @@ func _is_click(start: Vector2, end: Vector2) -> bool:
 
 
 func _enqueue_rect_tasks(rect: Dictionary) -> void:
+	# SEE-ADR-006: World-space drag bounds are rounded to stable block coordinates.
 	var min_x := int(floor(float(rect["min_x"]) + ROUND_HALF))
 	var max_x := int(floor(float(rect["max_x"]) + ROUND_HALF))
 	var min_z := int(floor(float(rect["min_z"]) + ROUND_HALF))
 	var max_z := int(floor(float(rect["max_z"]) + ROUND_HALF))
 	var y := int(rect["y"])
+	var results: Array = []
 
 	for x in range(min_x, max_x + 1):
 		for z in range(min_z, max_z + 1):
-			_enqueue_task_at(x, y, z)
+			results.append(_enqueue_task_at(x, y, z))
+	_trace_selection("drag", min_x, max_x, min_z, max_z, y, results)
 
 
 func _handle_click(screen_pos: Vector2) -> void:
+	# SEE-ADR-006: Click selection uses voxel raycast; PLACE targets one block above.
 	var hit := _raycast_block_from_screen_pos(screen_pos)
 	if not hit.get("hit", false):
 		return
@@ -207,25 +211,87 @@ func _handle_click(screen_pos: Vector2) -> void:
 	var pos: Vector3i = hit["pos"]
 	if world != null and world.player_mode == World.PlayerMode.PLACE:
 		pos.y += 1
-	_enqueue_task_at(pos.x, pos.y, pos.z)
+	var result := _enqueue_task_at(pos.x, pos.y, pos.z)
+	_trace_selection("click", pos.x, pos.x, pos.z, pos.z, pos.y, [result])
 
 
-func _enqueue_task_at(x: int, y: int, z: int) -> void:
+func _enqueue_task_at(x: int, y: int, z: int) -> Dictionary:
+	var pos := Vector3i(x, y, z)
+	var result := {
+		"pos": pos,
+		"queued": false,
+		"reason": "invalid_position",
+		"block_id": -1,
+	}
 	if world == null:
-		return
+		result["reason"] = "missing_world"
+		return result
 	if not _is_valid_position(x, y, z):
-		return
+		return result
+	var block_id := world.get_block(x, y, z)
+	result["block_id"] = block_id
 
 	match world.player_mode:
 		World.PlayerMode.DIG:
 			if world.is_diggable_at(x, y, z):
-				world.queue_task_request(TaskQueue.TaskType.DIG, Vector3i(x, y, z), 0)
+				result["queued"] = world.queue_task_request(TaskQueue.TaskType.DIG, pos, 0)
+				result["reason"] = "queued" if result["queued"] else "duplicate"
+			else:
+				result["reason"] = "not_diggable"
 		World.PlayerMode.PLACE:
 			if world.is_empty(x, y, z) and _has_place_stock():
-				world.queue_task_request(TaskQueue.TaskType.PLACE, Vector3i(x, y, z), PLACE_MATERIAL_ID)
+				result["queued"] = world.queue_task_request(TaskQueue.TaskType.PLACE, pos, PLACE_MATERIAL_ID)
+				result["reason"] = "queued" if result["queued"] else "duplicate"
+			elif not world.is_empty(x, y, z):
+				result["reason"] = "not_empty"
+			else:
+				result["reason"] = "no_stock"
 		World.PlayerMode.STAIRS:
 			if world.can_place_stairs_at(x, y, z):
-				world.queue_task_request(TaskQueue.TaskType.STAIRS, Vector3i(x, y, z), World.STAIR_BLOCK_ID)
+				result["queued"] = world.queue_task_request(TaskQueue.TaskType.STAIRS, pos, World.STAIR_BLOCK_ID)
+				result["reason"] = "queued" if result["queued"] else "duplicate"
+			else:
+				result["reason"] = "stairs_not_placeable"
+	return result
+
+
+func _trace_selection(
+	kind: String,
+	min_x: int,
+	max_x: int,
+	min_z: int,
+	max_z: int,
+	y: int,
+	results: Array
+) -> void:
+	if world == null:
+		return
+	var queued: Array[String] = []
+	var rejected: Array[String] = []
+	for result: Dictionary in results:
+		var pos: Vector3i = result["pos"]
+		var block_id: int = int(result.get("block_id", -1))
+		var block_name := world.block_registry.get_name(block_id) if block_id >= 0 else "invalid"
+		var entry := "%d:%d:%d:block=%d:%s" % [pos.x, pos.y, pos.z, block_id, block_name]
+		if bool(result.get("queued", false)):
+			queued.append(entry)
+		else:
+			rejected.append("%s:reason=%s" % [entry, result.get("reason", "unknown")])
+	var mode_name := str(World.PlayerMode.keys()[world.player_mode])
+	world.trace_system_event("selection_committed", "kind=%s mode=%s bounds=%d..%d:%d:%d..%d requested=%d queued=%d rejected=%d queued_positions=%s rejected_positions=%s" % [
+		kind,
+		mode_name,
+		min_x,
+		max_x,
+		y,
+		min_z,
+		max_z,
+		results.size(),
+		queued.size(),
+		rejected.size(),
+		"|".join(queued),
+		"|".join(rejected),
+	])
 
 
 func _has_place_stock() -> bool:

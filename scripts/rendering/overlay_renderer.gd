@@ -7,25 +7,34 @@ const TASK_OVERLAY_SIZE := Vector3(1.0, 1.0, 1.0)
 const DRAG_PREVIEW_SIZE := Vector3(1.0, 1.0, 1.0)
 const USE_FLAT_OVERLAYS := false
 const FLAT_OVERLAY_SIZE := Vector2(1.0, 1.0)
-const TASK_OVERLAY_ALPHA := 0.5
-const BLOCKED_OVERLAY_ALPHA := 0.5
+const UNKNOWN_OVERLAY_ALPHA := 0.25
+const PATHABLE_OVERLAY_ALPHA := 0.25
+const BLOCKED_OVERLAY_ALPHA := 0.25
+const ASSIGNED_OVERLAY_ALPHA := 0.25
 const DRAG_OVERLAY_ALPHA := 0.5
 const DRAG_DEFAULT_ALPHA := 0.5
-const DIG_TASK_COLOR := Color(1.0, 0.2, 0.2)
-const PLACE_TASK_COLOR := Color(0.2, 0.2, 1.0)
-const STAIRS_TASK_COLOR := Color(0.7, 0.5, 0.2)
+const UNKNOWN_TASK_COLOR := Color(0.2, 1.0, 0.2)
+const PATHABLE_TASK_COLOR := Color(0.15, 0.55, 1.0)
+const BLOCKED_TASK_COLOR := Color(1.0, 0.15, 0.15)
+const ASSIGNED_TASK_COLOR := Color(1.0, 0.75, 0.08)
+const TASK_EMISSION_STRENGTH := 0.18
+const ASSIGNED_PULSE_STRENGTH := 0.16
+const ASSIGNED_PULSE_SPEED := 4.0
 const DRAG_DIG_COLOR := Color(0.2, 1.0, 0.2)
 const DRAG_PLACE_COLOR := Color(0.2, 0.6, 1.0)
 const DRAG_STAIRS_COLOR := Color(1.0, 0.7, 0.2)
 const DRAG_DEFAULT_COLOR := Color(0.8, 0.8, 0.8)
+const ASSIGNED_OVERLAY_SCALE := Vector3(1.08, 1.0, 1.08)
 const ROUND_HALF := 0.5
-const COLOR_MAX := 1.0
 const OVERLAY_Y_OFFSET := 0.0  # 3D box centered at block position (use 0.52 for flat overlays)
 const OVERLAY_SHADER_CODE := """shader_type spatial;
 render_mode unshaded, cull_back, depth_draw_never;
 
 uniform vec4 albedo_color : source_color = vec4(1.0, 1.0, 1.0, 0.5);
 uniform float top_render_y = 1000.0;
+uniform float emission_strength = 0.18;
+uniform float pulse_strength = 0.0;
+uniform float pulse_speed = 4.0;
 
 varying float world_y;
 
@@ -38,7 +47,10 @@ void fragment() {
 	if (world_y > top_render_y + 0.5) {
 		discard;
 	}
-	ALBEDO = albedo_color.rgb;
+	float pulse = 1.0 + pulse_strength * (0.5 + 0.5 * sin(TIME * pulse_speed));
+	vec3 display_color = min(albedo_color.rgb * pulse, vec3(1.0));
+	ALBEDO = display_color;
+	EMISSION = display_color * emission_strength;
 	ALPHA = albedo_color.a;
 }
 """
@@ -49,6 +61,9 @@ var all_overlay_materials: Array = []
 #region State
 var world: World
 var task_overlays: Dictionary = {}
+var task_materials: Dictionary = {}
+var task_trace_records: Dictionary = {}
+var task_trace_enabled_last := false
 var drag_previews: Dictionary = {}
 var drag_materials: Dictionary = {}
 #endregion
@@ -66,11 +81,13 @@ func _ensure_shader() -> void:
 		overlay_shader.code = OVERLAY_SHADER_CODE
 
 
-func _create_overlay_shader_material(color: Color) -> ShaderMaterial:
+func _create_overlay_shader_material(color: Color, emission_strength: float = 0.0) -> ShaderMaterial:
 	_ensure_shader()
 	var mat := ShaderMaterial.new()
 	mat.shader = overlay_shader
 	mat.set_shader_parameter("albedo_color", color)
+	mat.set_shader_parameter("emission_strength", emission_strength)
+	mat.set_shader_parameter("pulse_speed", ASSIGNED_PULSE_SPEED)
 	if world != null:
 		mat.set_shader_parameter("top_render_y", float(world.top_render_y))
 	mat.render_priority = 100  # Render after terrain
@@ -90,11 +107,13 @@ func clear_task_overlays() -> void:
 	for key in task_overlays.keys():
 		task_overlays[key].queue_free()
 	task_overlays.clear()
+	task_trace_records.clear()
 
 
 func update_task_overlays(tasks: Array, blocked_tasks: Array) -> void:
 	if world == null:
 		return
+	_sync_task_trace_session()
 	var live_ids: Dictionary = {}
 	for task in tasks:
 		if task.status == TaskQueue.TaskStatus.COMPLETED:
@@ -103,8 +122,14 @@ func update_task_overlays(tasks: Array, blocked_tasks: Array) -> void:
 		if not task_overlays.has(task.id):
 			task_overlays[task.id] = create_task_overlay(task)
 		var overlay: MeshInstance3D = task_overlays[task.id]
+		var visual_state := task_overlay_state(task)
+		var desired_material := get_task_material(visual_state)
+		if overlay.material_override != desired_material:
+			overlay.material_override = desired_material
+		overlay.scale = ASSIGNED_OVERLAY_SCALE if visual_state == TaskOverlayState.ASSIGNED else Vector3.ONE
 		overlay.position = Vector3(task.pos.x, task.pos.y + OVERLAY_Y_OFFSET, task.pos.z)
 		overlay.visible = world.is_visible_at_level(task.pos.y)
+		_trace_task_overlay(task, overlay, visual_state)
 
 	for blocked in blocked_tasks:
 		var key := blocked_task_key(blocked)
@@ -118,6 +143,7 @@ func update_task_overlays(tasks: Array, blocked_tasks: Array) -> void:
 
 	for task_id in task_overlays.keys():
 		if not live_ids.has(task_id):
+			_trace_task_overlay_removed(task_id)
 			task_overlays[task_id].queue_free()
 			task_overlays.erase(task_id)
 #endregion
@@ -129,15 +155,55 @@ func blocked_task_key(task: Dictionary) -> String:
 	return "blocked:%s:%s:%s:%s" % [task["type"], pos.x, pos.y, pos.z]
 
 
-func task_type_color(task_type: int, alpha: float) -> Color:
-	match task_type:
-		TaskQueue.TaskType.DIG:
-			return Color(DIG_TASK_COLOR.r, DIG_TASK_COLOR.g, DIG_TASK_COLOR.b, alpha)
-		TaskQueue.TaskType.PLACE:
-			return Color(PLACE_TASK_COLOR.r, PLACE_TASK_COLOR.g, PLACE_TASK_COLOR.b, alpha)
-		TaskQueue.TaskType.STAIRS:
-			return Color(STAIRS_TASK_COLOR.r, STAIRS_TASK_COLOR.g, STAIRS_TASK_COLOR.b, alpha)
-	return Color(COLOR_MAX, COLOR_MAX, COLOR_MAX, alpha)
+enum TaskOverlayState {
+	# SEE-ADR-004: These states are player-facing task meanings, not arbitrary colors.
+	UNKNOWN,
+	BLOCKED,
+	PATHABLE,
+	ASSIGNED,
+}
+
+
+func task_overlay_state(task) -> int:
+	if task.status == TaskQueue.TaskStatus.IN_PROGRESS and task.assigned_worker != null:
+		return TaskOverlayState.ASSIGNED
+	if task.accessibility == TaskQueue.TaskAccessibility.REACHABLE:
+		return TaskOverlayState.PATHABLE
+	if task.accessibility == TaskQueue.TaskAccessibility.UNREACHABLE:
+		return TaskOverlayState.BLOCKED
+	return TaskOverlayState.UNKNOWN
+
+
+func task_state_color(state: int) -> Color:
+	match state:
+		TaskOverlayState.UNKNOWN:
+			return Color(UNKNOWN_TASK_COLOR.r, UNKNOWN_TASK_COLOR.g, UNKNOWN_TASK_COLOR.b, UNKNOWN_OVERLAY_ALPHA)
+		TaskOverlayState.PATHABLE:
+			return Color(PATHABLE_TASK_COLOR.r, PATHABLE_TASK_COLOR.g, PATHABLE_TASK_COLOR.b, PATHABLE_OVERLAY_ALPHA)
+		TaskOverlayState.ASSIGNED:
+			return Color(ASSIGNED_TASK_COLOR.r, ASSIGNED_TASK_COLOR.g, ASSIGNED_TASK_COLOR.b, ASSIGNED_OVERLAY_ALPHA)
+	return Color(BLOCKED_TASK_COLOR.r, BLOCKED_TASK_COLOR.g, BLOCKED_TASK_COLOR.b, BLOCKED_OVERLAY_ALPHA)
+
+
+func task_state_name(state: int) -> String:
+	match state:
+		TaskOverlayState.UNKNOWN:
+			return "GREEN_UNKNOWN"
+		TaskOverlayState.PATHABLE:
+			return "BLUE_PATHABLE"
+		TaskOverlayState.ASSIGNED:
+			return "AMBER_ASSIGNED"
+	return "RED_BLOCKED"
+
+
+func get_task_material(state: int) -> ShaderMaterial:
+	if task_materials.has(state):
+		return task_materials[state]
+	var material := _create_overlay_shader_material(task_state_color(state), TASK_EMISSION_STRENGTH)
+	if state == TaskOverlayState.ASSIGNED:
+		material.set_shader_parameter("pulse_strength", ASSIGNED_PULSE_STRENGTH)
+	task_materials[state] = material
+	return material
 
 
 func create_task_overlay(task) -> MeshInstance3D:
@@ -152,14 +218,13 @@ func create_task_overlay(task) -> MeshInstance3D:
 		box.size = TASK_OVERLAY_SIZE
 		mesh_instance.mesh = box
 
-	var color := task_type_color(task.type, TASK_OVERLAY_ALPHA)
-	mesh_instance.material_override = _create_overlay_shader_material(color)
+	mesh_instance.material_override = get_task_material(task_overlay_state(task))
 	_apply_overlay_instance_settings(mesh_instance)
 	add_child(mesh_instance)
 	return mesh_instance
 
 
-func create_blocked_task_overlay(task_type: int) -> MeshInstance3D:
+func create_blocked_task_overlay(_task_type: int) -> MeshInstance3D:
 	var mesh_instance := MeshInstance3D.new()
 	if USE_FLAT_OVERLAYS:
 		var quad := QuadMesh.new()
@@ -171,11 +236,77 @@ func create_blocked_task_overlay(task_type: int) -> MeshInstance3D:
 		box.size = TASK_OVERLAY_SIZE
 		mesh_instance.mesh = box
 
-	var color := task_type_color(task_type, BLOCKED_OVERLAY_ALPHA)
-	mesh_instance.material_override = _create_overlay_shader_material(color)
+	mesh_instance.material_override = get_task_material(TaskOverlayState.BLOCKED)
 	_apply_overlay_instance_settings(mesh_instance)
 	add_child(mesh_instance)
 	return mesh_instance
+#endregion
+
+
+#region Task Overlay Trace
+func _sync_task_trace_session() -> void:
+	var trace_enabled: bool = world.worker_trace != null and world.worker_trace.enabled
+	if trace_enabled and not task_trace_enabled_last:
+		task_trace_records.clear()
+	elif not trace_enabled:
+		task_trace_records.clear()
+	task_trace_enabled_last = trace_enabled
+
+
+func _trace_task_overlay(task, overlay: MeshInstance3D, visual_state: int) -> void:
+	if not task_trace_enabled_last:
+		return
+	var color := task_state_color(visual_state)
+	var signature := "%d|%s|%s|%s|%s|%s" % [
+		visual_state,
+		overlay.visible,
+		overlay.is_visible_in_tree(),
+		overlay.mesh != null,
+		overlay.material_override != null,
+		overlay.scale,
+	]
+	var previous: Dictionary = task_trace_records.get(task.id, {})
+	if previous.get("signature", "") == signature:
+		return
+	var assigned_worker_id := -1
+	if task.assigned_worker != null:
+		assigned_worker_id = task.assigned_worker.worker_id
+	var details := "color_state=%s rgba=%.3f|%.3f|%.3f|%.3f status=%s accessibility=%s assigned_worker=%d node_visible=%s visible_in_tree=%s mesh_valid=%s material_valid=%s scale=%s top_render_y=%d" % [
+		task_state_name(visual_state),
+		color.r,
+		color.g,
+		color.b,
+		color.a,
+		TaskQueue.TaskStatus.keys()[task.status],
+		TaskQueue.TaskAccessibility.keys()[task.accessibility],
+		assigned_worker_id,
+		overlay.visible,
+		overlay.is_visible_in_tree(),
+		overlay.mesh != null,
+		overlay.material_override != null,
+		overlay.scale,
+		world.top_render_y,
+	]
+	world.trace_task_event(task, "block_color_changed", details)
+	task_trace_records[task.id] = {
+		"signature": signature,
+		"task": task,
+		"color_state": task_state_name(visual_state),
+	}
+
+
+func _trace_task_overlay_removed(task_id) -> void:
+	if not task_trace_enabled_last or not task_trace_records.has(task_id):
+		return
+	var record: Dictionary = task_trace_records[task_id]
+	var task = record.get("task")
+	if task != null:
+		world.trace_task_event(
+			task,
+			"block_color_removed",
+			"previous_color_state=%s reason=task completed or removed" % record.get("color_state", "UNKNOWN")
+		)
+	task_trace_records.erase(task_id)
 #endregion
 
 
@@ -236,22 +367,29 @@ func set_drag_preview(rect: Dictionary, mode: int) -> void:
 	var min_z: int = int(floor(float(rect["min_z"]) + ROUND_HALF))
 	var max_z: int = int(floor(float(rect["max_z"]) + ROUND_HALF))
 	var y: int = int(rect["y"])
-	var live_ids: Dictionary = {}
+	var positions: Array[Vector3i] = []
 	for x in range(min_x, max_x + 1):
 		for z in range(min_z, max_z + 1):
-			var key := drag_preview_key(x, y, z)
-			live_ids[key] = true
-			var overlay: MeshInstance3D
-			if not drag_previews.has(key):
-				overlay = create_drag_preview_overlay(mode)
-				drag_previews[key] = overlay
-			else:
-				overlay = drag_previews[key]
-				var desired := get_drag_material(mode)
-				if overlay.material_override != desired:
-					overlay.material_override = desired
-			overlay.position = Vector3(x, y + OVERLAY_Y_OFFSET, z)
-			overlay.visible = world.is_visible_at_level(y)
+			positions.append(Vector3i(x, y, z))
+	set_drag_preview_positions(positions, mode)
+
+
+func set_drag_preview_positions(positions: Array[Vector3i], mode: int) -> void:
+	var live_ids: Dictionary = {}
+	for pos: Vector3i in positions:
+		var key := drag_preview_key(pos.x, pos.y, pos.z)
+		live_ids[key] = true
+		var overlay: MeshInstance3D
+		if not drag_previews.has(key):
+			overlay = create_drag_preview_overlay(mode)
+			drag_previews[key] = overlay
+		else:
+			overlay = drag_previews[key]
+			var desired := get_drag_material(mode)
+			if overlay.material_override != desired:
+				overlay.material_override = desired
+		overlay.position = Vector3(pos.x, pos.y + OVERLAY_Y_OFFSET, pos.z)
+		overlay.visible = world.is_visible_at_level(pos.y)
 
 	for key in drag_previews.keys():
 		if not live_ids.has(key):

@@ -16,6 +16,7 @@ const CAM_ZOOM_MIN_DEFAULT := 5.0
 const CAM_ZOOM_STEP_DEFAULT := 1.15
 const ISO_PITCH_DEG := -35.0
 const ISO_YAW_DEG := 45.0
+const YAW_ROTATION_STEP_DEG := 90.0
 const MOVE_VERTICAL_UNIT := 1.0
 const DUMMY_FLOAT := 666.0
 #endregion
@@ -92,6 +93,27 @@ func handle_zoom_input(event: InputEvent) -> void:
 			camera.size = clamp(camera.size * cam_zoom_step, cam_zoom_min, cam_zoom_max)
 
 
+func rotate_view(direction: int, plane_y: float) -> void:
+	if camera == null or viewport == null or direction == 0:
+		return
+	var viewport_rect := viewport.get_visible_rect()
+	if viewport_rect.size.x <= 0.0 or viewport_rect.size.y <= 0.0:
+		return
+
+	var screen_center := viewport_rect.position + viewport_rect.size * 0.5
+	var pivot: Variant = screen_to_plane(screen_center, plane_y)
+	cam_yaw = fposmod(cam_yaw + float(direction) * YAW_ROTATION_STEP_DEG, 360.0)
+	_apply_isometric_rotation()
+	if pivot == null:
+		return
+
+	var rotated_center: Variant = screen_to_plane(screen_center, plane_y)
+	if rotated_center == null:
+		return
+	camera.position += Vector3(pivot) - Vector3(rotated_center)
+	_clamp_camera_to_world()
+
+
 func get_stream_view_rect(plane_y: float) -> Rect2:
 	if viewport == null:
 		return Rect2()
@@ -138,6 +160,7 @@ func raycast_to_plane(screen_pos: Vector2, plane_y: float) -> Vector3:
 
 
 func screen_to_plane(screen_pos: Vector2, plane_y: float) -> Variant:
+	# SEE-ADR-006: Selection uses world-plane projection, not screen-space rectangles.
 	if camera == null:
 		return null
 	var ray_origin := camera.project_ray_origin(screen_pos)
@@ -155,7 +178,6 @@ func screen_to_plane(screen_pos: Vector2, plane_y: float) -> Variant:
 
 func _apply_isometric_rotation() -> void:
 	cam_pitch = ISO_PITCH_DEG
-	cam_yaw = ISO_YAW_DEG
 	if camera != null:
 		camera.rotation = Vector3(deg_to_rad(cam_pitch), deg_to_rad(cam_yaw), 0.0)
 
