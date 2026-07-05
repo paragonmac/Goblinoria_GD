@@ -85,12 +85,12 @@ Raw mesh-cache entries store packed arrays and metrics, not `ArrayMesh` resource
 
 ## Save/Load Data
 
-`WorldSaveLoad` orchestrates persistence, with metadata, bulk block data, inventory, and persistent mesh-cache file handling split into small helpers:
+`WorldSaveLoad` orchestrates persistence, with metadata, bulk block data, physical item/stockpile state, and persistent mesh-cache file handling split into small helpers:
 
 - `world_meta.dat`: seed, spawn, top render Y, world dimensions, chunk size, block table hash, save version. Handled by `WorldMetadataSaveLoad`.
 - `world_blocks.dat`: finite-world bulk chunk block data with fill/raw/ZSTD entries. Handled by `WorldBulkChunkSaveLoad`.
 - `world_mesh_cache.dat`: optional raw mesh-cache acceleration data. Handled by `WorldMeshCacheSaveLoad`.
-- `inventory.dat`: inventory state. Handled by `WorldInventorySaveLoad`.
+- `items_stockpiles.dat`: physical item stacks and stockpile zones. Handled by `WorldItemStockpileSaveLoad`.
 
 Current save formats are not changed by housekeeping refactors unless explicitly planned.
 
@@ -98,7 +98,10 @@ Current save formats are not changed by housekeeping refactors unless explicitly
 
 `World` is the gameplay/system hub. It owns chunks, world bounds, block access, inventory, tasks, pathfinding, workers, generator, save/load, streaming, raycasting, and renderer references.
 
-Workers pull tasks from `TaskQueue` through `TaskManager`, pathfind with `Pathfinder`, mutate blocks through `World`, and update inventory for dig/place work.
+Workers pull tasks from `TaskQueue` through `TaskManager`, pathfind with `Pathfinder`, mutate blocks through `World`, and carry physical item stacks for hauling work.
+
+Mining creates physical item stacks through `BlockDropTable` and `ItemStackStore`. Loose items are not usable inventory. Each stockpile cell stores one material with a base stack capacity of 16, and `world.inventory` is a derived compatibility view over those stored stacks.
+Loose stacks use camera-facing cells from `assets/textures/fantasy_resource_icons_6x6_real_alpha.png`; materials without a mapped cell retain the colored-box fallback.
 
 Ordinary DIG work is horizontal-only: the worker and target block must share a Y level. Downward excavation requires the stairs workflow to establish controlled access to the next level.
 

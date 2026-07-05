@@ -85,6 +85,9 @@ func update_hover_preview() -> void:
 	elif world.player_mode == World.PlayerMode.DOWN_STAIRS:
 		pos = _down_stair_target_from_hit(hit_pos)
 		valid = _can_place_down_stairs_at(pos)
+	elif world.player_mode == World.PlayerMode.STOCKPILE:
+		pos = _stockpile_target_from_hit(hit_pos)
+		valid = _can_create_stockpile_at(pos)
 	else:
 		pos = _erase_target_from_hit(hit_pos)
 		valid = world.has_pending_task_request_at(pos)
@@ -145,6 +148,9 @@ func _update_drag_preview() -> void:
 	if _is_stair_mode():
 		world.set_drag_preview_entries(_build_stair_preview_entries(drag_rect), world.player_mode)
 		return
+	if world.player_mode == World.PlayerMode.STOCKPILE:
+		world.set_drag_preview_entries(_build_stockpile_preview_entries(drag_rect), world.player_mode)
+		return
 	if world.player_mode == World.PlayerMode.ERASE:
 		world.set_drag_preview_entries(_build_erase_preview_entries(drag_rect), world.player_mode)
 		return
@@ -180,6 +186,8 @@ func _get_drag_plane_y(screen_pos: Vector2) -> float:
 			base_y = float(_down_stair_target_from_hit(hit_pos).y)
 		elif world != null and world.player_mode == World.PlayerMode.ERASE:
 			base_y = float(_erase_target_from_hit(hit_pos).y)
+		elif world != null and world.player_mode == World.PlayerMode.STOCKPILE:
+			base_y = float(_stockpile_target_from_hit(hit_pos).y)
 		return base_y
 	return float(world.top_render_y) if world != null else 0.0
 
@@ -224,6 +232,14 @@ func _enqueue_rect_tasks(rect: Dictionary) -> void:
 	var max_z := int(floor(float(rect["max_z"]) + ROUND_HALF))
 	var y := int(rect["y"])
 	var results: Array = []
+	if world != null and world.player_mode == World.PlayerMode.STOCKPILE:
+		var cells: Array[Vector3i] = []
+		for pos: Vector3i in _rect_positions(rect):
+			if _can_create_stockpile_at(pos):
+				cells.append(pos)
+		var result := _stockpile_result(cells)
+		_trace_selection("drag", min_x, max_x, min_z, max_z, y, [result])
+		return
 
 	for x in range(min_x, max_x + 1):
 		for z in range(min_z, max_z + 1):
@@ -246,6 +262,8 @@ func _handle_click(screen_pos: Vector2) -> void:
 		pos = _down_stair_target_from_hit(pos)
 	elif world != null and world.player_mode == World.PlayerMode.ERASE:
 		pos = _erase_target_from_hit(pos)
+	elif world != null and world.player_mode == World.PlayerMode.STOCKPILE:
+		pos = _stockpile_target_from_hit(pos)
 	var result := _enqueue_task_at(pos.x, pos.y, pos.z)
 	_trace_selection("click", pos.x, pos.x, pos.z, pos.z, pos.y, [result])
 
@@ -296,8 +314,11 @@ func _enqueue_task_at(x: int, y: int, z: int) -> Dictionary:
 				result["reason"] = "down_stairs_not_placeable"
 		World.PlayerMode.ERASE:
 			var removed: Array = world.cancel_pending_task_requests_at(pos)
-			result["queued"] = not removed.is_empty()
-			result["reason"] = "cancelled:%d" % removed.size() if result["queued"] else "no_pending_designation"
+			var removed_stockpiles: Array[int] = world.remove_stockpile_cells([pos])
+			result["queued"] = not removed.is_empty() or not removed_stockpiles.is_empty()
+			result["reason"] = "cancelled:%d stockpile_cells:%d" % [removed.size(), removed_stockpiles.size()] if result["queued"] else "nothing_to_erase"
+		World.PlayerMode.STOCKPILE:
+			result = _stockpile_result([pos] if _can_create_stockpile_at(pos) else [])
 	return result
 
 
@@ -350,6 +371,7 @@ func _uses_hover_preview() -> bool:
 	return world != null and (
 		_is_stair_mode()
 		or world.player_mode == World.PlayerMode.ERASE
+		or world.player_mode == World.PlayerMode.STOCKPILE
 	)
 
 
@@ -386,6 +408,16 @@ func _build_erase_preview_entries(rect: Dictionary) -> Array[Dictionary]:
 		entries.append({
 			"pos": pos,
 			"valid": world.has_pending_task_request_at(pos),
+		})
+	return entries
+
+
+func _build_stockpile_preview_entries(rect: Dictionary) -> Array[Dictionary]:
+	var entries: Array[Dictionary] = []
+	for pos: Vector3i in _rect_positions(rect):
+		entries.append({
+			"pos": pos,
+			"valid": _can_create_stockpile_at(pos),
 		})
 	return entries
 
@@ -483,6 +515,41 @@ func _erase_target_from_hit(hit_pos: Vector3i) -> Vector3i:
 	if world.has_pending_task_request_at(above):
 		return above
 	return hit_pos
+
+
+func _stockpile_target_from_hit(hit_pos: Vector3i) -> Vector3i:
+	if world == null:
+		return hit_pos
+	var above := Vector3i(hit_pos.x, hit_pos.y + 1, hit_pos.z)
+	if _can_create_stockpile_at(above):
+		return above
+	return hit_pos
+
+
+func _can_create_stockpile_at(pos: Vector3i) -> bool:
+	return world != null \
+		and world.pathfinder != null \
+		and world.is_block_coord_valid(pos.x, pos.y, pos.z) \
+		and world.pathfinder.is_walkable(world, pos.x, pos.y, pos.z) \
+		and not world.is_stockpile_cell(pos)
+
+
+func _stockpile_result(cells: Array[Vector3i]) -> Dictionary:
+	var result := {
+		"pos": cells[0] if not cells.is_empty() else Vector3i.ZERO,
+		"queued": false,
+		"reason": "no_valid_stockpile_cells",
+		"block_id": -1,
+	}
+	if world == null:
+		result["reason"] = "missing_world"
+		return result
+	if cells.is_empty():
+		return result
+	var stockpile_id := world.create_stockpile(cells)
+	result["queued"] = stockpile_id > 0
+	result["reason"] = "stockpile:%d cells:%d" % [stockpile_id, cells.size()] if result["queued"] else "stockpile_failed"
+	return result
 
 
 func _stair_high_side_dirs_for_planned_digs(pos: Vector3i) -> Array[Vector2i]:

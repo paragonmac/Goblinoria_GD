@@ -63,6 +63,9 @@ var worker_id := 0
 var movement_intent: MovementIntent = MovementIntent.NONE
 var assist_task_id := -1
 var assist_goal := Vector3i.ZERO
+var carried_material_id := 0
+var carried_count := 0
+var carried_source_item_id := -1
 #endregion
 
 #region Visual Components
@@ -144,7 +147,7 @@ func _update_falling(dt: float, world, task_queue) -> bool:
 		return false
 	if state != WorkerState.FALLING:
 		_trace(world, "fall_started", _current_task(task_queue))
-		_begin_fall(task_queue)
+		_begin_fall(world, task_queue)
 	fall_target_y = _find_fall_target_y(world)
 	if fall_target_y < float(RESCUE_MIN_WALKABLE_Y) and _recover_to_surface(world, task_queue, "fall_target_below_walkable_floor"):
 		return false
@@ -158,8 +161,8 @@ func _update_falling(dt: float, world, task_queue) -> bool:
 	return true
 
 
-func _begin_fall(task_queue) -> void:
-	_interrupt_current_task(task_queue)
+func _begin_fall(world, task_queue) -> void:
+	_interrupt_current_task(task_queue, world)
 	if task_queue != null:
 		task_queue.clear_assist_waiter(self)
 	path.clear()
@@ -190,7 +193,7 @@ func _recover_to_surface(world, task_queue, reason: String) -> bool:
 	if world == null or not world.has_method("find_surface_y"):
 		return false
 	var old_coord := get_block_coord()
-	_interrupt_current_task(task_queue)
+	_interrupt_current_task(task_queue, world)
 	if task_queue != null:
 		task_queue.clear_assist_waiter(self)
 	var safe_x: int = old_coord.x
@@ -222,17 +225,22 @@ func _recover_to_surface(world, task_queue, reason: String) -> bool:
 	return true
 
 
-func _interrupt_current_task(task_queue) -> void:
+func _interrupt_current_task(task_queue, world = null) -> void:
 	if task_queue != null:
 		task_queue.clear_assist_waiter(self)
 	if current_task_id >= 0 and task_queue != null:
 		var task = task_queue.get_task(current_task_id)
 		if task != null and task.status == TaskQueue.TaskStatus.IN_PROGRESS and task.assigned_worker == self:
+			if task.type == TaskQueue.TaskType.HAUL and world != null:
+				_drop_carried_item(world, task)
 			task.status = TaskQueue.TaskStatus.PENDING
 			task.accessibility = TaskQueue.TaskAccessibility.UNKNOWN
 			task.assigned_worker = null
 	current_task_id = -1
 	active_work_anim = &""
+	carried_material_id = 0
+	carried_count = 0
+	carried_source_item_id = -1
 	if movement_intent == MovementIntent.TASK:
 		movement_intent = MovementIntent.NONE
 
@@ -604,6 +612,8 @@ func _get_work_duration(world, task) -> float:
 			return _get_dig_duration_for_block_id(block_id) * dig_duration_multiplier
 		TaskQueue.TaskType.PLACE, TaskQueue.TaskType.STAIRS:
 			return BUILD_DURATION
+		TaskQueue.TaskType.HAUL:
+			return WORK_DURATION
 		_:
 			return WORK_DURATION
 
@@ -676,10 +686,8 @@ func update_working(dt: float, world, task_queue, pathfinder) -> void:
 			match task.type:
 				TaskQueue.TaskType.DIG:
 					var old_block: int = world.get_block(task.pos.x, task.pos.y, task.pos.z)
-					var drop_id: int = world.block_registry.get_drop(old_block)
-					if drop_id > 0:
-						world.add_to_inventory(drop_id)
 					world.set_block(task.pos.x, task.pos.y, task.pos.z, World.BLOCK_ID_AIR)
+					world.spawn_mining_drops(old_block, task.pos)
 				TaskQueue.TaskType.PLACE:
 					if not world.remove_from_inventory(task.material):
 						_trace(world, "task_deferred", task, "material unavailable")
@@ -694,6 +702,9 @@ func update_working(dt: float, world, task_queue, pathfinder) -> void:
 					world.set_block(task.pos.x, task.pos.y, task.pos.z, task.material)
 				TaskQueue.TaskType.STAIRS:
 					world.set_block(task.pos.x, task.pos.y, task.pos.z, task.material)
+				TaskQueue.TaskType.HAUL:
+					if not _advance_haul_task(world, task_queue, pathfinder, task):
+						return
 			task.status = TaskQueue.TaskStatus.COMPLETED
 			_trace(world, "task_completed", task)
 			if task.type == TaskQueue.TaskType.DIG:
@@ -704,6 +715,97 @@ func update_working(dt: float, world, task_queue, pathfinder) -> void:
 	set_state(WorkerState.IDLE)
 	idle_timer = IDLE_PAUSE
 #endregion
+
+
+func _advance_haul_task(world, task_queue, pathfinder, task) -> bool:
+	var stage := str(task.data.get("stage", "pickup"))
+	var item_id := int(task.data.get("item_id", -1))
+	if stage == "pickup":
+		var item: Dictionary = world.item_store.get_item(item_id)
+		if item.is_empty():
+			_trace(world, "haul_failed", task, "reason=item_missing")
+			task.status = TaskQueue.TaskStatus.COMPLETED
+			return true
+		if int(item.get("reserved_by_task_id", -1)) != task.id:
+			_trace(world, "haul_failed", task, "reason=item_reservation_lost")
+			task.status = TaskQueue.TaskStatus.COMPLETED
+			return true
+		carried_material_id = int(item.get("material_id", 0))
+		carried_count = int(item.get("count", 0))
+		carried_source_item_id = item_id
+		if not world.item_store.mark_carried(item_id):
+			_trace(world, "haul_failed", task, "reason=item_pickup_state_invalid")
+			_release_carried_item(world, task)
+			task.status = TaskQueue.TaskStatus.COMPLETED
+			return true
+		var destination: Vector3i = task.data.get("destination", Vector3i.ZERO)
+		var found_path: Array = pathfinder.find_path(world, get_block_coord(), destination, false, false)
+		if found_path.is_empty():
+			_release_carried_item(world, task)
+			task.status = TaskQueue.TaskStatus.PENDING
+			task.accessibility = TaskQueue.TaskAccessibility.UNKNOWN
+			task.assigned_worker = null
+			current_task_id = -1
+			active_work_anim = &""
+			idle_timer = IDLE_PAUSE
+			set_state(WorkerState.IDLE)
+			_trace(world, "haul_deferred", task, "reason=no_path_to_stockpile")
+			return false
+		task.data["stage"] = "deposit"
+		path = found_path.duplicate()
+		path_index = 0
+		movement_intent = MovementIntent.TASK
+		path_segment_validated = false
+		set_target_from_path(world)
+		active_work_anim = &""
+		set_state(WorkerState.MOVING)
+		_trace(world, "item_picked_up", task, "item_id=%d material=%d count=%d destination=%s" % [
+			item_id,
+			carried_material_id,
+			carried_count,
+			destination,
+		])
+		return false
+
+	var destination_stockpile := int(task.data.get("stockpile_id", -1))
+	var destination_pos: Vector3i = task.data.get("destination", get_block_coord())
+	if not world.deposit_item_to_stockpile(item_id, destination_stockpile, destination_pos):
+		_release_carried_item(world, task)
+		task.status = TaskQueue.TaskStatus.PENDING
+		task.accessibility = TaskQueue.TaskAccessibility.UNKNOWN
+		task.assigned_worker = null
+		current_task_id = -1
+		active_work_anim = &""
+		idle_timer = IDLE_PAUSE
+		set_state(WorkerState.IDLE)
+		_trace(world, "haul_deferred", task, "reason=deposit_rejected")
+		return false
+	_trace(world, "item_deposited", task, "item_id=%d stockpile=%d" % [item_id, destination_stockpile])
+	carried_material_id = 0
+	carried_count = 0
+	carried_source_item_id = -1
+	return true
+
+
+func _release_carried_item(world, task) -> void:
+	if carried_source_item_id >= 0 and world != null:
+		world.item_store.release_reservation(carried_source_item_id, task.id if task != null else -1)
+	carried_material_id = 0
+	carried_count = 0
+	carried_source_item_id = -1
+
+
+func _drop_carried_item(world, task) -> void:
+	if carried_source_item_id < 0 or world == null:
+		return
+	world.item_store.mark_loose(carried_source_item_id, get_block_coord())
+	if task != null:
+		task.pos = get_block_coord()
+		task.data["stage"] = "pickup"
+	_trace(world, "item_dropped", task, "item_id=%d pos=%s" % [carried_source_item_id, get_block_coord()])
+	carried_material_id = 0
+	carried_count = 0
+	carried_source_item_id = -1
 
 
 #region Waiting State
@@ -787,6 +889,8 @@ func find_path_to_task(
 ) -> Array:
 	if task_type == TaskQueue.TaskType.STAIRS:
 		return find_path_to_stairs(world, start, target, pathfinder)
+	if task_type == TaskQueue.TaskType.HAUL:
+		return pathfinder.find_path(world, start, target, false, false, max_iterations_cap)
 
 	return find_path_to_work_position(world, start, task_type, target, pathfinder, max_iterations_cap)
 

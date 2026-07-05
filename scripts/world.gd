@@ -11,6 +11,9 @@ const WorldArenaCookerScript = preload("res://scripts/world_arena_cooker.gd")
 const WorldStreamingScript = preload("res://scripts/world_streaming.gd")
 const WorldRaycasterScript = preload("res://scripts/world_raycaster.gd")
 const WorldInventoryScript = preload("res://scripts/world/world_inventory.gd")
+const BlockDropTableScript = preload("res://scripts/world/block_drop_table.gd")
+const ItemStackStoreScript = preload("res://scripts/world/item_stack_store.gd")
+const StockpileStoreScript = preload("res://scripts/world/stockpile_store.gd")
 const WorldChunkSpaceScript = preload("res://scripts/world/world_chunk_space.gd")
 const WorkerTraceScript = preload("res://scripts/diagnostics/worker_trace.gd")
 const ChunkDataType = ChunkDataScript
@@ -103,6 +106,7 @@ const MARCHING_SQUARES_RAMP := [
 
 #region Constants - World Generation
 const BLOCK_DATA_PATH := "res://data/blocks.csv"
+const BLOCK_DROPS_PATH := "res://data/block_drops.csv"
 const SEA_LEVEL_DEPTH := 30
 const SEA_LEVEL_MIN := 8
 #endregion
@@ -167,7 +171,7 @@ var worker_activity_timer: float = 0.0
 #endregion
 
 #region Player State
-enum PlayerMode {INFORMATION, DIG, PLACE, UP_STAIRS, DOWN_STAIRS, ERASE}
+enum PlayerMode {INFORMATION, DIG, PLACE, UP_STAIRS, DOWN_STAIRS, ERASE, STOCKPILE}
 var player_mode := PlayerMode.DIG
 var selected_blocks: Dictionary = {}
 #endregion
@@ -179,6 +183,10 @@ var deepest_structure_y: int = UNINITIALIZED_Y
 #region Inventory
 var inventory_store = WorldInventoryScript.new()
 var inventory: Dictionary = inventory_store.items
+var block_drop_table = BlockDropTableScript.new()
+var item_store = ItemStackStoreScript.new()
+var stockpile_store = StockpileStoreScript.new()
+var drop_rng := RandomNumberGenerator.new()
 #endregion
 
 #region Ramp Lookup Table
@@ -190,6 +198,8 @@ var _ramp_lookup := PackedByteArray()
 func _ready() -> void:
 	_init_ramp_lookup()
 	block_registry.load_from_csv(BLOCK_DATA_PATH)
+	block_drop_table.load_from_csv(BLOCK_DROPS_PATH)
+	drop_rng.seed = Time.get_ticks_usec()
 	task_manager = TaskManager.new(self, task_queue)
 	generator = WorldGeneratorScript.new(self)
 	save_load = WorldSaveLoadScript.new(self)
@@ -208,6 +218,7 @@ func init_world(seed_world_flag: bool = true) -> void:
 	clear_tasks()
 	clear_workers()
 	clear_inventory()
+	clear_items_and_stockpiles()
 	if renderer != null:
 		renderer.clear_chunks()
 	chunks.clear()
@@ -618,6 +629,7 @@ func update_task_overlays_phase() -> void:
 	if task_manager != null:
 		blocked = task_manager.blocked_tasks
 	renderer.update_task_overlays(task_queue.tasks, blocked)
+	renderer.update_item_and_stockpile_overlays(item_store.items, stockpile_store.stockpiles)
 
 func update_blocked_tasks(dt: float) -> void:
 	if task_manager != null:
@@ -713,15 +725,164 @@ func add_to_inventory(block_id: int, count: int = 1) -> void:
 
 
 func remove_from_inventory(block_id: int, count: int = 1) -> bool:
-	return inventory_store.remove(block_id, count)
+	var removed := item_store.remove_stored_material(block_id, count)
+	if removed:
+		refresh_inventory_from_stockpiles()
+	return removed
 
 
 func get_inventory_count(block_id: int) -> int:
-	return inventory_store.count(block_id)
+	return int(item_store.aggregate_stored_counts().get(block_id, 0))
 
 
 func clear_inventory() -> void:
 	inventory_store.clear()
+
+
+func refresh_inventory_from_stockpiles() -> void:
+	inventory_store.clear()
+	var counts := item_store.aggregate_stored_counts()
+	for material_id in counts.keys():
+		inventory_store.add(int(material_id), int(counts[material_id]))
+
+
+func clear_items_and_stockpiles() -> void:
+	item_store.clear()
+	stockpile_store.clear()
+	refresh_inventory_from_stockpiles()
+
+
+func spawn_mining_drops(source_block_id: int, pos: Vector3i) -> Array[int]:
+	var spawned: Array[int] = []
+	var legacy_drop_id: int = block_registry.get_drop(source_block_id)
+	var drops := block_drop_table.resolve_drops(source_block_id, drop_rng, legacy_drop_id)
+	for drop: Dictionary in drops:
+		var material_id := int(drop.get("material_id", 0))
+		var count := int(drop.get("count", 0))
+		var item_id := item_store.add_stack(material_id, count, pos)
+		if item_id < 0:
+			continue
+		spawned.append(item_id)
+		trace_system_event("item_drop_spawned", "item_id=%d material=%d count=%d pos=%d,%d,%d source_block=%d" % [
+			item_id,
+			material_id,
+			count,
+			pos.x,
+			pos.y,
+			pos.z,
+			source_block_id,
+		])
+	if task_manager != null:
+		task_manager.rebuild_haul_tasks()
+	return spawned
+
+
+func create_stockpile(cells: Array[Vector3i]) -> int:
+	var stockpile_id := stockpile_store.create_stockpile(cells)
+	trace_system_event("stockpile_created", "stockpile_id=%d cells=%d" % [stockpile_id, cells.size()])
+	if task_manager != null:
+		task_manager.rebuild_haul_tasks()
+	return stockpile_id
+
+
+func remove_stockpile_cells(cells: Array[Vector3i]) -> Array[int]:
+	for pos: Vector3i in cells:
+		for stored_item: Dictionary in item_store.stored_items_at(pos):
+			item_store.mark_loose(int(stored_item.get("id", -1)), pos)
+	var touched := stockpile_store.remove_cells(cells)
+	if not touched.is_empty():
+		refresh_inventory_from_stockpiles()
+		trace_system_event("stockpile_cells_removed", "stockpiles=%s cells=%d" % [touched, cells.size()])
+		if task_manager != null:
+			task_manager.rebuild_haul_tasks()
+	return touched
+
+
+func is_stockpile_cell(pos: Vector3i) -> bool:
+	return stockpile_store.stockpile_at(pos) >= 0
+
+
+func find_stockpile_destination_for_item(item: Dictionary) -> Dictionary:
+	if item.is_empty():
+		return {}
+	var material_id := int(item.get("material_id", 0))
+	var from_pos: Vector3i = item.get("pos", Vector3i.ZERO)
+	var best: Dictionary = {}
+	var best_priority := 3
+	var best_distance := INF
+	for candidate: Dictionary in stockpile_store.candidate_cells_for_material(material_id):
+		var pos: Vector3i = candidate.get("pos", Vector3i.ZERO)
+		var stored := item_store.stored_item_at(pos)
+		if not stored.is_empty() and int(stored.get("material_id", 0)) != material_id:
+			continue
+		var reserved := _reserved_haul_space_at(pos, material_id)
+		if bool(reserved.get("blocked", false)):
+			continue
+		var used := int(stored.get("count", 0)) + int(reserved.get("count", 0))
+		var capacity := stockpile_store.cell_capacity(pos)
+		if used >= capacity:
+			continue
+		var priority := 0 if not stored.is_empty() else (1 if int(reserved.get("count", 0)) > 0 else 2)
+		var distance := pos.distance_squared_to(from_pos)
+		if best.is_empty() or priority < best_priority or (priority == best_priority and distance < best_distance):
+			best_priority = priority
+			best_distance = distance
+			best = {
+				"stockpile_id": int(candidate.get("stockpile_id", -1)),
+				"pos": pos,
+				"available_capacity": capacity - used,
+			}
+	return best
+
+
+func _reserved_haul_space_at(pos: Vector3i, material_id: int) -> Dictionary:
+	var reserved_count := 0
+	if task_queue == null:
+		return {"count": reserved_count, "blocked": false}
+	for task in task_queue.tasks:
+		if task.type != TaskQueue.TaskType.HAUL or task.status == TaskQueue.TaskStatus.COMPLETED:
+			continue
+		if task.data.get("destination", Vector3i.ZERO) != pos:
+			continue
+		if task.material != material_id:
+			return {"count": reserved_count, "blocked": true}
+		var reserved_item := item_store.get_item(int(task.data.get("item_id", -1)))
+		reserved_count += mini(
+			int(reserved_item.get("count", 0)),
+			stockpile_store.cell_capacity(pos)
+		)
+	return {"count": reserved_count, "blocked": false}
+
+
+func deposit_item_to_stockpile(item_id: int, stockpile_id: int, pos: Vector3i) -> bool:
+	if not item_store.has_item(item_id):
+		return false
+	var item := item_store.get_item(item_id)
+	var material_id := int(item.get("material_id", 0))
+	if not stockpile_store.accepts_material(stockpile_id, material_id):
+		return false
+	if stockpile_store.stockpile_at(pos) != stockpile_id:
+		return false
+	var result := item_store.deposit_into_cell(
+		item_id,
+		stockpile_id,
+		pos,
+		stockpile_store.cell_capacity(pos)
+	)
+	if result.is_empty():
+		return false
+	refresh_inventory_from_stockpiles()
+	trace_system_event("item_deposited", "item_id=%d material=%d count=%d remaining=%d stockpile=%d pos=%d,%d,%d" % [
+		item_id,
+		material_id,
+		int(result.get("deposited", 0)),
+		int(result.get("remaining", 0)),
+		stockpile_id,
+		pos.x,
+		pos.y,
+		pos.z,
+	])
+	return true
 #endregion
 
 

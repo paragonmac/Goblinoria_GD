@@ -6,6 +6,11 @@ class_name MainHudController
 var y_level_label: Label
 var gen_status_label: Label
 var inventory_label: Label
+var stockpile_panel: PanelContainer
+var stockpile_summary_label: Label
+var stockpile_checkboxes: Dictionary = {}
+var current_world: World
+var current_stockpile_id := -1
 var render_level_base_y: int = 0
 #endregion
 
@@ -58,6 +63,7 @@ func setup(hud_layer: CanvasLayer) -> void:
 	inventory_label.offset_bottom = -10.0
 	inventory_label.text = ""
 	hud_layer.add_child(inventory_label)
+	_setup_stockpile_panel(hud_layer)
 
 
 func set_render_level_base(world: World) -> void:
@@ -99,6 +105,8 @@ func _get_mode_display_name(world: World) -> String:
 			return "Down Stairs"
 		World.PlayerMode.ERASE:
 			return "Erase"
+		World.PlayerMode.STOCKPILE:
+			return "Stockpile"
 		_:
 			return "?"
 
@@ -120,17 +128,80 @@ func _get_info_display_text(world: World, info_block_id: int, info_block_pos: Ve
 func update_inventory(world: World) -> void:
 	if inventory_label == null or world == null:
 		return
+	current_world = world
 	var inv: Dictionary = world.inventory
 	if inv.is_empty():
 		inventory_label.text = ""
+	else:
+		var lines: PackedStringArray = PackedStringArray()
+		var keys: Array = inv.keys()
+		keys.sort()
+		for block_id in keys:
+			var count: int = inv[block_id]
+			if count <= 0:
+				continue
+			var block_name: String = world.block_registry.get_name(block_id)
+			lines.append("%s: %d" % [block_name, count])
+		inventory_label.text = "\n".join(lines)
+	_update_stockpile_panel(world)
+
+
+func _setup_stockpile_panel(hud_layer: CanvasLayer) -> void:
+	stockpile_panel = PanelContainer.new()
+	stockpile_panel.name = "StockpilePanel"
+	stockpile_panel.anchor_left = 1.0
+	stockpile_panel.anchor_right = 1.0
+	stockpile_panel.anchor_top = 0.0
+	stockpile_panel.anchor_bottom = 0.0
+	stockpile_panel.offset_left = -230.0
+	stockpile_panel.offset_top = 80.0
+	stockpile_panel.offset_right = -10.0
+	stockpile_panel.offset_bottom = 300.0
+	stockpile_panel.visible = false
+	var margin := MarginContainer.new()
+	margin.add_theme_constant_override("margin_left", 8)
+	margin.add_theme_constant_override("margin_top", 8)
+	margin.add_theme_constant_override("margin_right", 8)
+	margin.add_theme_constant_override("margin_bottom", 8)
+	stockpile_panel.add_child(margin)
+	var content := VBoxContainer.new()
+	content.add_theme_constant_override("separation", 4)
+	margin.add_child(content)
+	stockpile_summary_label = Label.new()
+	stockpile_summary_label.text = "Stockpiles"
+	content.add_child(stockpile_summary_label)
+	for category in StockpileStore.CATEGORIES:
+		var checkbox := CheckBox.new()
+		checkbox.text = category
+		checkbox.toggled.connect(_on_stockpile_category_toggled.bind(category))
+		stockpile_checkboxes[category] = checkbox
+		content.add_child(checkbox)
+	hud_layer.add_child(stockpile_panel)
+
+
+func _update_stockpile_panel(world: World) -> void:
+	if stockpile_panel == null or stockpile_summary_label == null:
 		return
-	var lines: PackedStringArray = PackedStringArray()
-	var keys: Array = inv.keys()
-	keys.sort()
-	for block_id in keys:
-		var count: int = inv[block_id]
-		if count <= 0:
-			continue
-		var block_name: String = world.block_registry.get_name(block_id)
-		lines.append("%s: %d" % [block_name, count])
-	inventory_label.text = "\n".join(lines)
+	if world == null or world.stockpile_store.stockpiles.is_empty():
+		current_stockpile_id = -1
+		stockpile_panel.visible = false
+		return
+	var ids: Array = world.stockpile_store.stockpiles.keys()
+	ids.sort()
+	current_stockpile_id = int(ids[0])
+	var stockpile: Dictionary = world.stockpile_store.stockpiles[current_stockpile_id]
+	var cell_count: int = stockpile.get("cells", []).size()
+	stockpile_summary_label.text = "Stockpile %d | Cells: %d" % [current_stockpile_id, cell_count]
+	var allowed: Dictionary = stockpile.get("allowed_categories", {})
+	for category in stockpile_checkboxes.keys():
+		var checkbox: CheckBox = stockpile_checkboxes[category]
+		checkbox.set_pressed_no_signal(bool(allowed.get(category, false)))
+	stockpile_panel.visible = true
+
+
+func _on_stockpile_category_toggled(pressed: bool, category: String) -> void:
+	if current_world == null or current_stockpile_id < 0:
+		return
+	current_world.stockpile_store.set_category_allowed(current_stockpile_id, category, pressed)
+	if current_world.task_manager != null:
+		current_world.task_manager.rebuild_haul_tasks()

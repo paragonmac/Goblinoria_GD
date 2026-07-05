@@ -195,6 +195,8 @@ func _handle_mode_selection() -> void:
 		world.player_mode = World.PlayerMode.DOWN_STAIRS
 	elif is_key_just_pressed(KEY_6):
 		world.player_mode = World.PlayerMode.ERASE
+	elif is_key_just_pressed(KEY_7):
+		world.player_mode = World.PlayerMode.STOCKPILE
 
 
 func _handle_camera_rotation() -> void:

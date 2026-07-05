@@ -3,7 +3,7 @@ class_name TaskQueue
 ## Priority queue for dig, place, and stairs tasks.
 
 #region Enums
-enum TaskType {DIG, PLACE, STAIRS}
+enum TaskType {DIG, PLACE, STAIRS, HAUL}
 enum TaskStatus {PENDING, IN_PROGRESS, COMPLETED}
 enum TaskAccessibility {UNKNOWN, REACHABLE, UNREACHABLE}
 #endregion
@@ -25,6 +25,7 @@ class Task:
 	var material: int
 	var assigned_worker = null
 	var unreachable_workers: Dictionary = {}
+	var data: Dictionary = {}
 
 	func _init(task_id: int, task_pos: Vector3i, task_type: int, task_material: int) -> void:
 		id = task_id
@@ -77,7 +78,7 @@ var _assist_waiter_seq := 0
 func add_task(pos: Vector3i, task_type: int, material: int) -> int:
 	var pos_tasks: Array = _tasks_by_pos.get(pos, [])
 	for task in pos_tasks:
-		if task.type == task_type and task.status != TaskStatus.COMPLETED:
+		if task_type != TaskType.HAUL and task.type == task_type and task.status != TaskStatus.COMPLETED:
 			return task.id
 	var task_id = next_id
 	next_id += 1
@@ -100,6 +101,19 @@ func add_place_task(pos: Vector3i, material: int) -> int:
 
 func add_stairs_task(pos: Vector3i, stair_material: int) -> int:
 	return add_task(pos, TaskType.STAIRS, stair_material)
+
+
+func add_haul_task(item_id: int, item_pos: Vector3i, material: int, stockpile_id: int, destination: Vector3i) -> int:
+	var task_id := add_task(item_pos, TaskType.HAUL, material)
+	var task = get_task(task_id)
+	if task != null:
+		task.data = {
+			"item_id": item_id,
+			"stockpile_id": stockpile_id,
+			"destination": destination,
+			"stage": "pickup",
+		}
+	return task_id
 #endregion
 
 
@@ -148,6 +162,22 @@ func remove_pending_tasks_at(pos: Vector3i, task_types: Array = []) -> Array:
 	else:
 		_tasks_by_pos[pos] = pos_tasks
 	return removed
+
+
+func remove_task(task) -> bool:
+	if task == null:
+		return false
+	if not _tasks_by_id.has(task.id):
+		return false
+	_tasks_by_id.erase(task.id)
+	var pos_tasks: Array = _tasks_by_pos.get(task.pos, [])
+	pos_tasks.erase(task)
+	if pos_tasks.is_empty():
+		_tasks_by_pos.erase(task.pos)
+	else:
+		_tasks_by_pos[task.pos] = pos_tasks
+	tasks.erase(task)
+	return true
 
 
 func find_nearest(task_type: int, from_pos: Vector3) -> Task:

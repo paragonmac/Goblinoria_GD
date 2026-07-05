@@ -90,6 +90,7 @@ func clear_chunks() -> void:
 	mesh_cache_store.clear()
 	render_zone_visible.clear()
 	_clear_mesh_jobs()
+	overlay_renderer.clear_item_and_stockpile_overlays()
 	if world == null:
 		return
 	for chunk in world.chunks.values():
@@ -916,6 +917,12 @@ func update_task_overlays(tasks: Array, blocked_tasks: Array) -> void:
 	if overlay_renderer == null:
 		return
 	overlay_renderer.update_task_overlays(tasks, blocked_tasks)
+
+
+func update_item_and_stockpile_overlays(items: Dictionary, stockpiles: Dictionary) -> void:
+	if overlay_renderer == null:
+		return
+	overlay_renderer.update_item_and_stockpile_overlays(items, stockpiles)
 
 
 func set_drag_preview(rect: Dictionary, mode: int) -> void:

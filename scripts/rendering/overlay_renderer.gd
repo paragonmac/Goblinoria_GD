@@ -25,8 +25,33 @@ const DRAG_PLACE_COLOR := Color(0.2, 0.6, 1.0)
 const DRAG_UP_STAIRS_COLOR := Color(1.0, 0.7, 0.2)
 const DRAG_DOWN_STAIRS_COLOR := Color(0.75, 0.45, 1.0)
 const DRAG_ERASE_COLOR := Color(0.95, 0.95, 0.95)
+const DRAG_STOCKPILE_COLOR := Color(0.15, 0.85, 0.85)
 const DRAG_DEFAULT_COLOR := Color(0.8, 0.8, 0.8)
 const DRAG_INVALID_COLOR := Color(1.0, 0.15, 0.15)
+const ITEM_OVERLAY_SIZE := Vector3(0.35, 0.35, 0.35)
+const ITEM_SPRITE_SIZE := Vector2(0.46, 0.46)
+const ITEM_GROUND_OFFSET := -0.5 + ITEM_SPRITE_SIZE.y * 0.5 + 0.02
+const STORAGE_RENDER_MARGIN := 0.55
+const ITEM_ATLAS_PATH := "res://assets/textures/fantasy_resource_icons_6x6_real_alpha.png"
+const ITEM_ATLAS_COLUMNS := 6
+const ITEM_ATLAS_ROWS := 6
+const ITEM_ATLAS_TILES := {
+	1: 7,   # granite
+	2: 1,   # dirt
+	3: 1,   # clay
+	4: 2,   # sandstone
+	5: 6,   # limestone
+	6: 13,  # basalt
+	7: 8,   # slate
+	8: 26,  # iron ore
+	9: 8,   # coal
+	10: 0,  # grass
+	15: 6,  # gravel
+	16: 3,  # moss
+}
+const STOCKPILE_OVERLAY_SIZE := Vector3(1.0, 0.06, 1.0)
+const STOCKPILE_GROUND_OFFSET := -0.5 + STOCKPILE_OVERLAY_SIZE.y * 0.5 + 0.01
+const STOCKPILE_OVERLAY_COLOR := Color(0.15, 0.85, 0.85, 0.25)
 const DRAG_INVALID_MATERIAL_OFFSET := 1000
 const ASSIGNED_OVERLAY_SCALE := Vector3(1.08, 1.0, 1.08)
 const ROUND_HALF := 0.5
@@ -36,6 +61,7 @@ render_mode unshaded, cull_back, depth_draw_never;
 
 uniform vec4 albedo_color : source_color = vec4(1.0, 1.0, 1.0, 0.5);
 uniform float top_render_y = 1000.0;
+uniform float top_render_margin = 0.0;
 uniform float emission_strength = 0.18;
 uniform float pulse_strength = 0.0;
 uniform float pulse_speed = 4.0;
@@ -48,7 +74,7 @@ void vertex() {
 }
 
 void fragment() {
-	if (world_y > top_render_y + 0.5) {
+	if (world_y > top_render_y + 0.5 + top_render_margin) {
 		discard;
 	}
 	float pulse = 1.0 + pulse_strength * (0.5 + 0.5 * sin(TIME * pulse_speed));
@@ -58,7 +84,41 @@ void fragment() {
 	ALPHA = albedo_color.a;
 }
 """
+const ITEM_ATLAS_SHADER_CODE := """shader_type spatial;
+render_mode unshaded, cull_disabled, depth_prepass_alpha;
+
+uniform sampler2D atlas_texture : source_color, filter_linear_mipmap_anisotropic;
+uniform vec2 atlas_cell = vec2(0.0);
+uniform vec2 atlas_grid = vec2(6.0);
+uniform float top_render_y = 1000.0;
+uniform float top_render_margin = 0.55;
+
+varying float world_y;
+
+void vertex() {
+	world_y = (MODEL_MATRIX * vec4(VERTEX, 1.0)).y;
+	MODELVIEW_MATRIX = VIEW_MATRIX * mat4(
+		INV_VIEW_MATRIX[0],
+		INV_VIEW_MATRIX[1],
+		INV_VIEW_MATRIX[2],
+		MODEL_MATRIX[3]
+	);
+	MODELVIEW_NORMAL_MATRIX = mat3(MODELVIEW_MATRIX);
+}
+
+void fragment() {
+	if (world_y > top_render_y + 0.5 + top_render_margin) {
+		discard;
+	}
+	vec2 atlas_uv = (UV + atlas_cell) / atlas_grid;
+	vec4 sampled = texture(atlas_texture, atlas_uv);
+	ALBEDO = sampled.rgb;
+	ALPHA = sampled.a;
+	ALPHA_SCISSOR_THRESHOLD = 0.1;
+}
+"""
 var overlay_shader: Shader = null
+var item_atlas_shader: Shader = null
 var all_overlay_materials: Array = []
 #endregion
 
@@ -70,6 +130,12 @@ var task_trace_records: Dictionary = {}
 var task_trace_enabled_last := false
 var drag_previews: Dictionary = {}
 var drag_materials: Dictionary = {}
+var drag_preview_mode := -1
+var item_overlays: Dictionary = {}
+var stockpile_overlays: Dictionary = {}
+var item_materials: Dictionary = {}
+var item_atlas_texture: Texture2D
+var stockpile_material: ShaderMaterial
 #endregion
 
 
@@ -77,20 +143,43 @@ var drag_materials: Dictionary = {}
 func initialize(world_ref: World) -> void:
 	world = world_ref
 	_ensure_shader()
+	item_atlas_texture = _load_item_atlas_texture()
+	if item_atlas_texture == null:
+		push_warning("Item drop atlas failed to load: %s" % ITEM_ATLAS_PATH)
 
 
 func _ensure_shader() -> void:
 	if overlay_shader == null:
 		overlay_shader = Shader.new()
 		overlay_shader.code = OVERLAY_SHADER_CODE
+	if item_atlas_shader == null:
+		item_atlas_shader = Shader.new()
+		item_atlas_shader.code = ITEM_ATLAS_SHADER_CODE
 
 
-func _create_overlay_shader_material(color: Color, emission_strength: float = 0.0) -> ShaderMaterial:
+func _load_item_atlas_texture() -> Texture2D:
+	if ResourceLoader.exists(ITEM_ATLAS_PATH):
+		var imported_texture := load(ITEM_ATLAS_PATH) as Texture2D
+		if imported_texture != null:
+			return imported_texture
+	var image := Image.new()
+	var err := image.load(ITEM_ATLAS_PATH)
+	if err != OK:
+		return null
+	return ImageTexture.create_from_image(image)
+
+
+func _create_overlay_shader_material(
+	color: Color,
+	emission_strength: float = 0.0,
+	top_render_margin: float = 0.0
+) -> ShaderMaterial:
 	_ensure_shader()
 	var mat := ShaderMaterial.new()
 	mat.shader = overlay_shader
 	mat.set_shader_parameter("albedo_color", color)
 	mat.set_shader_parameter("emission_strength", emission_strength)
+	mat.set_shader_parameter("top_render_margin", top_render_margin)
 	mat.set_shader_parameter("pulse_speed", ASSIGNED_PULSE_SPEED)
 	if world != null:
 		mat.set_shader_parameter("top_render_y", float(world.top_render_y))
@@ -114,6 +203,15 @@ func clear_task_overlays() -> void:
 	task_trace_records.clear()
 
 
+func clear_item_and_stockpile_overlays() -> void:
+	for key in item_overlays.keys():
+		item_overlays[key].queue_free()
+	item_overlays.clear()
+	for key in stockpile_overlays.keys():
+		stockpile_overlays[key].queue_free()
+	stockpile_overlays.clear()
+
+
 func update_task_overlays(tasks: Array, blocked_tasks: Array) -> void:
 	if world == null:
 		return
@@ -121,6 +219,8 @@ func update_task_overlays(tasks: Array, blocked_tasks: Array) -> void:
 	var live_ids: Dictionary = {}
 	for task in tasks:
 		if task.status == TaskQueue.TaskStatus.COMPLETED:
+			continue
+		if task.type == TaskQueue.TaskType.HAUL:
 			continue
 		live_ids[task.id] = true
 		if not task_overlays.has(task.id):
@@ -136,6 +236,8 @@ func update_task_overlays(tasks: Array, blocked_tasks: Array) -> void:
 		_trace_task_overlay(task, overlay, visual_state)
 
 	for blocked in blocked_tasks:
+		if int(blocked.get("type", -1)) == TaskQueue.TaskType.HAUL:
+			continue
 		var key := blocked_task_key(blocked)
 		live_ids[key] = true
 		if not task_overlays.has(key):
@@ -331,6 +433,8 @@ func drag_preview_color(mode: int) -> Color:
 			return Color(DRAG_DOWN_STAIRS_COLOR.r, DRAG_DOWN_STAIRS_COLOR.g, DRAG_DOWN_STAIRS_COLOR.b, DRAG_OVERLAY_ALPHA)
 		World.PlayerMode.ERASE:
 			return Color(DRAG_ERASE_COLOR.r, DRAG_ERASE_COLOR.g, DRAG_ERASE_COLOR.b, DRAG_OVERLAY_ALPHA)
+		World.PlayerMode.STOCKPILE:
+			return Color(DRAG_STOCKPILE_COLOR.r, DRAG_STOCKPILE_COLOR.g, DRAG_STOCKPILE_COLOR.b, DRAG_OVERLAY_ALPHA)
 	return Color(DRAG_DEFAULT_COLOR.r, DRAG_DEFAULT_COLOR.g, DRAG_DEFAULT_COLOR.b, DRAG_DEFAULT_ALPHA)
 
 
@@ -339,7 +443,8 @@ func get_drag_material(mode: int, valid: bool = true) -> ShaderMaterial:
 	if drag_materials.has(key):
 		return drag_materials[key]
 	var color := drag_preview_color(mode) if valid else Color(DRAG_INVALID_COLOR.r, DRAG_INVALID_COLOR.g, DRAG_INVALID_COLOR.b, DRAG_OVERLAY_ALPHA)
-	var material := _create_overlay_shader_material(color)
+	var render_margin := STORAGE_RENDER_MARGIN if mode == World.PlayerMode.STOCKPILE else 0.0
+	var material := _create_overlay_shader_material(color, 0.0, render_margin)
 	drag_materials[key] = material
 	return material
 
@@ -352,7 +457,11 @@ func _apply_overlay_instance_settings(mesh_instance: MeshInstance3D) -> void:
 
 func create_drag_preview_overlay(mode: int) -> MeshInstance3D:
 	var mesh_instance := MeshInstance3D.new()
-	if USE_FLAT_OVERLAYS:
+	if mode == World.PlayerMode.STOCKPILE:
+		var stockpile_box := BoxMesh.new()
+		stockpile_box.size = STOCKPILE_OVERLAY_SIZE
+		mesh_instance.mesh = stockpile_box
+	elif USE_FLAT_OVERLAYS:
 		var quad := QuadMesh.new()
 		quad.size = FLAT_OVERLAY_SIZE
 		mesh_instance.mesh = quad
@@ -391,6 +500,9 @@ func set_drag_preview_positions(positions: Array[Vector3i], mode: int) -> void:
 
 
 func set_drag_preview_entries(entries: Array, mode: int) -> void:
+	if drag_preview_mode != mode:
+		clear_drag_preview()
+		drag_preview_mode = mode
 	var live_ids: Dictionary = {}
 	for entry in entries:
 		var pos: Vector3i = entry["pos"]
@@ -406,8 +518,12 @@ func set_drag_preview_entries(entries: Array, mode: int) -> void:
 		var desired := get_drag_material(mode, valid)
 		if overlay.material_override != desired:
 			overlay.material_override = desired
-		overlay.position = Vector3(pos.x, pos.y + OVERLAY_Y_OFFSET, pos.z)
-		overlay.visible = world.is_visible_at_level(pos.y)
+		if mode == World.PlayerMode.STOCKPILE:
+			overlay.position = Vector3(pos.x, pos.y + STOCKPILE_GROUND_OFFSET, pos.z)
+			overlay.visible = world.is_visible_at_level(pos.y - 1)
+		else:
+			overlay.position = Vector3(pos.x, pos.y + OVERLAY_Y_OFFSET, pos.z)
+			overlay.visible = world.is_visible_at_level(pos.y)
 
 	for key in drag_previews.keys():
 		if not live_ids.has(key):
@@ -419,6 +535,128 @@ func clear_drag_preview() -> void:
 	for key in drag_previews.keys():
 		drag_previews[key].queue_free()
 	drag_previews.clear()
+	drag_preview_mode = -1
+#endregion
+
+
+#region Items And Stockpiles
+func update_item_and_stockpile_overlays(items: Dictionary, stockpiles: Dictionary) -> void:
+	_update_item_overlays(items)
+	_update_stockpile_overlays(stockpiles)
+
+
+func _update_item_overlays(items: Dictionary) -> void:
+	var live_ids: Dictionary = {}
+	for item_id in items.keys():
+		var item: Dictionary = items[item_id]
+		if bool(item.get("is_carried", false)):
+			continue
+		var pos: Vector3i = item.get("pos", Vector3i.ZERO)
+		live_ids[item_id] = true
+		var overlay: MeshInstance3D
+		if not item_overlays.has(item_id):
+			overlay = _create_item_overlay(int(item.get("material_id", 0)))
+			item_overlays[item_id] = overlay
+		else:
+			overlay = item_overlays[item_id]
+		overlay.position = Vector3(pos.x, pos.y + ITEM_GROUND_OFFSET, pos.z)
+		overlay.visible = world.is_visible_at_level(pos.y - 1)
+		overlay.material_override = _get_item_material(int(item.get("material_id", 0)))
+	for key in item_overlays.keys():
+		if not live_ids.has(key):
+			item_overlays[key].queue_free()
+			item_overlays.erase(key)
+
+
+func _update_stockpile_overlays(stockpiles: Dictionary) -> void:
+	var live_ids: Dictionary = {}
+	for stockpile_id in stockpiles.keys():
+		var stockpile: Dictionary = stockpiles[stockpile_id]
+		for cell in stockpile.get("cells", []):
+			if typeof(cell) != TYPE_VECTOR3I:
+				continue
+			var pos: Vector3i = cell
+			var key := "%d:%d:%d" % [pos.x, pos.y, pos.z]
+			live_ids[key] = true
+			var overlay: MeshInstance3D
+			if not stockpile_overlays.has(key):
+				overlay = _create_stockpile_overlay()
+				stockpile_overlays[key] = overlay
+			else:
+				overlay = stockpile_overlays[key]
+			overlay.position = Vector3(pos.x, pos.y + STOCKPILE_GROUND_OFFSET, pos.z)
+			overlay.visible = world.is_visible_at_level(pos.y - 1)
+	for key in stockpile_overlays.keys():
+		if not live_ids.has(key):
+			stockpile_overlays[key].queue_free()
+			stockpile_overlays.erase(key)
+
+
+func _create_item_overlay(material_id: int) -> MeshInstance3D:
+	var mesh_instance := MeshInstance3D.new()
+	if item_atlas_texture != null and ITEM_ATLAS_TILES.has(material_id):
+		var quad := QuadMesh.new()
+		quad.size = ITEM_SPRITE_SIZE
+		mesh_instance.mesh = quad
+	else:
+		var box := BoxMesh.new()
+		box.size = ITEM_OVERLAY_SIZE
+		mesh_instance.mesh = box
+	_apply_overlay_instance_settings(mesh_instance)
+	add_child(mesh_instance)
+	return mesh_instance
+
+
+func _create_stockpile_overlay() -> MeshInstance3D:
+	var mesh_instance := MeshInstance3D.new()
+	var box := BoxMesh.new()
+	box.size = STOCKPILE_OVERLAY_SIZE
+	mesh_instance.mesh = box
+	mesh_instance.material_override = _get_stockpile_material()
+	_apply_overlay_instance_settings(mesh_instance)
+	add_child(mesh_instance)
+	return mesh_instance
+
+
+func _get_item_material(material_id: int) -> ShaderMaterial:
+	if item_materials.has(material_id):
+		return item_materials[material_id]
+	if item_atlas_texture != null and ITEM_ATLAS_TILES.has(material_id):
+		var tile_index: int = int(ITEM_ATLAS_TILES[material_id])
+		var atlas_material := ShaderMaterial.new()
+		atlas_material.shader = item_atlas_shader
+		atlas_material.set_shader_parameter("atlas_texture", item_atlas_texture)
+		atlas_material.set_shader_parameter(
+			"atlas_cell",
+			Vector2(tile_index % ITEM_ATLAS_COLUMNS, floori(float(tile_index) / ITEM_ATLAS_COLUMNS))
+		)
+		atlas_material.set_shader_parameter(
+			"atlas_grid",
+			Vector2(ITEM_ATLAS_COLUMNS, ITEM_ATLAS_ROWS)
+		)
+		if world != null:
+			atlas_material.set_shader_parameter("top_render_y", float(world.top_render_y))
+		atlas_material.set_shader_parameter("top_render_margin", STORAGE_RENDER_MARGIN)
+		atlas_material.render_priority = 100
+		all_overlay_materials.append(atlas_material)
+		item_materials[material_id] = atlas_material
+		return atlas_material
+	var color := world.get_block_color(material_id)
+	color.a = 0.95
+	var material := _create_overlay_shader_material(color, 0.05, STORAGE_RENDER_MARGIN)
+	item_materials[material_id] = material
+	return material
+
+
+func _get_stockpile_material() -> ShaderMaterial:
+	if stockpile_material != null:
+		return stockpile_material
+	stockpile_material = _create_overlay_shader_material(
+		STOCKPILE_OVERLAY_COLOR,
+		0.04,
+		STORAGE_RENDER_MARGIN
+	)
+	return stockpile_material
 #endregion
 
 

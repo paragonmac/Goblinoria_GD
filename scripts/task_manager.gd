@@ -22,6 +22,7 @@ const ASSIGNMENT_TASK_TYPES := [
 	TaskQueue.TaskType.DIG,
 	TaskQueue.TaskType.STAIRS,
 	TaskQueue.TaskType.PLACE,
+	TaskQueue.TaskType.HAUL,
 ]
 
 var assignment_task_id := -1
@@ -54,6 +55,7 @@ func shutdown() -> void:
 
 #region Task Queue Updates
 func update_task_queue() -> void:
+	rebuild_haul_tasks()
 	task_queue.cleanup_completed()
 
 
@@ -125,6 +127,75 @@ func reset_assignment_auction() -> void:
 	assist_requests_by_worker.clear()
 	assist_requests_by_id.clear()
 	path_search_scheduler.clear()
+
+
+func rebuild_haul_tasks() -> void:
+	if world == null or task_queue == null:
+		return
+	_prune_invalid_haul_tasks()
+	for item: Dictionary in world.item_store.loose_items():
+		var item_id := int(item.get("id", -1))
+		if item_id < 0:
+			continue
+		if int(item.get("reserved_by_task_id", -1)) >= 0:
+			continue
+		var destination: Dictionary = world.find_stockpile_destination_for_item(item)
+		if destination.is_empty():
+			world.trace_system_event(
+				"haul_not_queued",
+				"item_id=%d material=%d reason=no_accepting_stockpile" % [
+					item_id,
+					int(item.get("material_id", 0)),
+				]
+			)
+			continue
+		var task_id := task_queue.add_haul_task(
+			item_id,
+			item.get("pos", Vector3i.ZERO),
+			int(item.get("material_id", 0)),
+			int(destination.get("stockpile_id", -1)),
+			destination.get("pos", Vector3i.ZERO)
+		)
+		if world.item_store.reserve_item(item_id, task_id):
+			var task = task_queue.get_task(task_id)
+			world.trace_task_event(task, "haul_queued", "item_id=%d stockpile=%d destination=%s" % [
+				item_id,
+				int(destination.get("stockpile_id", -1)),
+				destination.get("pos", Vector3i.ZERO),
+			])
+
+
+func _prune_invalid_haul_tasks() -> void:
+	for task in task_queue.tasks.duplicate():
+		if task.type != TaskQueue.TaskType.HAUL or task.status == TaskQueue.TaskStatus.COMPLETED:
+			continue
+		if _is_haul_task_valid(task):
+			continue
+		var item_id := int(task.data.get("item_id", -1))
+		world.item_store.release_reservation(item_id, task.id)
+		task_queue.remove_task(task)
+		if task.id == assignment_task_id:
+			_reset_assignment_auction()
+		world.trace_task_event(task, "haul_cancelled", "reason=invalid_reservation_or_destination")
+
+
+func _is_haul_task_valid(task) -> bool:
+	if world == null or task == null:
+		return false
+	var item_id := int(task.data.get("item_id", -1))
+	var item: Dictionary = world.item_store.get_item(item_id)
+	if item.is_empty():
+		return false
+	if int(item.get("stored_stockpile_id", -1)) >= 0:
+		return false
+	var reserved_by := int(item.get("reserved_by_task_id", -1))
+	if reserved_by != task.id:
+		return false
+	var destination: Vector3i = task.data.get("destination", Vector3i.ZERO)
+	var stockpile_id := int(task.data.get("stockpile_id", -1))
+	if world.stockpile_store.stockpile_at(destination) != stockpile_id:
+		return false
+	return world.stockpile_store.accepts_material(stockpile_id, int(item.get("material_id", 0)))
 
 
 func has_assignable_pending_task() -> bool:
@@ -471,6 +542,8 @@ func add_task_to_queue(task_type: int, pos: Vector3i, material: int) -> void:
 			task_queue.add_place_task(pos, material)
 		TaskQueue.TaskType.STAIRS:
 			task_queue.add_stairs_task(pos, material)
+		TaskQueue.TaskType.HAUL:
+			pass
 #endregion
 
 
@@ -544,7 +617,7 @@ func _classify_tasks_without_work_positions() -> void:
 			continue
 		if task.accessibility != TaskQueue.TaskAccessibility.UNKNOWN:
 			continue
-		if task.type == TaskQueue.TaskType.STAIRS:
+		if task.type == TaskQueue.TaskType.STAIRS or task.type == TaskQueue.TaskType.HAUL:
 			continue
 		if not world.pathfinder.has_walkable_adjacent_on_level(world, task.pos, task.pos.y):
 			task.set_accessibility(TaskQueue.TaskAccessibility.UNREACHABLE, now_msec)
@@ -600,7 +673,7 @@ func is_task_accessible(task_type: int, pos: Vector3i) -> bool:
 		return false
 	if not world.is_block_coord_valid(pos.x, pos.y, pos.z):
 		return false
-	if task_type == TaskQueue.TaskType.STAIRS:
+	if task_type == TaskQueue.TaskType.STAIRS or task_type == TaskQueue.TaskType.HAUL:
 		return true
 	return world.pathfinder.has_walkable_adjacent_on_level(world, pos, pos.y)
 

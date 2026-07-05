@@ -155,6 +155,8 @@ func _run_search(job: Dictionary) -> Dictionary:
 		path = pathfinder.find_path_to_any(snapshot, start, job.get("goals", []), max_iterations)
 	elif task_type == TaskQueue.TaskType.STAIRS:
 		path = _find_stairs_path(snapshot, pathfinder, start, target, max_iterations)
+	elif task_type == TaskQueue.TaskType.HAUL:
+		path = pathfinder.find_path(snapshot, start, target, false, false, max_iterations)
 	else:
 		path = _find_work_path(snapshot, pathfinder, start, target, max_iterations)
 	return {

@@ -1,0 +1,19 @@
+[remap]
+
+importer="csv_translation"
+type="Translation"
+uid="uid://cu5xibvfgvbkv"
+
+[deps]
+
+files=["res://data/block_drops.drop.translation", "res://data/block_drops.count.translation", "res://data/block_drops.count.translation", "res://data/block_drops.chance.translation"]
+
+source_file="res://data/block_drops.csv"
+dest_files=["res://data/block_drops.drop.translation", "res://data/block_drops.count.translation", "res://data/block_drops.count.translation", "res://data/block_drops.chance.translation"]
+
+[params]
+
+compress=1
+delimiter=0
+unescape_keys=false
+unescape_translations=true

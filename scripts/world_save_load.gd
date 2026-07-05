@@ -4,6 +4,7 @@ class_name WorldSaveLoad
 
 #region Preloads
 const WorldInventorySaveLoadScript = preload("res://scripts/world_inventory_save_load.gd")
+const WorldItemStockpileSaveLoadScript = preload("res://scripts/world_item_stockpile_save_load.gd")
 const WorldMetadataSaveLoadScript = preload("res://scripts/world_metadata_save_load.gd")
 const WorldBulkChunkSaveLoadScript = preload("res://scripts/world_bulk_chunk_save_load.gd")
 const WorldMeshCacheSaveLoadScript = preload("res://scripts/world_mesh_cache_save_load.gd")
@@ -11,7 +12,7 @@ const WorldMeshCacheSaveLoadScript = preload("res://scripts/world_mesh_cache_sav
 
 #region Constants
 const CHUNK_MAGIC := 0x43484B53
-const SAVE_VERSION := 3
+const SAVE_VERSION := 4
 const CHUNK_DIR_NAME := "chunks"
 const CHUNK_FILE_EXT := ".chunk"
 const COMPRESSION_NONE := 0
@@ -23,6 +24,7 @@ var current_world_dir := ""
 var warned_missing_world_dir: bool = false
 var last_load_metrics: Dictionary = {}
 var inventory_save_load = WorldInventorySaveLoadScript.new()
+var item_stockpile_save_load = WorldItemStockpileSaveLoadScript.new()
 var metadata_save_load = WorldMetadataSaveLoadScript.new()
 var bulk_chunk_save_load = WorldBulkChunkSaveLoadScript.new()
 var mesh_cache_save_load = WorldMeshCacheSaveLoadScript.new()
@@ -59,7 +61,7 @@ func save_world(path: String) -> bool:
 	for chunk in world.chunks.values():
 		var entry: ChunkData = chunk
 		entry.dirty = false
-	if not _save_inventory(world_dir):
+	if not _save_items_and_stockpiles(world_dir):
 		return false
 	return true
 #endregion
@@ -90,9 +92,9 @@ func load_world(path: String) -> bool:
 	if world.renderer != null:
 		world.renderer.clear_chunks()
 		world.renderer.reset_stats()
-	var inventory_start_usec: int = Time.get_ticks_usec()
-	_load_inventory(world_dir)
-	last_load_metrics["inventory_ms"] = _elapsed_ms(inventory_start_usec)
+	var item_start_usec: int = Time.get_ticks_usec()
+	_load_items_and_stockpiles(world_dir)
+	last_load_metrics["items_stockpiles_ms"] = _elapsed_ms(item_start_usec)
 	last_load_metrics["total_save_load_ms"] = _elapsed_ms(load_start_usec)
 	return true
 
@@ -308,4 +310,12 @@ func _save_inventory(world_dir: String) -> bool:
 
 func _load_inventory(world_dir: String) -> bool:
 	return inventory_save_load.load_inventory(world, world_dir)
+
+
+func _save_items_and_stockpiles(world_dir: String) -> bool:
+	return item_stockpile_save_load.save_items_and_stockpiles(world, world_dir)
+
+
+func _load_items_and_stockpiles(world_dir: String) -> bool:
+	return item_stockpile_save_load.load_items_and_stockpiles(world, world_dir)
 #endregion
