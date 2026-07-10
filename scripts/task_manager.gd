@@ -168,8 +168,13 @@ func _classify_task_accessibility(task) -> void:
 			TaskQueue.TaskBlockReason.NO_WORK_POSITION
 		)
 		return
-	if world.workers.is_empty():
-		_mark_task_path_blocked(task, now_msec)
+	if not _has_eligible_worker(task):
+		_clear_path_retry(task.id)
+		task.set_accessibility(
+			TaskQueue.TaskAccessibility.UNREACHABLE,
+			now_msec,
+			TaskQueue.TaskBlockReason.NO_ELIGIBLE_WORKER
+		)
 		return
 	_clear_path_retry(task.id)
 	task.unreachable_workers.clear()
@@ -236,11 +241,13 @@ func process_due_path_retries(now_msec: int) -> void:
 
 func notify_worker_availability_changed() -> void:
 	var now_msec := Time.get_ticks_msec()
-	for task_id in path_retry_due_by_task.keys().duplicate():
-		path_retry_due_by_task.erase(task_id)
-		var task = task_queue.get_task(int(task_id))
-		if task == null or task.status != TaskQueue.TaskStatus.PENDING:
+	_reset_assignment_auction()
+	for task in task_queue.tasks:
+		if task.status != TaskQueue.TaskStatus.PENDING:
 			continue
+		if task.block_reason == TaskQueue.TaskBlockReason.NO_WORK_POSITION:
+			continue
+		path_retry_due_by_task.erase(task.id)
 		task.unreachable_workers.clear()
 		task.set_accessibility(TaskQueue.TaskAccessibility.UNKNOWN, now_msec)
 		request_accessibility_check(task.id, "worker_availability_changed")
@@ -412,6 +419,24 @@ func has_assignable_pending_task() -> bool:
 	return _next_assignable_task() != null
 
 
+func has_assignable_pending_task_for_worker(worker: Worker) -> bool:
+	if worker == null or not _is_worker_available(worker):
+		return false
+	var now_msec := Time.get_ticks_msec()
+	for task_type in ASSIGNMENT_TASK_TYPES:
+		for task in task_queue.tasks:
+			if task.status != TaskQueue.TaskStatus.PENDING:
+				continue
+			if task.type != task_type or task.accessibility == TaskQueue.TaskAccessibility.UNREACHABLE:
+				continue
+			if not worker.can_accept_task(task):
+				continue
+			if task.is_worker_unreachable(worker.worker_id, now_msec):
+				continue
+			return true
+	return false
+
+
 func request_assist_path(worker: Worker, candidates: Array) -> bool:
 	if worker == null or candidates.is_empty():
 		return false
@@ -494,18 +519,21 @@ func _next_assignable_task():
 			if task.type == TaskQueue.TaskType.DIG and world.is_block_protected_from_dig(task.pos):
 				continue
 			for worker: Worker in world.workers:
-				if _is_worker_available(worker) and not task.is_worker_unreachable(worker.worker_id, now_msec):
+				if worker.can_accept_task(task) \
+						and _is_worker_available(worker) \
+						and not task.is_worker_unreachable(worker.worker_id, now_msec):
 					return task
 	return null
 
 
 func _start_assignment_auction(task) -> void:
+	# SEE-ADR-012: Only workers whose current role accepts this task may bid.
 	assignment_task_id = task.id
 	assignment_auction_id = next_assignment_auction_id
 	next_assignment_auction_id += 1
 	assignment_workers.clear()
 	for worker: Worker in world.workers:
-		if _is_worker_available(worker):
+		if worker.can_accept_task(task) and _is_worker_available(worker):
 			assignment_workers.append(worker)
 	assignment_workers.sort_custom(func(a: Worker, b: Worker):
 		return a.worker_id < b.worker_id
@@ -520,7 +548,7 @@ func _start_assignment_auction(task) -> void:
 
 
 func _queue_worker_bid(task, worker: Worker) -> void:
-	if not _is_worker_available(worker):
+	if not worker.can_accept_task(task) or not _is_worker_available(worker):
 		return
 	var now_msec := Time.get_ticks_msec()
 	if task.is_worker_unreachable(worker.worker_id, now_msec):
@@ -714,7 +742,7 @@ func _best_available_assignment_bid() -> Dictionary:
 	var best: Dictionary = {}
 	for bid: Dictionary in assignment_bids:
 		var worker: Worker = bid["worker"]
-		if not _is_worker_available(worker):
+		if not _is_worker_available(worker) or not worker.can_accept_task(task_queue.get_task(assignment_task_id)):
 			continue
 		if best.is_empty() \
 			or int(bid["path_length"]) < int(best["path_length"]) \
@@ -739,6 +767,15 @@ func _is_worker_available(worker: Worker) -> bool:
 		and worker.current_task_id < 0 \
 		and worker.state == Worker.WorkerState.IDLE \
 		and not assist_requests_by_worker.has(worker.worker_id)
+
+
+func _has_eligible_worker(task) -> bool:
+	if task == null:
+		return false
+	for worker: Worker in world.workers:
+		if worker != null and worker.can_accept_task(task):
+			return true
+	return false
 
 
 func _reset_assignment_auction() -> void:

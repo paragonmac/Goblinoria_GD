@@ -118,6 +118,8 @@ The colony should become more difficult to manage as it grows, but the difficult
 
 Workers are not free-form characters in the first version. They are reliable game pieces with enough individuality to create planning pressure later.
 
+The current prototype uses role templates rather than separate worker classes: Miners handle excavation/build access, Haulers move physical items, and Fighters remain in reserve until combat work exists. These templates are reassigned through the worker panel and are deliberately a bridge to later skills, equipment, and squads rather than permanent character classes.
+
 Major worker responsibilities:
 
 - Find claimable tasks.

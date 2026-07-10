@@ -6,6 +6,7 @@ class_name MainWorkerWindowController
 const WINDOW_TITLE := "Workers"
 const WINDOW_HINT := "Press W to close"
 const POLL_INTERVAL_SEC := 0.2
+const WorkerRolesScript = preload("res://scripts/worker_roles.gd")
 #endregion
 
 #region State
@@ -15,6 +16,8 @@ var hint_label: Label
 var summary_label: Label
 var details_button: Button
 var workers_text: RichTextLabel
+var role_controls: VBoxContainer
+var role_selectors: Dictionary = {}
 var visible: bool = false
 var details_visible: bool = true
 var current_world: World
@@ -78,6 +81,11 @@ func setup(hud_layer: CanvasLayer, world: World) -> void:
 	summary_label.name = "SummaryLabel"
 	summary_label.text = ""
 	content.add_child(summary_label)
+
+	role_controls = VBoxContainer.new()
+	role_controls.name = "RoleControls"
+	role_controls.add_theme_constant_override("separation", 2)
+	content.add_child(role_controls)
 
 	var scroll := ScrollContainer.new()
 	scroll.name = "WorkerScroll"
@@ -146,8 +154,8 @@ func update_window(world: World) -> void:
 		return
 
 	var lines: PackedStringArray = PackedStringArray()
-	lines.append("ID  State    Position       Task                      Status")
-	lines.append("----------------------------------------------------------------")
+	lines.append("ID  Role     State    Position       Task                      Status")
+	lines.append("-------------------------------------------------------------------------")
 
 	var workers: Array = world.workers
 	var worker_count := 0
@@ -158,11 +166,13 @@ func update_window(world: World) -> void:
 		worker_count += 1
 		var display_id: int = worker.worker_id if worker.worker_id > 0 else index + 1
 		var state_text := _worker_state_text(worker.state)
+		var role_text := worker.get_role_name()
 		var pos: Vector3i = worker.get_block_coord()
 		var task_text := _worker_task_text(worker, world.task_queue)
 		var status_text := _worker_status_text(worker, world)
-		lines.append("%02d  %-8s %4d,%4d,%4d  %-24s  %s" % [
+		lines.append("%02d  %-8s %-8s %4d,%4d,%4d  %-24s  %s" % [
 			display_id,
+			role_text,
 			state_text,
 			pos.x,
 			pos.y,
@@ -177,8 +187,63 @@ func update_window(world: World) -> void:
 	if worker_count == 0:
 		lines.append("No workers.")
 
+	_sync_role_selectors(world)
 	summary_label.text = "Workers: %d | Active Tasks: %d" % [worker_count, world.task_queue.active_count()]
 	workers_text.text = "\n".join(lines)
+
+
+func _sync_role_selectors(world: World) -> void:
+	if role_controls == null or world == null:
+		return
+	var active_ids: Dictionary = {}
+	for worker: Worker in world.workers:
+		if worker == null:
+			continue
+		active_ids[worker.worker_id] = true
+		var selector: OptionButton = role_selectors.get(worker.worker_id, null)
+		if selector == null:
+			selector = _create_role_selector(worker.worker_id)
+			role_selectors[worker.worker_id] = selector
+		var selected_index := selector.get_item_index(worker.role_id)
+		if selected_index >= 0:
+			selector.select(selected_index)
+		selector.disabled = worker.current_task_id >= 0
+	for worker_id in role_selectors.keys().duplicate():
+		if active_ids.has(worker_id):
+			continue
+		var selector: OptionButton = role_selectors[worker_id]
+		role_selectors.erase(worker_id)
+		if selector != null and is_instance_valid(selector):
+			selector.get_parent().queue_free()
+
+
+func _create_role_selector(worker_id: int) -> OptionButton:
+	var row := HBoxContainer.new()
+	row.name = "RoleRow%d" % worker_id
+	role_controls.add_child(row)
+	var label := Label.new()
+	label.text = "Worker %02d" % worker_id
+	label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(label)
+	var selector := OptionButton.new()
+	selector.name = "RoleSelector%d" % worker_id
+	for role_id in [
+		WorkerRolesScript.Role.MINER,
+		WorkerRolesScript.Role.HAULER,
+		WorkerRolesScript.Role.FIGHTER,
+	]:
+		selector.add_item(WorkerRolesScript.display_name(role_id), role_id)
+	selector.item_selected.connect(_on_role_selected.bind(worker_id, selector))
+	row.add_child(selector)
+	return selector
+
+
+func _on_role_selected(index: int, worker_id: int, selector: OptionButton) -> void:
+	if current_world == null or selector == null:
+		return
+	var role_id := selector.get_item_id(index)
+	if not current_world.set_worker_role(worker_id, role_id):
+		update_window(current_world)
 
 
 func _worker_state_text(state: int) -> String:
@@ -204,7 +269,7 @@ func _worker_task_text(worker: Worker, task_queue: TaskQueue) -> String:
 		return "No task"
 	if worker.current_task_id < 0:
 		if worker.state == Worker.WorkerState.IDLE:
-			return "Looking for task"
+			return "Looking for %s work" % worker.get_role_name().to_lower()
 		if worker.state == Worker.WorkerState.WAITING:
 			return "Trying to repath"
 		return "No task"
@@ -253,7 +318,7 @@ func _worker_status_text(worker: Worker, world: World) -> String:
 		Worker.WorkerState.WAITING_FOR_PATH:
 			return "Calculating route"
 		_:
-			return "Idle"
+			return worker.get_role_idle_status()
 
 
 func _worker_detail_text(worker: Worker, world: World) -> String:
@@ -265,7 +330,7 @@ func _worker_detail_text(worker: Worker, world: World) -> String:
 	if not reason.is_empty():
 		return reason
 	if world == null or world.task_queue == null or world.task_queue.active_count() <= 0:
-		return "No queued jobs."
+		return worker.get_role_idle_status()
 	if worker.state == Worker.WorkerState.MOVING:
 		return "No assigned job; moving on a wander path."
 	return "No assigned job; checking reachable queued jobs."
@@ -374,6 +439,8 @@ func _worker_task_summary(worker: Worker, task_queue: TaskQueue) -> Dictionary:
 	var now_msec := Time.get_ticks_msec()
 	for task in task_queue.tasks:
 		if task.status != TaskQueue.TaskStatus.PENDING:
+			continue
+		if not worker.can_accept_task(task):
 			continue
 		summary["pending"] += 1
 		match task.accessibility:

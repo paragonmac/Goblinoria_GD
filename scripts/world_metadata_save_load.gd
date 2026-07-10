@@ -43,8 +43,8 @@ func read_world_meta_snapshot(
 	world_dir: String,
 	save_version: int,
 	expected_block_table_hash: int,
-	legacy_save_version: int = -1,
-	allow_legacy_block_table_hash: bool = false
+	legacy_save_versions: Array = [],
+	legacy_block_table_versions: Array = []
 ) -> Dictionary:
 	if world == null:
 		return {"ok": false}
@@ -61,7 +61,7 @@ func read_world_meta_snapshot(
 		push_warning("World load failed: bad meta magic")
 		return {"ok": false}
 	var version: int = file.get_16()
-	var legacy_version: bool = version == legacy_save_version
+	var legacy_version: bool = legacy_save_versions.has(version)
 	if version != save_version and not legacy_version:
 		push_warning("World load failed: version %d != %d" % [version, save_version])
 		return {"ok": false}
@@ -85,8 +85,9 @@ func read_world_meta_snapshot(
 	var spawn_z: int = file.get_32()
 	var top_y: int = file.get_32()
 	var block_hash: int = file.get_32()
-	var legacy_block_table: bool = legacy_version and block_hash != expected_block_table_hash
-	if block_hash != expected_block_table_hash and not (legacy_block_table and allow_legacy_block_table_hash):
+	var legacy_block_table: bool = legacy_block_table_versions.has(version) \
+		and block_hash != expected_block_table_hash
+	if block_hash != expected_block_table_hash and not legacy_block_table:
 		push_warning("World load failed: block table hash mismatch")
 		return {"ok": false}
 	return {
@@ -94,6 +95,7 @@ func read_world_meta_snapshot(
 		"world_seed": seed,
 		"spawn_coord": Vector3i(spawn_x, spawn_y, spawn_z),
 		"top_render_y": clampi(top_y, 0, world.world_size_y - 1),
+		"save_version": version,
 		"legacy_block_table": legacy_block_table,
 	}
 

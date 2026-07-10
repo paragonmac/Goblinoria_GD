@@ -92,10 +92,11 @@ Raw mesh-cache entries store packed arrays and metrics, not `ArrayMesh` resource
 
 `WorldSaveLoad` orchestrates persistence, with metadata, bulk block data, physical item/stockpile state, and persistent mesh-cache file handling split into small helpers:
 
-- `world_meta.dat`: seed, spawn, top render Y, world dimensions, chunk size, block table hash, save version. Handled by `WorldMetadataSaveLoad`. V5 adds separate terrain-slope IDs and migrates compatible V4 terrain ramps during load.
+- `world_meta.dat`: seed, spawn, top render Y, world dimensions, chunk size, block table hash, save version. Handled by `WorldMetadataSaveLoad`. V6 adds worker-role persistence; V5 receives the default role roster and V4 terrain-ramp migration remains supported.
 - `world_blocks.dat`: finite-world bulk chunk block data with fill/raw/ZSTD entries. Handled by `WorldBulkChunkSaveLoad`.
 - `world_mesh_cache.dat`: optional raw mesh-cache acceleration data. Handled by `WorldMeshCacheSaveLoad`.
 - `items_stockpiles.dat`: physical item stacks and stockpile zones. Handled by `WorldItemStockpileSaveLoad`.
+- `workers.dat`: worker-ID to role-ID records. Handled by `WorldWorkerSaveLoad`; workers still respawn at normal positions on load.
 
 Current save formats are not changed by housekeeping refactors unless explicitly planned.
 
@@ -103,7 +104,7 @@ Current save formats are not changed by housekeeping refactors unless explicitly
 
 `World` is the gameplay/system hub. It owns chunks, world bounds, block access, inventory, tasks, pathfinding, workers, generator, save/load, streaming, raycasting, and renderer references.
 
-Workers pull tasks from `TaskQueue` through `TaskManager`, pathfind with `Pathfinder`, mutate blocks through `World`, and carry physical item stacks for hauling work. Assignment and haul-delivery searches run against immutable snapshots on the path thread.
+Workers pull tasks from `TaskQueue` through `TaskManager`, pathfind with `Pathfinder`, mutate blocks through `World`, and carry physical item stacks for hauling work. Assignment and haul-delivery searches run against immutable snapshots on the path thread. `WorkerRoles` currently supplies two Miners, one Hauler, and one Fighter: Miners perform dig/build/stair tasks, Haulers perform hauling, and Fighters remain an inspectable reserve until combat work exists. See ADR-012.
 
 Mining creates physical item stacks through `BlockDropTable` and `ItemStackStore`. Loose items are not usable inventory. Each stockpile cell stores one material with a base stack capacity of 16, and `world.inventory` is a derived compatibility view over those stored stacks.
 Loose stacks use camera-facing cells from `assets/textures/fantasy_resource_icons_6x6_real_alpha.png`; materials without a mapped cell retain the colored-box fallback.

@@ -8,6 +8,7 @@ const WorldItemStockpileSaveLoadScript = preload("res://scripts/world_item_stock
 const WorldMetadataSaveLoadScript = preload("res://scripts/world_metadata_save_load.gd")
 const WorldBulkChunkSaveLoadScript = preload("res://scripts/world_bulk_chunk_save_load.gd")
 const WorldMeshCacheSaveLoadScript = preload("res://scripts/world_mesh_cache_save_load.gd")
+const WorldWorkerSaveLoadScript = preload("res://scripts/world_worker_save_load.gd")
 const WorldGenerationSharedScript = preload("res://scripts/world/world_generation_shared.gd")
 const WorldTerrainHeightSamplerScript = preload("res://scripts/world/world_terrain_height_sampler.gd")
 const WorldRampRulesScript = preload("res://scripts/world/world_ramp_rules.gd")
@@ -15,8 +16,10 @@ const WorldRampRulesScript = preload("res://scripts/world/world_ramp_rules.gd")
 
 #region Constants
 const CHUNK_MAGIC := 0x43484B53
-const SAVE_VERSION := 5
+const SAVE_VERSION := 6
 const LEGACY_SAVE_VERSION := 4
+const WORKER_ROLES_LEGACY_SAVE_VERSION := 5
+const LEGACY_SAVE_VERSIONS := [LEGACY_SAVE_VERSION, WORKER_ROLES_LEGACY_SAVE_VERSION]
 const CHUNK_DIR_NAME := "chunks"
 const CHUNK_FILE_EXT := ".chunk"
 const COMPRESSION_NONE := 0
@@ -32,6 +35,7 @@ var item_stockpile_save_load = WorldItemStockpileSaveLoadScript.new()
 var metadata_save_load = WorldMetadataSaveLoadScript.new()
 var bulk_chunk_save_load = WorldBulkChunkSaveLoadScript.new()
 var mesh_cache_save_load = WorldMeshCacheSaveLoadScript.new()
+var worker_save_load = WorldWorkerSaveLoadScript.new()
 var legacy_terrain_slope_migration: bool = false
 #endregion
 
@@ -68,7 +72,7 @@ func save_world(path: String) -> bool:
 		entry.dirty = false
 	if not _save_items_and_stockpiles(world_dir):
 		return false
-	return true
+	return _save_workers(world_dir)
 #endregion
 
 
@@ -85,8 +89,8 @@ func load_world(path: String) -> bool:
 		world_dir,
 		SAVE_VERSION,
 		_get_block_table_hash(),
-		LEGACY_SAVE_VERSION,
-		true
+		LEGACY_SAVE_VERSIONS,
+		[LEGACY_SAVE_VERSION]
 	)
 	if not bool(meta_snapshot.get("ok", false)):
 		return false
@@ -96,9 +100,15 @@ func load_world(path: String) -> bool:
 	if not bool(item_snapshot.get("ok", false)):
 		return false
 	last_load_metrics["items_stockpiles_ms"] = _elapsed_ms(item_start_usec)
+	var worker_start_usec: int = Time.get_ticks_usec()
+	var worker_snapshot := worker_save_load.read_snapshot(world_dir)
+	if not bool(worker_snapshot.get("ok", false)):
+		return false
+	last_load_metrics["worker_roles_ms"] = _elapsed_ms(worker_start_usec)
 	var previous_bulk_state := bulk_chunk_save_load.snapshot_state()
 	var bulk_start_usec: int = Time.get_ticks_usec()
-	legacy_terrain_slope_migration = bool(meta_snapshot.get("legacy_block_table", false))
+	legacy_terrain_slope_migration = int(meta_snapshot.get("save_version", SAVE_VERSION)) == LEGACY_SAVE_VERSION \
+		and bool(meta_snapshot.get("legacy_block_table", false))
 	if not _load_bulk_chunks(world_dir, legacy_terrain_slope_migration):
 		bulk_chunk_save_load.restore_state(previous_bulk_state)
 		legacy_terrain_slope_migration = false
@@ -116,6 +126,7 @@ func load_world(path: String) -> bool:
 	world.chunk_access_tick = 0
 	world.reset_streaming_state()
 	world.clear_and_respawn_workers()
+	worker_save_load.apply_snapshot(world, worker_snapshot)
 	if world.renderer != null:
 		world.renderer.clear_chunks()
 		world.renderer.reset_stats()
@@ -275,7 +286,7 @@ func _read_chunk_header(file: FileAccess, coord: Vector3i) -> Dictionary:
 	if magic != CHUNK_MAGIC:
 		return {}
 	var version: int = file.get_16()
-	if version != SAVE_VERSION and not (legacy_terrain_slope_migration and version == LEGACY_SAVE_VERSION):
+	if version != SAVE_VERSION and not LEGACY_SAVE_VERSIONS.has(version):
 		return {}
 	var chunk_size: int = file.get_16()
 	if chunk_size != World.CHUNK_SIZE:
@@ -441,4 +452,8 @@ func _save_items_and_stockpiles(world_dir: String) -> bool:
 
 func _load_items_and_stockpiles(world_dir: String) -> bool:
 	return item_stockpile_save_load.load_items_and_stockpiles(world, world_dir)
+
+
+func _save_workers(world_dir: String) -> bool:
+	return worker_save_load.save_workers(world, world_dir)
 #endregion

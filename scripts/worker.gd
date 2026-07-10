@@ -4,6 +4,7 @@ class_name Worker
 
 const WorkerVisualsScript = preload("res://scripts/worker_visuals.gd")
 const TaskWorkPositionRulesScript = preload("res://scripts/task_work_position_rules.gd")
+const WorkerRolesScript = preload("res://scripts/worker_roles.gd")
 
 #region Enums
 enum WorkerState {IDLE, MOVING, WORKING, WAITING, FALLING, WAITING_FOR_PATH}
@@ -58,6 +59,7 @@ var waiting_repath_timer := 0.0
 var fall_target_y := 0.0
 var rng := RandomNumberGenerator.new()
 var worker_id := 0
+var role_id: int = WorkerRolesScript.Role.MINER
 var movement_intent: MovementIntent = MovementIntent.NONE
 var assist_task_id := -1
 var assist_goal := Vector3i.ZERO
@@ -107,6 +109,25 @@ func set_state(new_state: WorkerState) -> void:
 
 func get_block_coord() -> Vector3i:
 	return Vector3i(int(round(position.x)), int(floor(position.y)), int(round(position.z)))
+
+
+func set_role(new_role_id: int) -> bool:
+	if not WorkerRolesScript.is_valid(new_role_id) or role_id == new_role_id:
+		return false
+	role_id = new_role_id
+	return true
+
+
+func get_role_name() -> String:
+	return WorkerRolesScript.display_name(role_id)
+
+
+func get_role_idle_status() -> String:
+	return WorkerRolesScript.idle_status(role_id)
+
+
+func can_accept_task(task) -> bool:
+	return task != null and WorkerRolesScript.can_accept_task(role_id, task.type)
 #endregion
 
 
@@ -306,22 +327,23 @@ func _standing_y_for_coord(world, x: int, y: int, z: int) -> float:
 #region Idle State
 func update_idle(dt: float, world, task_queue, pathfinder) -> void:
 	if task_search_timer > 0.0:
-		if not _has_pending_tasks(task_queue):
+		if not _has_pending_tasks_for_role(task_queue) and WorkerRolesScript.allows_idle_wander(role_id):
 			update_wander(dt, world, pathfinder)
 		return
 	task_search_timer = IDLE_TASK_SEARCH_INTERVAL
 
-	if _has_pending_tasks(task_queue):
+	if _has_pending_tasks_for_role(task_queue):
 		if world != null \
 			and world.task_manager != null \
-			and world.task_manager.has_assignable_pending_task():
+			and world.task_manager.has_assignable_pending_task_for_worker(self):
 			return
 		if _move_to_work_front(world, task_queue, pathfinder):
 			return
 		task_search_timer = FAILED_TASK_SEARCH_INTERVAL
 		return
 
-	update_wander(dt, world, pathfinder)
+	if WorkerRolesScript.allows_idle_wander(role_id):
+		update_wander(dt, world, pathfinder)
 #endregion
 
 
@@ -335,6 +357,8 @@ func assign_task_with_path(
 	trace_event: String = "task_assigned",
 	trace_details: String = ""
 ) -> void:
+	if not can_accept_task(task):
+		return
 	task.status = TaskQueue.TaskStatus.IN_PROGRESS
 	task.accessibility = TaskQueue.TaskAccessibility.REACHABLE
 	task.assigned_worker = self
@@ -388,6 +412,15 @@ func _has_pending_tasks(task_queue) -> bool:
 	return false
 
 
+func _has_pending_tasks_for_role(task_queue) -> bool:
+	if task_queue == null:
+		return false
+	for task in task_queue.tasks:
+		if task.status == TaskQueue.TaskStatus.PENDING and can_accept_task(task):
+			return true
+	return false
+
+
 func _move_to_work_front(world, task_queue, pathfinder) -> bool:
 	if world == null \
 		or world.task_manager == null \
@@ -400,6 +433,8 @@ func _move_to_work_front(world, task_queue, pathfinder) -> bool:
 		if task.status != TaskQueue.TaskStatus.IN_PROGRESS:
 			continue
 		if task.assigned_worker == null or task.assigned_worker == self:
+			continue
+		if not can_accept_task(task):
 			continue
 		if task.type != TaskQueue.TaskType.DIG and task.type != TaskQueue.TaskType.STAIRS:
 			continue
@@ -453,6 +488,8 @@ func start_assist_path(
 
 
 func can_work_task(task, world = null, pathfinder = null) -> bool:
+	if not can_accept_task(task):
+		return false
 	if task.type == TaskQueue.TaskType.DIG or task.type == TaskQueue.TaskType.PLACE:
 		var worker_pos := get_block_coord()
 		return _can_work_task_from_coord(task.type, worker_pos, task.pos, world, pathfinder)

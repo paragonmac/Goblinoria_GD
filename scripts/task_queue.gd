@@ -11,7 +11,7 @@ signal task_visual_state_changed(task_id: int)
 enum TaskType {DIG, PLACE, STAIRS, HAUL}
 enum TaskStatus {PENDING, IN_PROGRESS, COMPLETED}
 enum TaskAccessibility {UNKNOWN, REACHABLE, UNREACHABLE}
-enum TaskBlockReason {NONE, NO_WORK_POSITION, NO_WORKER_PATH}
+enum TaskBlockReason {NONE, NO_WORK_POSITION, NO_WORKER_PATH, NO_ELIGIBLE_WORKER}
 #endregion
 
 #region Constants

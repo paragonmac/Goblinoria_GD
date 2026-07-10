@@ -27,6 +27,7 @@ const ItemStackStoreScript = preload("res://scripts/world/item_stack_store.gd")
 const StockpileStoreScript = preload("res://scripts/world/stockpile_store.gd")
 const WorldChunkSpaceScript = preload("res://scripts/world/world_chunk_space.gd")
 const WorkerTraceScript = preload("res://scripts/diagnostics/worker_trace.gd")
+const WorkerRolesScript = preload("res://scripts/worker_roles.gd")
 const ChunkDataType = ChunkDataScript
 #endregion
 
@@ -1062,6 +1063,7 @@ func spawn_initial_workers() -> void:
 		var surface_y := find_surface_y(spawn_x, spawn_z)
 		var worker := Worker.new()
 		worker.worker_id = i + 1
+		worker.role_id = WorkerRolesScript.default_spawn_role(i)
 		worker.position = Vector3(spawn_x, surface_y + WORKER_SPAWN_HEIGHT_OFFSET, spawn_z)
 		add_child(worker)
 		workers.append(worker)
@@ -1083,6 +1085,32 @@ func find_surface_y(x: int, z: int) -> int:
 func clear_and_respawn_workers() -> void:
 	clear_workers()
 	spawn_initial_workers()
+
+
+func set_worker_role(worker_id: int, role_id: int, notify: bool = true) -> bool:
+	if not WorkerRolesScript.is_valid(role_id):
+		return false
+	for worker: Worker in workers:
+		if worker == null or worker.worker_id != worker_id:
+			continue
+		if worker.current_task_id >= 0:
+			return false
+		var previous_role := worker.get_role_name()
+		if not worker.set_role(role_id):
+			return false
+		trace_worker_event(worker, "role_changed", null, "from=%s to=%s" % [
+			previous_role,
+			worker.get_role_name(),
+		])
+		if notify:
+			notify_worker_roles_changed()
+		return true
+	return false
+
+
+func notify_worker_roles_changed() -> void:
+	if task_manager != null:
+		task_manager.notify_worker_availability_changed()
 #endregion
 
 
