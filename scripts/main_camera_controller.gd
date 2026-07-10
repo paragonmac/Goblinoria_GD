@@ -17,6 +17,8 @@ const CAM_ZOOM_STEP_DEFAULT := 1.15
 const ISO_PITCH_DEG := -35.0
 const ISO_YAW_DEG := 45.0
 const YAW_ROTATION_STEP_DEG := 90.0
+const FREE_ORBIT_PITCH_MIN_DEG := -85.0
+const FREE_ORBIT_PITCH_MAX_DEG := -5.0
 const MOVE_VERTICAL_UNIT := 1.0
 const DUMMY_FLOAT := 666.0
 #endregion
@@ -38,6 +40,9 @@ var cam_zoom_step := CAM_ZOOM_STEP_DEFAULT
 
 var right_mouse_down := false
 var prev_mouse_pos := Vector2.ZERO
+var free_orbit_dragging := false
+var free_orbit_enabled := false
+var free_orbit_prev_mouse_pos := Vector2.ZERO
 #endregion
 
 
@@ -49,12 +54,17 @@ func initialize(camera_ref: Camera3D, viewport_ref: Viewport) -> void:
 func reset_mouse_state() -> void:
 	right_mouse_down = false
 	prev_mouse_pos = Vector2.ZERO
+	free_orbit_dragging = false
+	free_orbit_prev_mouse_pos = Vector2.ZERO
 
 
 func setup_camera(world: World) -> void:
 	if camera == null:
 		return
 	world_ref = world
+	free_orbit_enabled = false
+	cam_pitch = ISO_PITCH_DEG
+	cam_yaw = ISO_YAW_DEG
 	var center := Vector3(0.0, world.top_render_y, 0.0)
 	camera.position = center + CAMERA_OFFSET
 	camera.projection = Camera3D.PROJECTION_ORTHOGONAL
@@ -68,12 +78,13 @@ func setup_camera(world: World) -> void:
 			base_radius = int(streaming_obj.get("stream_radius_base"))
 	var base_span := float(base_radius * World.CHUNK_SIZE * 2 + World.CHUNK_SIZE)
 	cam_zoom_max = max(CAMERA_ORTHO_SIZE_DEFAULT, base_span * CAMERA_ORTHO_SIZE_MULT * CAMERA_ZOOM_MAX_MULT)
-	_apply_isometric_rotation()
+	_apply_camera_rotation()
 	_clamp_camera_to_world()
 
 
 func update_camera(dt: float) -> void:
-	_apply_isometric_rotation()
+	_update_free_orbit()
+	_apply_camera_rotation()
 	_update_camera_pan()
 	_update_camera_keyboard_movement(dt)
 	_clamp_camera_to_world()
@@ -102,8 +113,10 @@ func rotate_view(direction: int, plane_y: float) -> void:
 
 	var screen_center := viewport_rect.position + viewport_rect.size * 0.5
 	var pivot: Variant = screen_to_plane(screen_center, plane_y)
-	cam_yaw = fposmod(cam_yaw + float(direction) * YAW_ROTATION_STEP_DEG, 360.0)
-	_apply_isometric_rotation()
+	free_orbit_enabled = false
+	cam_pitch = ISO_PITCH_DEG
+	cam_yaw = _snap_yaw_to_isometric_step(cam_yaw + float(direction) * YAW_ROTATION_STEP_DEG)
+	_apply_camera_rotation()
 	if pivot == null:
 		return
 
@@ -176,10 +189,52 @@ func screen_to_plane(screen_pos: Vector2, plane_y: float) -> Variant:
 	return ray_origin + ray_dir * t
 
 
-func _apply_isometric_rotation() -> void:
-	cam_pitch = ISO_PITCH_DEG
+func _apply_camera_rotation() -> void:
+	if not free_orbit_enabled:
+		cam_pitch = ISO_PITCH_DEG
 	if camera != null:
 		camera.rotation = Vector3(deg_to_rad(cam_pitch), deg_to_rad(cam_yaw), 0.0)
+
+
+func _update_free_orbit() -> void:
+	if camera == null or viewport == null or world_ref == null:
+		free_orbit_dragging = false
+		return
+	var drag_requested := Input.is_key_pressed(KEY_SHIFT) and Input.is_mouse_button_pressed(MOUSE_BUTTON_MIDDLE)
+	if not drag_requested:
+		free_orbit_dragging = false
+		return
+	var mouse_pos := viewport.get_mouse_position()
+	if not free_orbit_dragging:
+		free_orbit_dragging = true
+		free_orbit_prev_mouse_pos = mouse_pos
+		return
+	var delta := mouse_pos - free_orbit_prev_mouse_pos
+	free_orbit_prev_mouse_pos = mouse_pos
+	if delta.length_squared() <= MOVE_EPSILON:
+		return
+	var viewport_rect := viewport.get_visible_rect()
+	var screen_center := viewport_rect.position + viewport_rect.size * 0.5
+	var plane_y := float(world_ref.top_render_y)
+	var pivot: Variant = screen_to_plane(screen_center, plane_y)
+	free_orbit_enabled = true
+	cam_yaw = fposmod(cam_yaw - delta.x * cam_mouse_sensitivity, 360.0)
+	cam_pitch = clampf(
+		cam_pitch - delta.y * cam_mouse_sensitivity,
+		FREE_ORBIT_PITCH_MIN_DEG,
+		FREE_ORBIT_PITCH_MAX_DEG
+	)
+	_apply_camera_rotation()
+	if pivot == null:
+		return
+	var rotated_center: Variant = screen_to_plane(screen_center, plane_y)
+	if rotated_center != null:
+		camera.position += Vector3(pivot) - Vector3(rotated_center)
+
+
+func _snap_yaw_to_isometric_step(yaw: float) -> float:
+	var steps: float = round((yaw - ISO_YAW_DEG) / YAW_ROTATION_STEP_DEG)
+	return fposmod(ISO_YAW_DEG + steps * YAW_ROTATION_STEP_DEG, 360.0)
 
 
 func _update_camera_pan() -> void:

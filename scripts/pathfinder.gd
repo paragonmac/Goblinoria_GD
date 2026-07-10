@@ -135,7 +135,7 @@ func _edge_corners(dir: Vector2i) -> Array[String]:
 
 
 func _ramp_corner_heights(block_id: int) -> Dictionary:
-	match block_id:
+	match World.ramp_shape_id(block_id):
 		World.RAMP_NORTH_ID:
 			return {"nw": 1, "ne": 1, "se": -1, "sw": -1}
 		World.RAMP_SOUTH_ID:

@@ -9,7 +9,9 @@ Normal dig work is horizontal-only, so downward excavation needs an explicit acc
 
 ## Decision
 
-`UP_STAIRS` and `DOWN_STAIRS` player modes both create `STAIRS` task designations, and those tasks create ramp blocks. The task type stays shared because worker execution is the same: travel to the target, then place the chosen ramp material.
+`UP_STAIRS` and `DOWN_STAIRS` player modes both create `STAIRS` task designations, and those tasks create ramp blocks. The task type stays shared because worker execution is the same: travel to the target, then place the chosen player-stair ramp material. Player stairs use a distinct block-ID range from generated terrain slopes; see ADR-011.
+
+Stair execution uses one shared work-position rule for accessibility, path goals, and live placement validation. Valid positions are the target or its four cardinal neighbors on the target level or one level above. Diagonal positions and positions two levels above are not valid.
 
 `UP_STAIRS` targets the empty, supported cell above the clicked block. It is only valid when the target cell is empty and `World.can_place_stairs_at()` accepts it. This keeps upward ramp construction aligned with normal "place on top" behavior.
 
@@ -30,4 +32,5 @@ Ramp orientation is selected from the planned lower-side dig context when possib
 - Code pointer: `scripts/main_selection_controller.gd`, `_stair_material_for()`.
 - Code pointer: `scripts/main_selection_controller.gd`, `_up_stair_target_from_hit()` and `_down_stair_target_from_hit()`.
 - Code pointer: `scripts/task_manager.gd`, `queue_task_request()`.
+- Code pointer: `scripts/task_work_position_rules.gd`.
 - Contract: `tools/validate_worker_path_safety.gd` checks pending dig replacement when stairs are queued, and checks that stairs can be placed in an empty cell above solid support.

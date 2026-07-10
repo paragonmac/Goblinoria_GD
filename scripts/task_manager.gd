@@ -3,6 +3,7 @@ class_name TaskManager
 ## Manages task queuing, accessibility checking, and blocked task handling.
 
 const PathSearchSchedulerScript = preload("res://scripts/pathfinding/path_search_scheduler.gd")
+const TaskWorkPositionRulesScript = preload("res://scripts/task_work_position_rules.gd")
 
 #region State
 var world: World
@@ -33,6 +34,9 @@ var next_assignment_auction_id := 1
 var assist_requests_by_worker: Dictionary = {}
 var assist_requests_by_id: Dictionary = {}
 var next_assist_request_id := 1
+var haul_path_requests_by_worker: Dictionary = {}
+var haul_path_requests_by_id: Dictionary = {}
+var next_haul_path_request_id := 1
 var haul_rebuild_requested := true
 var haul_rebuild_in_progress := false
 var haul_rebuild_reasons: Dictionary = {"initial": true}
@@ -86,6 +90,7 @@ func _on_task_added(task) -> void:
 
 func _on_task_removed(task_id: int) -> void:
 	pending_accessibility_set.erase(task_id)
+	_clear_haul_path_request_for_task(task_id)
 	if path_retry_due_by_task.has(task_id):
 		path_retry_due_by_task.erase(task_id)
 		_schedule_path_retry_timer()
@@ -146,9 +151,16 @@ func update_task_accessibility() -> void:
 
 func _classify_task_accessibility(task) -> void:
 	var now_msec := Time.get_ticks_msec()
-	if task.type != TaskQueue.TaskType.STAIRS \
-			and task.type != TaskQueue.TaskType.HAUL \
-			and not world.pathfinder.has_walkable_adjacent_on_level(world, task.pos, task.pos.y):
+	var has_work_position := true
+	if task.type == TaskQueue.TaskType.STAIRS:
+		has_work_position = not TaskWorkPositionRulesScript.stair_work_positions(
+			world,
+			world.pathfinder,
+			task.pos
+		).is_empty()
+	elif task.type != TaskQueue.TaskType.HAUL:
+		has_work_position = world.pathfinder.has_walkable_adjacent_on_level(world, task.pos, task.pos.y)
+	if not has_work_position:
 		_clear_path_retry(task.id)
 		task.set_accessibility(
 			TaskQueue.TaskAccessibility.UNREACHABLE,
@@ -161,7 +173,9 @@ func _classify_task_accessibility(task) -> void:
 		return
 	_clear_path_retry(task.id)
 	task.unreachable_workers.clear()
-	task.set_accessibility(TaskQueue.TaskAccessibility.REACHABLE, now_msec)
+	# A work position is necessary but not sufficient. Keep the task green until
+	# a revision-checked worker path bid proves it is currently reachable.
+	task.set_accessibility(TaskQueue.TaskAccessibility.UNKNOWN, now_msec)
 
 
 func _mark_task_path_blocked(task, now_msec: int) -> void:
@@ -246,8 +260,8 @@ func update_task_assignments() -> void:
 	_process_path_results()
 	var task = task_queue.get_task(assignment_task_id) if assignment_task_id >= 0 else null
 	if task == null \
-		or task.status != TaskQueue.TaskStatus.PENDING \
-		or task.accessibility != TaskQueue.TaskAccessibility.REACHABLE:
+			or task.status != TaskQueue.TaskStatus.PENDING \
+			or task.accessibility == TaskQueue.TaskAccessibility.UNREACHABLE:
 		_reset_assignment_auction()
 		task = _next_assignable_task()
 		if task == null:
@@ -309,6 +323,8 @@ func reset_assignment_auction() -> void:
 	_reset_assignment_auction()
 	assist_requests_by_worker.clear()
 	assist_requests_by_id.clear()
+	haul_path_requests_by_worker.clear()
+	haul_path_requests_by_id.clear()
 	path_search_scheduler.clear()
 
 
@@ -355,8 +371,19 @@ func _prune_invalid_haul_tasks() -> void:
 		if _is_haul_task_valid(task):
 			continue
 		var item_id := int(task.data.get("item_id", -1))
-		world.item_store.release_reservation(item_id, task.id)
-		task_queue.remove_task(task)
+		var assigned_worker: Worker = task.assigned_worker
+		if is_instance_valid(assigned_worker) \
+				and assigned_worker.current_task_id == task.id \
+				and assigned_worker.carried_source_item_id == item_id:
+			assigned_worker.fail_haul_delivery_path(
+				world,
+				task_queue,
+				task,
+				"reason=destination_invalidated"
+			)
+		else:
+			world.item_store.release_reservation(item_id, task.id)
+			task_queue.remove_task(task)
 		if task.id == assignment_task_id:
 			_reset_assignment_auction()
 		world.trace_task_event(task, "haul_cancelled", "reason=invalid_reservation_or_destination")
@@ -422,6 +449,34 @@ func request_assist_path(worker: Worker, candidates: Array) -> bool:
 	return true
 
 
+func request_haul_delivery_path(worker: Worker, task, destination: Vector3i) -> bool:
+	if worker == null or task == null:
+		return false
+	if haul_path_requests_by_worker.has(worker.worker_id):
+		return true
+	var request_id := next_haul_path_request_id
+	next_haul_path_request_id += 1
+	var job_id := path_search_scheduler.enqueue_exact(
+		world,
+		request_id,
+		worker,
+		destination,
+		Worker.WORKER_PATH_SEARCH_MAX_ITERATIONS,
+		"haul_delivery"
+	)
+	var request := {
+		"request_id": request_id,
+		"job_id": job_id,
+		"worker": worker,
+		"task_id": task.id,
+		"destination": destination,
+	}
+	haul_path_requests_by_worker[worker.worker_id] = request
+	haul_path_requests_by_id[request_id] = request
+	world.trace_worker_event(worker, "haul_delivery_path_queued", task, "job_id=%d destination=%s" % [job_id, destination])
+	return true
+
+
 func _next_assignable_task():
 	if world == null:
 		return null
@@ -432,7 +487,7 @@ func _next_assignable_task():
 				continue
 			if task.type != task_type:
 				continue
-			if task.accessibility != TaskQueue.TaskAccessibility.REACHABLE:
+			if task.accessibility == TaskQueue.TaskAccessibility.UNREACHABLE:
 				continue
 			if not world.is_block_coord_valid(task.pos.x, task.pos.y, task.pos.z):
 				continue
@@ -487,8 +542,12 @@ func _process_path_results() -> void:
 		var result: Dictionary = path_search_scheduler.pop_result()
 		if result.is_empty():
 			break
-		if String(result.get("kind", "assignment")) == "goals":
+		var kind := String(result.get("kind", "assignment"))
+		if kind == "goals":
 			_process_assist_result(result)
+			continue
+		if kind == "haul_delivery":
+			_process_haul_delivery_result(result)
 			continue
 		if int(result.get("auction_id", -1)) != assignment_auction_id:
 			continue
@@ -506,6 +565,63 @@ func _process_path_results() -> void:
 		_collect_worker_bid_result(task, worker, result)
 	if restart_auction:
 		_reset_assignment_auction()
+
+
+func _process_haul_delivery_result(result: Dictionary) -> void:
+	var request_id := int(result.get("request_id", -1))
+	var request: Dictionary = haul_path_requests_by_id.get(request_id, {})
+	if request.is_empty():
+		return
+	haul_path_requests_by_id.erase(request_id)
+	var worker: Worker = request.get("worker", null)
+	if worker != null:
+		haul_path_requests_by_worker.erase(worker.worker_id)
+	if worker == null or not is_instance_valid(worker):
+		return
+	var task = task_queue.get_task(int(request.get("task_id", -1)))
+	if task == null \
+			or task.status != TaskQueue.TaskStatus.IN_PROGRESS \
+			or task.assigned_worker != worker \
+			or worker.current_task_id != task.id:
+		return
+	var snapshot = result.get("snapshot", null)
+	if snapshot == null or not snapshot.revisions_match(world):
+		world.trace_worker_event(worker, "haul_delivery_path_stale", task, "request_id=%d" % request_id)
+		request_haul_delivery_path(worker, task, request.get("destination", Vector3i.ZERO))
+		return
+	var found_path: Array = result.get("path", [])
+	if found_path.is_empty():
+		var stats: Dictionary = result.get("search_stats", {})
+		worker.fail_haul_delivery_path(
+			world,
+			task_queue,
+			task,
+			"reason=%s iterations=%d/%d" % [
+				str(stats.get("reason", "unknown")),
+				int(stats.get("iterations_used", 0)),
+				int(stats.get("max_iterations", 0)),
+			]
+		)
+		return
+	worker.start_haul_delivery_path(
+		world,
+		task,
+		found_path,
+		float(result.get("search_ms", 0.0)),
+		float(result.get("snapshot_ms", 0.0)),
+		float(result.get("queue_wait_ms", 0.0))
+	)
+
+
+func _clear_haul_path_request_for_task(task_id: int) -> void:
+	for request_id in haul_path_requests_by_id.keys().duplicate():
+		var request: Dictionary = haul_path_requests_by_id[request_id]
+		if int(request.get("task_id", -1)) != task_id:
+			continue
+		haul_path_requests_by_id.erase(request_id)
+		var worker: Worker = request.get("worker", null)
+		if worker != null:
+			haul_path_requests_by_worker.erase(worker.worker_id)
 
 
 func _process_assist_result(result: Dictionary) -> void:
@@ -580,6 +696,7 @@ func _collect_worker_bid_result(task, worker: Worker, result: Dictionary) -> voi
 		float(result.get("queue_wait_ms", 0.0)),
 		search_ms,
 	])
+	task.set_accessibility(TaskQueue.TaskAccessibility.REACHABLE, Time.get_ticks_msec())
 	assignment_bids.append({
 		"worker": worker,
 		"path": maybe_path,

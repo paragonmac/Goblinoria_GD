@@ -77,8 +77,22 @@ const INNER_SOUTHWEST_ID := 108
 const INNER_SOUTHEAST_ID := 109
 const INNER_NORTHWEST_ID := 110
 const INNER_NORTHEAST_ID := 111
+# Generated terrain slopes deliberately use a separate ID range from player stairs.
+# SEE-ADR-011: Their level-cut visibility must not inherit the player-stair exception.
+const TERRAIN_SLOPE_NORTH_ID := 112
+const TERRAIN_SLOPE_SOUTH_ID := 113
+const TERRAIN_SLOPE_EAST_ID := 114
+const TERRAIN_SLOPE_WEST_ID := 115
+const TERRAIN_SLOPE_NORTHEAST_ID := 116
+const TERRAIN_SLOPE_NORTHWEST_ID := 117
+const TERRAIN_SLOPE_SOUTHEAST_ID := 118
+const TERRAIN_SLOPE_SOUTHWEST_ID := 119
+const TERRAIN_INNER_SOUTHWEST_ID := 120
+const TERRAIN_INNER_SOUTHEAST_ID := 121
+const TERRAIN_INNER_NORTHWEST_ID := 122
+const TERRAIN_INNER_NORTHEAST_ID := 123
 const STAIR_BLOCK_ID := RAMP_NORTH_ID
-const RAMP_BLOCK_IDS := [
+const PLAYER_STAIR_BLOCK_IDS := [
 	RAMP_NORTH_ID,
 	RAMP_SOUTH_ID,
 	RAMP_EAST_ID,
@@ -92,6 +106,21 @@ const RAMP_BLOCK_IDS := [
 	INNER_NORTHWEST_ID,
 	INNER_NORTHEAST_ID,
 ]
+const TERRAIN_SLOPE_BLOCK_IDS := [
+	TERRAIN_SLOPE_NORTH_ID,
+	TERRAIN_SLOPE_SOUTH_ID,
+	TERRAIN_SLOPE_EAST_ID,
+	TERRAIN_SLOPE_WEST_ID,
+	TERRAIN_SLOPE_NORTHEAST_ID,
+	TERRAIN_SLOPE_NORTHWEST_ID,
+	TERRAIN_SLOPE_SOUTHEAST_ID,
+	TERRAIN_SLOPE_SOUTHWEST_ID,
+	TERRAIN_INNER_SOUTHWEST_ID,
+	TERRAIN_INNER_SOUTHEAST_ID,
+	TERRAIN_INNER_NORTHWEST_ID,
+	TERRAIN_INNER_NORTHEAST_ID,
+]
+const RAMP_BLOCK_IDS := PLAYER_STAIR_BLOCK_IDS + TERRAIN_SLOPE_BLOCK_IDS
 const DEFAULT_MATERIAL := BLOCK_ID_GRANITE
 # Marching squares lookup: index = nw_high*1 + ne_high*2 + sw_high*4 + se_high*8
 # Maps 4-bit corner configuration to ramp ID (-1 = no ramp)
@@ -535,6 +564,23 @@ func is_ramp_block_id(block_id: int) -> bool:
 	if block_id < 0 or block_id >= _ramp_lookup.size():
 		return false
 	return _ramp_lookup[block_id] != 0
+
+
+static func is_terrain_slope_block_id(block_id: int) -> bool:
+	return block_id >= TERRAIN_SLOPE_NORTH_ID and block_id <= TERRAIN_INNER_NORTHEAST_ID
+
+
+static func ramp_shape_id(block_id: int) -> int:
+	if is_terrain_slope_block_id(block_id):
+		return block_id - (TERRAIN_SLOPE_NORTH_ID - RAMP_NORTH_ID)
+	return block_id
+
+
+static func terrain_slope_id_for_shape(ramp_id: int) -> int:
+	var shape_id := ramp_shape_id(ramp_id)
+	if shape_id < RAMP_NORTH_ID or shape_id > INNER_NORTHEAST_ID:
+		return -1
+	return shape_id + (TERRAIN_SLOPE_NORTH_ID - RAMP_NORTH_ID)
 
 
 func _init_ramp_lookup() -> void:

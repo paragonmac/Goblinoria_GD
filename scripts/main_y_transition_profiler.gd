@@ -5,19 +5,23 @@ class_name MainYTransitionProfiler
 const WorldChunkSpaceScript = preload("res://scripts/world/world_chunk_space.gd")
 
 #region State
-var owner_node: Node
 var world: World
+var debug_overlay: DebugOverlay
 #endregion
 
 
 #region Setup
-func initialize(owner_ref: Node, world_ref: World) -> void:
-	owner_node = owner_ref
+func initialize(world_ref: World, debug_overlay_ref: DebugOverlay = null) -> void:
 	world = world_ref
+	debug_overlay = debug_overlay_ref
 
 
 func update_world(world_ref: World) -> void:
 	world = world_ref
+
+
+func set_debug_overlay(debug_overlay_ref: DebugOverlay) -> void:
+	debug_overlay = debug_overlay_ref
 #endregion
 
 
@@ -140,8 +144,5 @@ func _chunk_y_for_render_y(render_y: int) -> int:
 
 
 func _debug_overlay() -> DebugOverlay:
-	if owner_node == null:
-		return null
-	var overlay: Variant = owner_node.get("debug_overlay")
-	return overlay as DebugOverlay
+	return debug_overlay
 #endregion

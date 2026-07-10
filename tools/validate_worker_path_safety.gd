@@ -1,5 +1,7 @@
 extends SceneTree
 
+const TaskWorkPositionRulesScript = preload("res://scripts/task_work_position_rules.gd")
+
 
 class FakeWorld:
 	extends RefCounted
@@ -369,6 +371,33 @@ func _init() -> void:
 			+ abs(threaded_path[threaded_path.size() - 1].z) == 1 \
 		and float(threaded_result.get("snapshot_ms", 0.0)) == 0.25 \
 		and float(threaded_result.get("queue_wait_ms", -1.0)) >= 0.0
+	var haul_scheduler := PathSearchScheduler.new()
+	haul_scheduler.start()
+	haul_scheduler._enqueue_job({
+		"job_id": 2,
+		"kind": "haul_delivery",
+		"request_id": 7,
+		"auction_id": 0,
+		"task_id": -1,
+		"task_type": -1,
+		"worker_id": 1,
+		"start": Vector3i(0, 1, 0),
+		"target": Vector3i(59, 1, 0),
+		"max_iterations": Pathfinder.TASK_SEARCH_MAX_ITERATIONS,
+		"snapshot": threaded_snapshot,
+		"snapshot_ms": 0.5,
+		"queued_usec": Time.get_ticks_usec(),
+	})
+	var haul_threaded_result: Dictionary = {}
+	var haul_threaded_deadline := Time.get_ticks_msec() + 2000
+	while haul_threaded_result.is_empty() and Time.get_ticks_msec() < haul_threaded_deadline:
+		OS.delay_msec(1)
+		haul_threaded_result = haul_scheduler.pop_result()
+	haul_scheduler.stop()
+	var haul_threaded_path: Array = haul_threaded_result.get("path", [])
+	var threaded_haul_path_ok: bool = not haul_threaded_path.is_empty() \
+		and haul_threaded_path[haul_threaded_path.size() - 1] == Vector3i(59, 1, 0) \
+		and String(haul_threaded_result.get("kind", "")) == "haul_delivery"
 	worker.current_task_id = 1
 	worker.path = [Vector3i(0, 1, 0), Vector3i(2, 1, 0)]
 	var bottom_level_stable: bool = worker._can_stand_at(world, 0, 0, 0)
@@ -437,6 +466,14 @@ func _init() -> void:
 	var stairs_on_supported_air_ok: bool = stair_world.can_place_stairs_at(0, 1, 0)
 	var unsupported_stairs_blocked_ok: bool = not stair_world.can_place_stairs_at(2, 1, 0)
 	var ramp_supported_stairs_blocked_ok: bool = not stair_world.can_place_stairs_at(1, 1, 0)
+	var stair_work_positions := TaskWorkPositionRulesScript.stair_work_positions(
+		stair_world,
+		stair_world.pathfinder,
+		Vector3i(0, 1, 0)
+	)
+	var stair_work_position_rules_ok: bool = stair_work_positions.has(Vector3i(0, 1, 0)) \
+		and not stair_work_positions.has(Vector3i(1, 1, 1)) \
+		and not stair_work_positions.has(Vector3i(0, 3, 0))
 	task_manager.mark_worker_unreachable_for_task(near_reachable, worker)
 	var per_worker_failure_ok: bool = \
 		near_reachable.accessibility == TaskQueue.TaskAccessibility.REACHABLE \
@@ -484,9 +521,8 @@ func _init() -> void:
 		retry_task.accessibility == TaskQueue.TaskAccessibility.UNREACHABLE \
 		and retry_task.block_reason == TaskQueue.TaskBlockReason.NO_WORKER_PATH
 	task_manager.process_due_path_retries(retry_due)
-	task_manager.update_task_accessibility()
 	var timed_path_retry_ok: bool = \
-		retry_task.accessibility == TaskQueue.TaskAccessibility.REACHABLE \
+		retry_task.accessibility == TaskQueue.TaskAccessibility.UNKNOWN \
 		and retry_task.block_reason == TaskQueue.TaskBlockReason.NONE \
 		and not task_manager.path_retry_due_by_task.has(retry_task.id)
 	var no_work_position_has_no_timer: bool = \
@@ -536,6 +572,17 @@ func _init() -> void:
 		and task_manager._is_better_assignment_bid(3, worker.worker_id) \
 		and not task_manager._is_better_assignment_bid(3, 3) \
 		and not task_manager._is_better_assignment_bid(4, worker.worker_id)
+	task_manager.reset_assignment_auction()
+	var path_proven_task := TaskQueue.Task.new(9001, Vector3i.ZERO, TaskQueue.TaskType.STAIRS, World.RAMP_NORTH_ID)
+	task_manager._collect_worker_bid_result(path_proven_task, worker, {
+		"path": [Vector3i.ZERO],
+		"search_ms": 0.1,
+		"snapshot_ms": 0.1,
+		"queue_wait_ms": 0.0,
+		"search_stats": {},
+	})
+	var successful_bid_sets_reachable_ok: bool = \
+		path_proven_task.accessibility == TaskQueue.TaskAccessibility.REACHABLE
 	task_manager.reset_assignment_auction()
 
 	var owner_worker := Worker.new()
@@ -619,6 +666,10 @@ func _init() -> void:
 		push_error("Threaded path scheduler failed its 60-block snapshot round trip")
 		quit(1)
 		return
+	if not threaded_haul_path_ok:
+		push_error("Haul delivery path did not run through the threaded scheduler")
+		quit(1)
+		return
 	if not snapshot_index_ok:
 		push_error("PathWorldSnapshot did not match chunk block index ordering")
 		quit(1)
@@ -699,6 +750,10 @@ func _init() -> void:
 		push_error("Accessibility queue did not enforce its per-update budget")
 		quit(1)
 		return
+	if not successful_bid_sets_reachable_ok:
+		push_error("Task became reachable before a successful worker path bid")
+		quit(1)
+		return
 	if not stairs_replaced_pending_dig_ok:
 		push_error("Stairs designation did not replace a pending dig designation")
 		quit(1)
@@ -721,6 +776,10 @@ func _init() -> void:
 		return
 	if not ramp_supported_stairs_blocked_ok:
 		push_error("Stairs were allowed above ramp support")
+		quit(1)
+		return
+	if not stair_work_position_rules_ok:
+		push_error("Stair execution accepted a diagonal or two-level work position")
 		quit(1)
 		return
 

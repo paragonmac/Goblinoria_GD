@@ -11,7 +11,7 @@ The player needs quick visual feedback for selected work: whether it is queued, 
 
 Task overlays use logical colors:
 
-- Green: queued but accessibility is still unknown.
+- Green: queued, structurally workable, but no current worker path has succeeded yet.
 - Blue: queued and currently pathable/reachable.
 - Red: queued but currently blocked/unreachable.
 - Amber: assigned to a worker and that worker is moving toward or working the task.
@@ -22,6 +22,7 @@ The overlay is a world-space block overlay, not a screen-space selection rectang
 
 - Assignment no longer removes task visibility; it changes the task to an assigned visual state.
 - Blocked/reachable state may change as the world changes.
+- Tasks remain green while worker path bids are pending and become blue only after a valid bid succeeds.
 - Alpha and pulse are visual tuning, but the logical color meanings should stay stable.
 
 ## Guardrails

@@ -315,7 +315,7 @@ func _apply_ramps(volume: PackedByteArray) -> void:
 			var idx: int = _volume_index(local_x, ramp_y, local_z)
 			if volume[idx] == World.BLOCK_ID_WATER:
 				continue
-			volume[idx] = ramp_id
+			volume[idx] = World.terrain_slope_id_for_shape(ramp_id)
 
 
 func _place_flowers(volume: PackedByteArray) -> void:

@@ -75,7 +75,7 @@ static func apply_blocks(
 				continue
 			var ly: int = ramp_y - base_y
 			var idx: int = (lz * chunk_size + ly) * chunk_size + lx
-			blocks[idx] = ramp_id
+			blocks[idx] = World.terrain_slope_id_for_shape(ramp_id)
 
 
 static func _height_at(

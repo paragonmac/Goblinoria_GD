@@ -16,8 +16,15 @@ const BACKGROUND_WARMUP_MESH_RESULT_BUDGET := 2
 const BACKGROUND_WARMUP_MESH_RESULT_TIME_BUDGET_MS := 2.0
 const BACKGROUND_WARMUP_MESH_QUEUE_BUDGET := 4
 
-var owner_node: Node
 var world: World
+var scene_tree: SceneTree
+var camera: Camera3D
+var debug_overlay: DebugOverlay
+var loading_progress_callback: Callable
+var loading_status_callback: Callable
+var show_loading_callback: Callable
+var hide_loading_callback: Callable
+var world_draw_callback: Callable
 var prepared_chunk_bands: Dictionary = {}
 var background_warmup_queue: Array[int] = []
 var background_warmup_generation_targets: Array[Vector3i] = []
@@ -37,11 +44,23 @@ var y_transition_profiler = MainYTransitionProfilerScript.new()
 var target_builder = MainRenderLevelTargetBuilderScript.new()
 
 
-func initialize(owner_ref: Node, world_ref: World) -> void:
-	owner_node = owner_ref
+func initialize(
+	world_ref: World,
+	scene_tree_ref: SceneTree,
+	camera_ref: Camera3D,
+	stream_view_rect_provider: Callable,
+	callbacks: Dictionary
+) -> void:
 	world = world_ref
-	target_builder.initialize(owner_ref, world_ref)
-	y_transition_profiler.initialize(owner_ref, world_ref)
+	scene_tree = scene_tree_ref
+	camera = camera_ref
+	loading_progress_callback = callbacks.get("set_progress", Callable())
+	loading_status_callback = callbacks.get("set_status", Callable())
+	show_loading_callback = callbacks.get("show", Callable())
+	hide_loading_callback = callbacks.get("hide", Callable())
+	world_draw_callback = callbacks.get("set_world_draw_enabled", Callable())
+	target_builder.initialize(world_ref, stream_view_rect_provider)
+	y_transition_profiler.initialize(world_ref)
 
 
 func update_world(world_ref: World) -> void:
@@ -50,8 +69,53 @@ func update_world(world_ref: World) -> void:
 	y_transition_profiler.update_world(world_ref)
 
 
+func set_debug_overlay(debug_overlay_ref: DebugOverlay) -> void:
+	debug_overlay = debug_overlay_ref
+	y_transition_profiler.set_debug_overlay(debug_overlay_ref)
+
+
 func get_last_startup_load_metrics() -> Dictionary:
 	return last_startup_load_metrics.duplicate()
+
+
+func reset_loading_state() -> void:
+	_reset_level_loading_state()
+
+
+func chunk_y_for_render_y(render_y: int) -> int:
+	return _chunk_y_for_render_y(render_y)
+
+
+func schedule_background_warmup(center_cy: int) -> void:
+	_schedule_background_level_warmup(center_cy)
+
+
+func pump_directional_prewarm(world_started: bool) -> void:
+	_pump_directional_y_prewarm(world_started)
+
+
+func pump_background_warmup(world_started: bool) -> void:
+	_pump_background_level_warmup(world_started)
+
+
+func build_all_world_chunk_targets() -> Array[Vector3i]:
+	return _build_all_world_chunk_targets()
+
+
+func request_startup_generation(
+	targets: Array[Vector3i],
+	queue_mesh_on_complete: bool,
+	high_priority: bool = true
+) -> void:
+	_request_startup_chunk_generation(targets, queue_mesh_on_complete, high_priority)
+
+
+func pump_startup_loading_work() -> int:
+	return _pump_startup_loading_work()
+
+
+func count_generated_chunks(targets: Array[Vector3i]) -> int:
+	return _count_generated_startup_chunks(targets)
 
 
 func handle_render_layer_change(delta: int) -> void:
@@ -72,6 +136,7 @@ func handle_render_layer_change(delta: int) -> void:
 		overlay.run_timed("World.set_top_render_y", Callable(self, "_apply_render_y").bind(target_y))
 	else:
 		_apply_render_y(target_y)
+	_refresh_streaming_after_render_level_change(target_y)
 	_log_render_height_change(delta)
 	_record_instant_y_transition(from_y, target_y, delta, snapshot_before, mesh_targets, mesh_ready_before)
 	_schedule_directional_y_prewarm(delta, target_y)
@@ -82,12 +147,23 @@ func _apply_render_y(target_y: int) -> void:
 		world.set_top_render_y(target_y)
 
 
+func _refresh_streaming_after_render_level_change(render_y: int) -> void:
+	if world == null:
+		return
+	var view_rect: Rect2 = _get_stream_view_rect_for_y(render_y)
+	var active_camera := _active_camera()
+	world.update_streaming(view_rect, float(render_y), 0.0, active_camera)
+	if world.streaming != null:
+		world.streaming.refresh_render_zone(active_camera)
+
+
 func _change_render_layer_with_loading(delta: int, from_y: int, target_y: int, snapshot_before: Dictionary, mesh_targets_before: Array[Vector3i], mesh_ready_before: int) -> void:
 	var blocked_start_usec: int = Time.get_ticks_usec()
 	var generation_targets_before: Array[Vector3i] = _build_reveal_generation_targets(target_y)
 	var generation_ready_before: int = _count_generated_startup_chunks(generation_targets_before)
 	_show_loading_screen("Building level...")
-	await owner_node.get_tree().process_frame
+	if scene_tree != null:
+		await scene_tree.process_frame
 	var ready_profile: Dictionary = await _ensure_render_y_ready(target_y, "Building level %d" % target_y)
 	var overlay := _debug_overlay()
 	if overlay != null:
@@ -95,9 +171,7 @@ func _change_render_layer_with_loading(delta: int, from_y: int, target_y: int, s
 	else:
 		_apply_render_y(target_y)
 	_log_render_height_change(delta)
-	if world != null:
-		var view_rect: Rect2 = _get_stream_view_rect_for_y(world.top_render_y)
-		world.update_streaming(view_rect, float(world.top_render_y), 0.0, _active_camera())
+	_refresh_streaming_after_render_level_change(target_y)
 	var snapshot_after: Dictionary = y_transition_profiler.capture_snapshot()
 	ready_profile["mesh_total"] = mesh_targets_before.size()
 	ready_profile["mesh_ready_before"] = mesh_ready_before
@@ -211,7 +285,8 @@ func _ensure_render_y_ready(render_y: int, status_prefix: String) -> Dictionary:
 			profile["generation_ready_after"] = generated
 			break
 		frames_waited += 1
-		await owner_node.get_tree().process_frame
+		if scene_tree != null:
+			await scene_tree.process_frame
 	if generation_load_ms <= 0.0:
 		generation_load_ms = float(Time.get_ticks_usec() - startup_start_usec) / 1000.0
 	var total_ready_ms: float = float(Time.get_ticks_usec() - startup_start_usec) / 1000.0
@@ -531,21 +606,11 @@ func _is_chunk_band_cached(cy: int) -> bool:
 
 
 func _debug_overlay() -> DebugOverlay:
-	if owner_node == null:
-		return null
-	var overlay: Variant = owner_node.get("debug_overlay")
-	if overlay is DebugOverlay:
-		return overlay
-	return null
+	return debug_overlay
 
 
 func _active_camera() -> Camera3D:
-	if owner_node == null:
-		return null
-	var camera_value: Variant = owner_node.get("camera")
-	if camera_value is Camera3D:
-		return camera_value
-	return null
+	return camera
 
 
 func _get_stream_view_rect_for_y(render_y: int) -> Rect2:
@@ -553,25 +618,25 @@ func _get_stream_view_rect_for_y(render_y: int) -> Rect2:
 
 
 func _set_loading_progress(ready: int, total: int) -> void:
-	if owner_node != null:
-		owner_node.call("_set_loading_progress", ready, total)
+	if loading_progress_callback.is_valid():
+		loading_progress_callback.call(ready, total)
 
 
 func _set_loading_status(text: String) -> void:
-	if owner_node != null:
-		owner_node.call("_set_loading_status", text)
+	if loading_status_callback.is_valid():
+		loading_status_callback.call(text)
 
 
 func _show_loading_screen(text: String) -> void:
-	if owner_node != null:
-		owner_node.call("_show_loading_screen", text)
+	if show_loading_callback.is_valid():
+		show_loading_callback.call(text)
 
 
 func _hide_loading_screen() -> void:
-	if owner_node != null:
-		owner_node.call("_hide_loading_screen")
+	if hide_loading_callback.is_valid():
+		hide_loading_callback.call()
 
 
 func _set_world_draw_enabled(enabled: bool) -> void:
-	if owner_node != null:
-		owner_node.call("_set_world_draw_enabled", enabled)
+	if world_draw_callback.is_valid():
+		world_draw_callback.call(enabled)

@@ -13,6 +13,8 @@ Background path searches run against immutable `PathWorldSnapshot` data captured
 
 The path scheduler currently uses one dedicated search thread. Algorithm changes can happen behind the scheduler boundary without changing task assignment callers.
 
+Both assignment bids and the haul path from a picked-up item to its destination stockpile use this scheduler. Workers wait for a revision-validated result instead of running the second haul search during their frame update.
+
 ## Consequences
 
 - Snapshot capture cost still happens on the main thread and should stay visible in logs as `snapshot_ms`.

@@ -7,13 +7,13 @@ const STARTUP_REVEAL_BAND_RADIUS := 1
 const STARTUP_GENERATION_NEIGHBOR_BAND_RADIUS := 1
 const Y_REVEAL_READY_MARGIN_CHUNKS := 1
 
-var owner_node: Node
 var world: World
+var stream_view_rect_provider: Callable
 
 
-func initialize(owner_ref: Node, world_ref: World) -> void:
-	owner_node = owner_ref
+func initialize(world_ref: World, stream_view_rect_provider_ref: Callable) -> void:
 	world = world_ref
+	stream_view_rect_provider = stream_view_rect_provider_ref
 
 
 func update_world(world_ref: World) -> void:
@@ -88,9 +88,9 @@ func chunk_full_top_y(coord: Vector3i) -> int:
 
 
 func get_stream_view_rect_for_y(render_y: int) -> Rect2:
-	if owner_node == null:
+	if not stream_view_rect_provider.is_valid():
 		return Rect2()
-	var value: Variant = owner_node.call("get_stream_view_rect_for_y", render_y)
+	var value: Variant = stream_view_rect_provider.call(render_y)
 	if typeof(value) == TYPE_RECT2:
 		return value
 	return Rect2()

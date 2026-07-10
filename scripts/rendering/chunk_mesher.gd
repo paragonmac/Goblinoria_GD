@@ -14,6 +14,7 @@ const FACE_HALF_SIZE := 0.5
 const ATLAS_COLUMNS := 4
 const ATLAS_ROWS := 4
 const GREEDY_UV2_FLAG := 2.0
+const COVERED_FROM_ABOVE_FLAG := 256.0
 const DEBUG_FACE_BUCKET_COUNT := 16
 #endregion
 
@@ -167,9 +168,11 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 					continue
 
 				var base := Vector3(lx, ly, lz)
-				# Ramps connect two levels. Encode their shader visibility one level lower so
-				# down-stairs remain visible from the destination level.
-				var block_center_y: float = float(wy - 1)
+				# Player stairs remain visible from their destination level. Generated terrain
+				# slopes use their physical level so a level cut removes the whole slope.
+				var block_center_y: float = float(wy)
+				if not World.is_terrain_slope_block_id(block_id):
+					block_center_y -= 1.0
 
 				var above_id := padded_block(padded_blocks, padded_size, lx + 1, ly + 2, lz + 1, air_id)
 				var below_id := padded_block(padded_blocks, padded_size, lx + 1, ly, lz + 1, air_id)
@@ -435,9 +438,11 @@ func _add_greedy_top_bottom_faces(
 				var block_id := padded_block(padded_blocks, padded_size, lx + 1, ly + 1, lz + 1, air_id)
 				if not _is_greedy_cube_block(block_id, air_id, ramp_table):
 					continue
+				var above_id := padded_block(padded_blocks, padded_size, lx + 1, ly + 2, lz + 1, air_id)
+				var covered_from_above := is_solid_id(above_id, solid_table)
 				var neighbor_id: int
 				if is_top:
-					neighbor_id = padded_block(padded_blocks, padded_size, lx + 1, ly + 2, lz + 1, air_id)
+					neighbor_id = above_id
 				else:
 					neighbor_id = padded_block(padded_blocks, padded_size, lx + 1, ly, lz + 1, air_id)
 				var neighbor_occluding := is_solid_id(neighbor_id, solid_table)
@@ -445,11 +450,11 @@ func _add_greedy_top_bottom_faces(
 					var top_flag := 1.0 if neighbor_occluding else 0.0
 					if neighbor_occluding:
 						counts["occluded"] = int(counts["occluded"]) + 1
-					mask[lz * chunk_size + lx] = _make_greedy_cell(block_id, lx, ly, lz, cx, cy, cz, chunk_size, top_flag, not neighbor_occluding)
+					mask[lz * chunk_size + lx] = _make_greedy_cell(block_id, lx, ly, lz, cx, cy, cz, chunk_size, top_flag, not neighbor_occluding, covered_from_above)
 				elif neighbor_occluding:
 					counts["occluded"] = int(counts["occluded"]) + 1
 				else:
-					mask[lz * chunk_size + lx] = _make_greedy_cell(block_id, lx, ly, lz, cx, cy, cz, chunk_size, 0.0, true)
+					mask[lz * chunk_size + lx] = _make_greedy_cell(block_id, lx, ly, lz, cx, cy, cz, chunk_size, 0.0, true, covered_from_above)
 		_merge_counts(counts, _emit_greedy_xz_mask(vertices, normals, colors, uvs, uv2s, mask, chunk_size, ly, is_top, color_table, tile_count, tile_scale))
 	return counts
 
@@ -527,6 +532,8 @@ func _add_greedy_z_side_faces(
 				if lx < chunk_size:
 					var block_id := padded_block(padded_blocks, padded_size, lx + 1, ly + 1, lz + 1, air_id)
 					if _is_greedy_cube_block(block_id, air_id, ramp_table):
+						var above_id := padded_block(padded_blocks, padded_size, lx + 1, ly + 2, lz + 1, air_id)
+						var covered_from_above := is_solid_id(above_id, solid_table)
 						var neighbor_id: int
 						var neighbor_face: Vector3
 						if is_forward:
@@ -538,7 +545,7 @@ func _add_greedy_z_side_faces(
 						if is_face_occluding(neighbor_id, solid_table, ramp_table, neighbor_face):
 							counts["occluded"] = int(counts["occluded"]) + 1
 						else:
-							cell = _make_greedy_cell(block_id, lx, ly, lz, cx, cy, cz, chunk_size, 0.0, true)
+							cell = _make_greedy_cell(block_id, lx, ly, lz, cx, cy, cz, chunk_size, 0.0, true, covered_from_above)
 				if run_start >= 0 and not _same_greedy_cell(run_cell, cell):
 					_emit_greedy_z_face(vertices, normals, colors, uvs, uv2s, run_start, lx - run_start, ly, lz, is_forward, run_cell, color_table, tile_count, tile_scale)
 					counts["visible"] = int(counts["visible"]) + 1
@@ -581,6 +588,8 @@ func _add_greedy_x_side_faces(
 				if lz < chunk_size:
 					var block_id := padded_block(padded_blocks, padded_size, lx + 1, ly + 1, lz + 1, air_id)
 					if _is_greedy_cube_block(block_id, air_id, ramp_table):
+						var above_id := padded_block(padded_blocks, padded_size, lx + 1, ly + 2, lz + 1, air_id)
+						var covered_from_above := is_solid_id(above_id, solid_table)
 						var neighbor_id: int
 						var neighbor_face: Vector3
 						if is_right:
@@ -592,7 +601,7 @@ func _add_greedy_x_side_faces(
 						if is_face_occluding(neighbor_id, solid_table, ramp_table, neighbor_face):
 							counts["occluded"] = int(counts["occluded"]) + 1
 						else:
-							cell = _make_greedy_cell(block_id, lx, ly, lz, cx, cy, cz, chunk_size, 0.0, true)
+							cell = _make_greedy_cell(block_id, lx, ly, lz, cx, cy, cz, chunk_size, 0.0, true, covered_from_above)
 				if run_start >= 0 and not _same_greedy_cell(run_cell, cell):
 					_emit_greedy_x_face(vertices, normals, colors, uvs, uv2s, lx, ly, run_start, lz - run_start, is_right, run_cell, color_table, tile_count, tile_scale)
 					counts["visible"] = int(counts["visible"]) + 1
@@ -609,17 +618,19 @@ func _is_greedy_cube_block(block_id: int, air_id: int, ramp_table: PackedByteArr
 	return block_id != air_id and not is_ramp_id(block_id, ramp_table)
 
 
-func _make_greedy_cell(block_id: int, lx: int, ly: int, lz: int, cx: int, cy: int, cz: int, chunk_size: int, top_flag: float, visible_counted: bool) -> Dictionary:
+func _make_greedy_cell(block_id: int, lx: int, ly: int, lz: int, cx: int, cy: int, cz: int, chunk_size: int, top_flag: float, visible_counted: bool, covered_from_above: bool) -> Dictionary:
 	var top_key := 1 if top_flag > 0.5 else 0
 	var visible_key := 1 if visible_counted else 0
+	var covered_key := 1 if covered_from_above else 0
 	return {
-		"key": "%d:%d:%d" % [block_id, top_key, visible_key],
+		"key": "%d:%d:%d:%d" % [block_id, top_key, visible_key, covered_key],
 		"block_id": block_id,
 		"sample_x": cx * chunk_size + lx,
 		"sample_y": cy * chunk_size + ly,
 		"sample_z": cz * chunk_size + lz,
 		"top_flag": top_flag,
 		"visible_counted": visible_counted,
+		"covered_from_above": covered_from_above,
 	}
 
 
@@ -807,6 +818,8 @@ func _emit_greedy_quad(
 	var shade := face_shade(normal)
 	var shaded := _with_debug_alpha(Color(color.r * shade, color.g * shade, color.b * shade, COLOR_MAX), vertices.size())
 	var encoded_top_flag: float = GREEDY_UV2_FLAG + float(tile_index) * 2.0 + float(cell.get("top_flag", 0.0))
+	if bool(cell.get("covered_from_above", false)):
+		encoded_top_flag += COVERED_FROM_ABOVE_FLAG
 	var uv2 := Vector2(float(wy), encoded_top_flag)
 	vertices.append_array([v1, v3, v2, v1, v4, v3])
 	normals.append_array([normal, normal, normal, normal, normal, normal])
@@ -1136,8 +1149,8 @@ func _add_ramp_side(
 
 
 func _ramp_corner_heights(block_id: int, h: float) -> Dictionary:
-	# Using literal IDs to avoid any const resolution issues
-	match block_id:
+	# Using literal IDs to avoid any const resolution issues.
+	match World.ramp_shape_id(block_id):
 		100:  # RAMP_NORTH
 			return {"nw": h, "ne": h, "se": -h, "sw": -h}
 		101:  # RAMP_SOUTH
@@ -1167,11 +1180,12 @@ func _ramp_corner_heights(block_id: int, h: float) -> Dictionary:
 
 
 func _is_inner_corner_id(block_id: int) -> bool:
-	return block_id == 108 or block_id == 109 or block_id == 110 or block_id == 111
+	var shape_id := World.ramp_shape_id(block_id)
+	return shape_id == 108 or shape_id == 109 or shape_id == 110 or shape_id == 111
 
 
 func _get_inner_corner_low_corner(block_id: int) -> String:
-	match block_id:
+	match World.ramp_shape_id(block_id):
 		108:  # INNER_SOUTHWEST
 			return "sw"
 		109:  # INNER_SOUTHEAST

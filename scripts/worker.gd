@@ -3,9 +3,10 @@ class_name Worker
 ## Worker entity that performs tasks (dig, place, stairs) and wanders when idle.
 
 const WorkerVisualsScript = preload("res://scripts/worker_visuals.gd")
+const TaskWorkPositionRulesScript = preload("res://scripts/task_work_position_rules.gd")
 
 #region Enums
-enum WorkerState {IDLE, MOVING, WORKING, WAITING, FALLING}
+enum WorkerState {IDLE, MOVING, WORKING, WAITING, FALLING, WAITING_FOR_PATH}
 enum MovementIntent {NONE, TASK, WANDER, ASSIST}
 #endregion
 
@@ -132,6 +133,8 @@ func update_worker(dt: float, world, task_queue, pathfinder) -> void:
 			update_working(dt, world, task_queue, pathfinder)
 		WorkerState.WAITING:
 			update_waiting(dt, world, task_queue, pathfinder)
+		WorkerState.WAITING_FOR_PATH:
+			pass
 
 func _update_falling(dt: float, world, task_queue) -> bool:
 	if world == null:
@@ -229,10 +232,11 @@ func _interrupt_current_task(task_queue, world = null) -> void:
 		var task = task_queue.get_task(current_task_id)
 		if task != null and task.status == TaskQueue.TaskStatus.IN_PROGRESS and task.assigned_worker == self:
 			if task.type == TaskQueue.TaskType.HAUL and world != null:
-				_drop_carried_item(world, task)
-			task.status = TaskQueue.TaskStatus.PENDING
-			task.accessibility = TaskQueue.TaskAccessibility.UNKNOWN
-			task.assigned_worker = null
+				_cancel_interrupted_haul(world, task_queue, task)
+			else:
+				task.status = TaskQueue.TaskStatus.PENDING
+				task.accessibility = TaskQueue.TaskAccessibility.UNKNOWN
+				task.assigned_worker = null
 	current_task_id = -1
 	active_work_anim = &""
 	carried_material_id = 0
@@ -452,6 +456,13 @@ func can_work_task(task, world = null, pathfinder = null) -> bool:
 	if task.type == TaskQueue.TaskType.DIG or task.type == TaskQueue.TaskType.PLACE:
 		var worker_pos := get_block_coord()
 		return _can_work_task_from_coord(task.type, worker_pos, task.pos, world, pathfinder)
+	if task.type == TaskQueue.TaskType.STAIRS:
+		return TaskWorkPositionRulesScript.can_work_stairs_from(
+			world,
+			pathfinder,
+			get_block_coord(),
+			task.pos
+		)
 	return true
 #endregion
 
@@ -540,7 +551,7 @@ func update_moving(dt: float, world, task_queue, pathfinder) -> void:
 
 
 func _ramp_center_offset(block_id: int) -> float:
-	match block_id:
+	match World.ramp_shape_id(block_id):
 		World.RAMP_NORTHEAST_ID, World.RAMP_NORTHWEST_ID, World.RAMP_SOUTHEAST_ID, World.RAMP_SOUTHWEST_ID:
 			return 0.25
 		World.INNER_SOUTHWEST_ID, World.INNER_SOUTHEAST_ID, World.INNER_NORTHWEST_ID, World.INNER_NORTHEAST_ID:
@@ -700,7 +711,7 @@ func update_working(dt: float, world, task_queue, pathfinder) -> void:
 				TaskQueue.TaskType.STAIRS:
 					world.set_block(task.pos.x, task.pos.y, task.pos.z, task.material)
 				TaskQueue.TaskType.HAUL:
-					if not _advance_haul_task(world, task_queue, pathfinder, task):
+					if not _advance_haul_task(world, task_queue, task):
 						return
 			task_queue.complete_task(task)
 			_trace(world, "task_completed", task)
@@ -714,7 +725,7 @@ func update_working(dt: float, world, task_queue, pathfinder) -> void:
 #endregion
 
 
-func _advance_haul_task(world, task_queue, pathfinder, task) -> bool:
+func _advance_haul_task(world, task_queue, task) -> bool:
 	var stage := str(task.data.get("stage", "pickup"))
 	var item_id := int(task.data.get("item_id", -1))
 	if stage == "pickup":
@@ -733,52 +744,70 @@ func _advance_haul_task(world, task_queue, pathfinder, task) -> bool:
 			_release_carried_item(world, task)
 			return true
 		var destination: Vector3i = task.data.get("destination", Vector3i.ZERO)
-		var found_path: Array = pathfinder.find_path(world, get_block_coord(), destination, false, false)
-		if found_path.is_empty():
-			_release_carried_item(world, task)
-			task.status = TaskQueue.TaskStatus.PENDING
-			task.accessibility = TaskQueue.TaskAccessibility.UNKNOWN
-			task.assigned_worker = null
-			current_task_id = -1
-			active_work_anim = &""
-			idle_timer = IDLE_PAUSE
-			set_state(WorkerState.IDLE)
-			_trace(world, "haul_deferred", task, "reason=no_path_to_stockpile")
-			return false
-		task.data["stage"] = "deposit"
-		path = found_path.duplicate()
-		path_index = 0
-		movement_intent = MovementIntent.TASK
-		path_segment_validated = false
-		set_target_from_path(world)
+		task.data["stage"] = "delivery_path_pending"
 		active_work_anim = &""
-		set_state(WorkerState.MOVING)
+		set_state(WorkerState.WAITING_FOR_PATH)
 		_trace(world, "item_picked_up", task, "item_id=%d material=%d count=%d destination=%s" % [
 			item_id,
 			carried_material_id,
 			carried_count,
 			destination,
 		])
+		if world.task_manager == null \
+				or not world.task_manager.request_haul_delivery_path(self, task, destination):
+			fail_haul_delivery_path(world, task_queue, task, "reason=path_request_failed")
 		return false
 
 	var destination_stockpile := int(task.data.get("stockpile_id", -1))
 	var destination_pos: Vector3i = task.data.get("destination", get_block_coord())
 	if not world.deposit_item_to_stockpile(item_id, destination_stockpile, destination_pos):
-		_release_carried_item(world, task)
-		task.status = TaskQueue.TaskStatus.PENDING
-		task.accessibility = TaskQueue.TaskAccessibility.UNKNOWN
-		task.assigned_worker = null
-		current_task_id = -1
-		active_work_anim = &""
-		idle_timer = IDLE_PAUSE
-		set_state(WorkerState.IDLE)
-		_trace(world, "haul_deferred", task, "reason=deposit_rejected")
+		fail_haul_delivery_path(world, task_queue, task, "reason=deposit_rejected")
 		return false
 	_trace(world, "item_deposited", task, "item_id=%d stockpile=%d" % [item_id, destination_stockpile])
 	carried_material_id = 0
 	carried_count = 0
 	carried_source_item_id = -1
 	return true
+
+
+func start_haul_delivery_path(
+	world,
+	task,
+	found_path: Array,
+	search_ms: float,
+	snapshot_ms: float,
+	queue_wait_ms: float
+) -> void:
+	if task == null or found_path.is_empty():
+		return
+	task.data["stage"] = "deposit"
+	path = found_path.duplicate()
+	path_index = 0
+	movement_intent = MovementIntent.TASK
+	path_segment_validated = false
+	set_target_from_path(world)
+	set_state(WorkerState.MOVING)
+	_trace(world, "haul_delivery_path_started", task, "path_length=%d snapshot_ms=%.3f queue_wait_ms=%.3f search_ms=%.3f" % [
+		path.size(),
+		snapshot_ms,
+		queue_wait_ms,
+		search_ms,
+	])
+
+
+func fail_haul_delivery_path(world, task_queue, task, details: String) -> void:
+	_trace(world, "haul_deferred", task, details)
+	_drop_carried_item(world, task)
+	if task_queue != null:
+		task_queue.remove_task(task)
+	current_task_id = -1
+	active_work_anim = &""
+	path.clear()
+	path_index = 0
+	path_segment_validated = false
+	movement_intent = MovementIntent.NONE
+	idle_timer = IDLE_PAUSE
+	set_state(WorkerState.IDLE)
 
 
 func _release_carried_item(world, task) -> void:
@@ -793,13 +822,19 @@ func _drop_carried_item(world, task) -> void:
 	if carried_source_item_id < 0 or world == null:
 		return
 	world.item_store.mark_loose(carried_source_item_id, get_block_coord())
-	if task != null:
-		task.pos = get_block_coord()
-		task.data["stage"] = "pickup"
 	_trace(world, "item_dropped", task, "item_id=%d pos=%s" % [carried_source_item_id, get_block_coord()])
 	carried_material_id = 0
 	carried_count = 0
 	carried_source_item_id = -1
+
+
+func _cancel_interrupted_haul(world, task_queue, task) -> void:
+	var item_id := int(task.data.get("item_id", -1))
+	if carried_source_item_id >= 0:
+		_drop_carried_item(world, task)
+	else:
+		world.item_store.release_reservation(item_id, task.id)
+	task_queue.remove_task(task)
 
 
 #region Waiting State
@@ -916,28 +951,8 @@ func find_path_to_work_position(
 
 
 func find_path_to_stairs(world, start: Vector3i, target: Vector3i, pathfinder) -> Array:
-	var candidates: Array[Vector3i] = []
-	for dy in range(0, 3):
-		for dx in range(-1, 2):
-			for dz in range(-1, 2):
-				var x: int = target.x + dx
-				var y: int = target.y + dy
-				var z: int = target.z + dz
-				if pathfinder.is_walkable(world, x, y, z):
-					candidates.append(Vector3i(x, y, z))
-
-	candidates.sort_custom(func(a, b):
-		var da: float = a.distance_squared_to(start)
-		var db: float = b.distance_squared_to(start)
-		return da < db
-	)
-
-	for goal in candidates:
-		var found: Array = pathfinder.find_path(world, start, goal)
-		if found.size() > 0:
-			return found
-
-	return []
+	var candidates := TaskWorkPositionRulesScript.stair_work_positions(world, pathfinder, target)
+	return pathfinder.find_path_to_any(world, start, candidates, WORKER_PATH_SEARCH_MAX_ITERATIONS)
 #endregion
 
 
@@ -963,6 +978,8 @@ func _current_movement_task(task_queue):
 
 func _can_work_task_from_coord(task_type: int, worker_pos: Vector3i, task_pos: Vector3i, world, pathfinder) -> bool:
 	# SEE-ADR-001: Normal DIG/PLACE work is same-level and cardinal-adjacent.
+	if task_type == TaskQueue.TaskType.STAIRS:
+		return TaskWorkPositionRulesScript.can_work_stairs_from(world, pathfinder, worker_pos, task_pos)
 	if task_type != TaskQueue.TaskType.DIG and task_type != TaskQueue.TaskType.PLACE:
 		return true
 	if worker_pos.y != _work_level_for_task(task_type, task_pos, world):

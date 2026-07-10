@@ -867,7 +867,7 @@ func dump_ramp_counts() -> void:
 			continue
 		var blocks: PackedByteArray = chunk.blocks
 		for idx in range(blocks.size()):
-			var block_id: int = blocks[idx]
+			var block_id: int = World.ramp_shape_id(blocks[idx])
 			if not counts.has(block_id):
 				continue
 			counts[block_id] += 1

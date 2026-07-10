@@ -3,6 +3,7 @@ class_name PathSearchScheduler
 ## Owns immutable path jobs, one background search thread, and result handoff.
 
 const PathWorldSnapshotScript = preload("res://scripts/pathfinding/path_world_snapshot.gd")
+const TaskWorkPositionRulesScript = preload("res://scripts/task_work_position_rules.gd")
 const SNAPSHOT_MARGIN_XZ := 32
 const SNAPSHOT_MARGIN_Y := 8
 
@@ -105,6 +106,39 @@ func enqueue_goals(
 	return job_id
 
 
+func enqueue_exact(
+	world,
+	request_id: int,
+	worker: Worker,
+	goal: Vector3i,
+	max_iterations: int,
+	kind: String
+) -> int:
+	var job_id := next_job_id
+	next_job_id += 1
+	var snapshot_started_usec := Time.get_ticks_usec()
+	var start := worker.get_block_coord()
+	var snapshot = PathWorldSnapshotScript.new()
+	snapshot.capture_from_world(world, start, [goal], SNAPSHOT_MARGIN_XZ, SNAPSHOT_MARGIN_Y)
+	var job := {
+		"job_id": job_id,
+		"kind": kind,
+		"request_id": request_id,
+		"auction_id": 0,
+		"task_id": -1,
+		"task_type": -1,
+		"worker_id": worker.worker_id,
+		"start": start,
+		"target": goal,
+		"max_iterations": max_iterations,
+		"snapshot": snapshot,
+		"snapshot_ms": float(Time.get_ticks_usec() - snapshot_started_usec) / 1000.0,
+		"queued_usec": Time.get_ticks_usec(),
+	}
+	_enqueue_job(job)
+	return job_id
+
+
 func _enqueue_job(job: Dictionary) -> void:
 	job_mutex.lock()
 	job_queue.append(job)
@@ -151,8 +185,11 @@ func _run_search(job: Dictionary) -> Dictionary:
 	var task_type: int = int(job["task_type"])
 	var max_iterations: int = int(job["max_iterations"])
 	var path: Array = []
-	if String(job.get("kind", "assignment")) == "goals":
+	var kind := String(job.get("kind", "assignment"))
+	if kind == "goals":
 		path = pathfinder.find_path_to_any(snapshot, start, job.get("goals", []), max_iterations)
+	elif kind == "haul_delivery":
+		path = pathfinder.find_path(snapshot, start, target, false, false, max_iterations)
 	elif task_type == TaskQueue.TaskType.STAIRS:
 		path = _find_stairs_path(snapshot, pathfinder, start, target, max_iterations)
 	elif task_type == TaskQueue.TaskType.HAUL:
@@ -213,11 +250,5 @@ func _find_stairs_path(
 	target: Vector3i,
 	max_iterations: int
 ) -> Array:
-	var candidates: Array[Vector3i] = []
-	for dy in range(0, 3):
-		for dx in range(-1, 2):
-			for dz in range(-1, 2):
-				var candidate := Vector3i(target.x + dx, target.y + dy, target.z + dz)
-				if pathfinder.is_walkable(snapshot, candidate.x, candidate.y, candidate.z):
-					candidates.append(candidate)
+	var candidates := TaskWorkPositionRulesScript.stair_work_positions(snapshot, pathfinder, target)
 	return pathfinder.find_path_to_any(snapshot, start, candidates, max_iterations)

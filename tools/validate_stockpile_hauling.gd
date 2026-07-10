@@ -83,6 +83,39 @@ func _init() -> void:
 		and not completion_queue.has_active_task_at(Vector3i(5, 1, 5), TaskQueue.TaskType.DIG) \
 		and completion_queue.active_count() == 0
 
+	var interrupted_item_pos := Vector3i(4, 1, 4)
+	var interrupted_drop_pos := Vector3i(5, 1, 4)
+	var interrupted_item_id := world.item_store.add_stack(World.BLOCK_ID_DIRT, 1, interrupted_item_pos)
+	var interrupted_task_id := world.task_queue.add_haul_task(
+		interrupted_item_id,
+		interrupted_item_pos,
+		World.BLOCK_ID_DIRT,
+		stockpile_id,
+		Vector3i(1, 1, 0)
+	)
+	var interrupted_task = world.task_queue.get_task(interrupted_task_id)
+	world.item_store.reserve_item(interrupted_item_id, interrupted_task_id)
+	world.item_store.mark_carried(interrupted_item_id)
+	var interrupted_worker := Worker.new()
+	interrupted_worker.position = interrupted_drop_pos
+	interrupted_worker.current_task_id = interrupted_task_id
+	interrupted_worker.carried_material_id = World.BLOCK_ID_DIRT
+	interrupted_worker.carried_count = 1
+	interrupted_worker.carried_source_item_id = interrupted_item_id
+	interrupted_task.status = TaskQueue.TaskStatus.IN_PROGRESS
+	interrupted_task.assigned_worker = interrupted_worker
+	interrupted_worker._interrupt_current_task(world.task_queue, world)
+	var interrupted_index_ok: bool = world.task_queue.get_task(interrupted_task_id) == null \
+		and not world.task_queue.has_active_task_at(interrupted_item_pos, TaskQueue.TaskType.HAUL) \
+		and world.item_store.get_item(interrupted_item_id).get("pos", Vector3i.ZERO) == interrupted_drop_pos
+	world.task_manager.update_task_queue()
+	var replacement_interrupted_task = _haul_task_for_item(world.task_queue, interrupted_item_id)
+	var interrupted_requeue_ok: bool = interrupted_index_ok \
+		and replacement_interrupted_task != null \
+		and replacement_interrupted_task.id != interrupted_task_id \
+		and replacement_interrupted_task.pos == interrupted_drop_pos
+	interrupted_worker.free()
+
 	world.task_manager.shutdown()
 	world.free()
 
@@ -128,6 +161,10 @@ func _init() -> void:
 		return
 	if not task_completion_ok:
 		push_error("Completed task was not removed immediately from queue indexes")
+		quit(1)
+		return
+	if not interrupted_requeue_ok:
+		push_error("Interrupted haul did not replace its task without stale position indexes")
 		quit(1)
 		return
 

@@ -9,6 +9,7 @@ const STREAM_RADIUS_DEFAULT := 12
 const RENDER_RADIUS_DEFAULT := 1
 const RENDER_VIEW_SCALE_DEFAULT := 0.0
 const RENDER_VERTICAL_MARGIN_BLOCKS_DEFAULT := 0
+const RENDER_UPPER_CONNECTION_MARGIN_BLOCKS_DEFAULT := 1
 const STREAM_VERTICAL_MARGIN_BLOCKS_DEFAULT := 20
 const STREAM_LEAD_TIME_DEFAULT := 0.4
 const STREAM_BASE_BUFFER_CHUNKS_DEFAULT := 32
@@ -40,6 +41,7 @@ var stream_radius_chunks: int = STREAM_RADIUS_DEFAULT
 var render_radius_chunks: int = RENDER_RADIUS_DEFAULT
 var render_view_scale: float = RENDER_VIEW_SCALE_DEFAULT
 var render_vertical_margin_blocks: int = RENDER_VERTICAL_MARGIN_BLOCKS_DEFAULT
+var render_upper_connection_margin_blocks: int = RENDER_UPPER_CONNECTION_MARGIN_BLOCKS_DEFAULT
 var stream_vertical_margin_blocks: int = STREAM_VERTICAL_MARGIN_BLOCKS_DEFAULT
 var stream_lead_time: float = STREAM_LEAD_TIME_DEFAULT
 var stream_base_buffer_chunks: int = STREAM_BASE_BUFFER_CHUNKS_DEFAULT
@@ -84,6 +86,12 @@ var last_render_zone_min_cz: int = DUMMY_INT
 var last_render_zone_max_cz: int = -DUMMY_INT
 var last_render_zone_min_cy: int = DUMMY_INT
 var last_render_zone_max_cy: int = -DUMMY_INT
+var current_render_min_cx: int = DUMMY_INT
+var current_render_max_cx: int = -DUMMY_INT
+var current_render_min_cz: int = DUMMY_INT
+var current_render_max_cz: int = -DUMMY_INT
+var current_render_min_cy: int = DUMMY_INT
+var current_render_max_cy: int = -DUMMY_INT
 
 var chunk_build_queue: Array = []
 var chunk_build_set: Dictionary = {}
@@ -152,6 +160,12 @@ func reset_state() -> void:
 	last_render_zone_max_cz = -DUMMY_INT
 	last_render_zone_min_cy = DUMMY_INT
 	last_render_zone_max_cy = -DUMMY_INT
+	current_render_min_cx = DUMMY_INT
+	current_render_max_cx = -DUMMY_INT
+	current_render_min_cz = DUMMY_INT
+	current_render_max_cz = -DUMMY_INT
+	current_render_min_cy = DUMMY_INT
+	current_render_max_cy = -DUMMY_INT
 	last_speed_buffer_chunks = 0
 	last_buffer_chunks = 0
 	throttle_stream_step_accum = 0.0
@@ -258,13 +272,16 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float, camera: Camer
 		return
 
 	var render_margin_blocks: int = maxi(render_vertical_margin_blocks, 0)
-	var min_visible_y: int = center_y - render_margin_blocks
-	var max_visible_y: int = center_y + render_margin_blocks
-	var render_min_cy: int = clampi(int(floor(float(min_visible_y) / float(chunk_size))), min_cy_limit, world_max_cy)
-	var render_max_cy: int = clampi(int(floor(float(max_visible_y) / float(chunk_size))), min_cy_limit, world_max_cy)
-	if render_min_cy > render_max_cy:
-		render_min_cy = min_cy
-		render_max_cy = min_cy
+	var render_y_bounds := compute_render_chunk_y_bounds(
+		center_y,
+		render_margin_blocks,
+		maxi(render_upper_connection_margin_blocks, 0),
+		chunk_size,
+		min_cy_limit,
+		world_max_cy
+	)
+	var render_min_cy: int = render_y_bounds.x
+	var render_max_cy: int = render_y_bounds.y
 
 	# Compute render zone bounds
 	var render_pad: float = float(render_radius_chunks * chunk_size)
@@ -286,6 +303,12 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float, camera: Camer
 	render_max_cx = clampi(render_max_cx, world.WORLD_MIN_CHUNK_X, world.WORLD_MAX_CHUNK_X)
 	render_min_cz = clampi(render_min_cz, world.WORLD_MIN_CHUNK_Z, world.WORLD_MAX_CHUNK_Z)
 	render_max_cz = clampi(render_max_cz, world.WORLD_MIN_CHUNK_Z, world.WORLD_MAX_CHUNK_Z)
+	current_render_min_cx = render_min_cx
+	current_render_max_cx = render_max_cx
+	current_render_min_cz = render_min_cz
+	current_render_max_cz = render_max_cz
+	current_render_min_cy = render_min_cy
+	current_render_max_cy = render_max_cy
 
 	# Compute stream region with velocity lead offset
 	var lead_offset: Vector2 = Vector2(velocity.x, velocity.z) * stream_lead_time
@@ -389,6 +412,33 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float, camera: Camer
 		render_max_y = render_max_cy
 		render_zone_timer = 0.0
 #endregion
+
+
+func refresh_render_zone(camera: Camera3D = null) -> void:
+	if world == null or world.renderer == null:
+		return
+	if current_render_min_cx > current_render_max_cx or current_render_min_cz > current_render_max_cz:
+		return
+	if current_render_min_cy > current_render_max_cy:
+		return
+	world.renderer.update_render_zone(
+		current_render_min_cx,
+		current_render_max_cx,
+		current_render_min_cz,
+		current_render_max_cz,
+		current_render_min_cy,
+		current_render_max_cy,
+		camera
+	)
+	last_render_zone_min_cx = current_render_min_cx
+	last_render_zone_max_cx = current_render_max_cx
+	last_render_zone_min_cz = current_render_min_cz
+	last_render_zone_max_cz = current_render_max_cz
+	last_render_zone_min_cy = current_render_min_cy
+	last_render_zone_max_cy = current_render_max_cy
+	render_min_y = current_render_min_cy
+	render_max_y = current_render_max_cy
+	render_zone_timer = 0.0
 
 
 #region Queue Processing
@@ -516,6 +566,23 @@ func warmup_streaming(view_rect: Rect2, plane_y: float) -> void:
 
 func _chunk_coord_from_world(value: float, chunk_size: int) -> int:
 	return int(floor(value / float(chunk_size)))
+
+
+static func compute_render_chunk_y_bounds(
+	center_y: int,
+	margin_blocks: int,
+	upper_connection_margin_blocks: int,
+	chunk_size: int,
+	min_chunk_y: int,
+	max_chunk_y: int
+) -> Vector2i:
+	var min_visible_y := center_y - maxi(margin_blocks, 0)
+	var max_visible_y := center_y + maxi(margin_blocks, 0) + maxi(upper_connection_margin_blocks, 0)
+	var min_cy := clampi(int(floor(float(min_visible_y) / float(chunk_size))), min_chunk_y, max_chunk_y)
+	var max_cy := clampi(int(floor(float(max_visible_y) / float(chunk_size))), min_chunk_y, max_chunk_y)
+	if min_cy > max_cy:
+		return Vector2i(min_chunk_y, min_chunk_y)
+	return Vector2i(min_cy, max_cy)
 
 
 func build_spiral_offsets_2d(x_range: int, z_range: int) -> Array:

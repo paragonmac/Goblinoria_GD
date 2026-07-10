@@ -193,6 +193,8 @@ func _worker_state_text(state: int) -> String:
 			return "Waiting"
 		Worker.WorkerState.FALLING:
 			return "Falling"
+		Worker.WorkerState.WAITING_FOR_PATH:
+			return "Pathing"
 		_:
 			return "?"
 
@@ -214,6 +216,8 @@ func _worker_task_text(worker: Worker, task_queue: TaskQueue) -> String:
 	var intent := ""
 	if worker.state == Worker.WorkerState.WAITING:
 		intent = "trying "
+	elif worker.state == Worker.WorkerState.WAITING_FOR_PATH:
+		intent = "routing "
 	elif worker.state == Worker.WorkerState.MOVING:
 		intent = "to "
 	return "%s%s @ %d,%d,%d" % [intent, type_text, pos.x, pos.y, pos.z]
@@ -232,6 +236,8 @@ func _worker_status_text(worker: Worker, world: World) -> String:
 				return "Repathing"
 			Worker.WorkerState.FALLING:
 				return "Falling"
+			Worker.WorkerState.WAITING_FOR_PATH:
+				return "Calculating route"
 			_:
 				return "Assigned"
 	var reason := _worker_blocked_reason(worker, world)
@@ -244,6 +250,8 @@ func _worker_status_text(worker: Worker, world: World) -> String:
 			return "Falling"
 		Worker.WorkerState.WAITING:
 			return "Repathing"
+		Worker.WorkerState.WAITING_FOR_PATH:
+			return "Calculating route"
 		_:
 			return "Idle"
 
@@ -294,6 +302,12 @@ func _assigned_worker_detail(worker: Worker, world: World) -> String:
 				pos.x,
 				pos.y,
 				pos.z,
+			]
+		Worker.WorkerState.WAITING_FOR_PATH:
+			return "Calculating haul route to the stockpile from %d,%d,%d." % [
+				worker.get_block_coord().x,
+				worker.get_block_coord().y,
+				worker.get_block_coord().z,
 			]
 		_:
 			return "Assigned to %s @ %d,%d,%d." % [

@@ -28,3 +28,15 @@ id,name,solid,hardness,replaceable,drop,color_r,color_g,color_b
 109,inner_se,1,1,0,0,0.7,0.6,0.35
 110,inner_nw,1,1,0,0,0.7,0.6,0.35
 111,inner_ne,1,1,0,0,0.7,0.6,0.35
+112,terrain_slope_n,1,1,0,0,0.7,0.6,0.35
+113,terrain_slope_s,1,1,0,0,0.7,0.6,0.35
+114,terrain_slope_e,1,1,0,0,0.7,0.6,0.35
+115,terrain_slope_w,1,1,0,0,0.7,0.6,0.35
+116,terrain_slope_ne,1,1,0,0,0.7,0.6,0.35
+117,terrain_slope_nw,1,1,0,0,0.7,0.6,0.35
+118,terrain_slope_se,1,1,0,0,0.7,0.6,0.35
+119,terrain_slope_sw,1,1,0,0,0.7,0.6,0.35
+120,terrain_inner_sw,1,1,0,0,0.7,0.6,0.35
+121,terrain_inner_se,1,1,0,0,0.7,0.6,0.35
+122,terrain_inner_nw,1,1,0,0,0.7,0.6,0.35
+123,terrain_inner_ne,1,1,0,0,0.7,0.6,0.35

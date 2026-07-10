@@ -23,20 +23,7 @@ const HUD_REFRESH_ALL := HUD_REFRESH_STATUS | HUD_REFRESH_INVENTORY | HUD_REFRES
 const SAVE_DIR := "user://saves"
 const SAVE_PATH := "user://saves/world.save"
 const SAVE_META_FILE_NAME := "world_meta.dat"
-const STARTUP_GENERATION_RESULT_BUDGET := 128
-const STARTUP_MESH_RESULT_BUDGET := 128
-const STARTUP_MESH_QUEUE_BUDGET := 128
 const ARENA_COOK_MERGE_BUDGET := 256
-const STARTUP_REVEAL_BAND_RADIUS := 1
-const STARTUP_GENERATION_NEIGHBOR_BAND_RADIUS := 1
-const Y_REVEAL_READY_MARGIN_CHUNKS := 1
-const Y_DIRECTIONAL_PREWARM_BLOCKS_AHEAD := 8
-const Y_DIRECTIONAL_PREWARM_GENERATION_RESULT_BUDGET := 8
-const Y_DIRECTIONAL_PREWARM_MESH_RESULT_BUDGET := 4
-const Y_DIRECTIONAL_PREWARM_MESH_QUEUE_BUDGET := 32
-const BACKGROUND_WARMUP_GENERATION_RESULT_BUDGET := 16
-const BACKGROUND_WARMUP_MESH_RESULT_BUDGET := 8
-const BACKGROUND_WARMUP_MESH_QUEUE_BUDGET := 32
 #endregion
 
 #region User Settings
@@ -112,11 +99,17 @@ func _process(dt: float) -> void:
 	_handle_gameplay_input()
 	_run_frame_updates(dt)
 	if debug_overlay != null:
-		debug_overlay.run_timed("Main.pump_directional_y_prewarm", Callable(self, "_pump_directional_y_prewarm"))
-		debug_overlay.run_timed("Main.pump_background_level_warmup", Callable(self, "_pump_background_level_warmup"))
-	else:
-		_pump_directional_y_prewarm()
-		_pump_background_level_warmup()
+		debug_overlay.run_timed(
+			"Main.pump_directional_y_prewarm",
+			Callable(render_level_controller, "pump_directional_prewarm").bind(world_started)
+		)
+		debug_overlay.run_timed(
+			"Main.pump_background_level_warmup",
+			Callable(render_level_controller, "pump_background_warmup").bind(world_started)
+		)
+	elif render_level_controller != null:
+		render_level_controller.pump_directional_prewarm(world_started)
+		render_level_controller.pump_background_warmup(world_started)
 
 
 func _input(event: InputEvent) -> void:
@@ -137,7 +130,19 @@ func _initialize_controllers() -> void:
 	worker_window_controller = MainWorkerWindowControllerScript.new()
 	loading_controller = MainLoadingControllerScript.new()
 	render_level_controller = MainRenderLevelControllerScript.new()
-	render_level_controller.initialize(self, world)
+	render_level_controller.initialize(
+		world,
+		get_tree(),
+		camera,
+		Callable(self, "get_stream_view_rect_for_y"),
+		{
+			"set_progress": Callable(self, "_set_loading_progress"),
+			"set_status": Callable(self, "_set_loading_status"),
+			"show": Callable(self, "_show_loading_screen"),
+			"hide": Callable(self, "_hide_loading_screen"),
+			"set_world_draw_enabled": Callable(self, "_set_world_draw_enabled"),
+		}
+	)
 #endregion
 
 
@@ -536,9 +541,13 @@ func _finish_world_start_or_load(status_prefix: String, schedule_full_map_warmup
 	_set_render_level_base()
 	if camera_controller != null:
 		camera_controller.setup_camera(world)
-	await _prepare_world_for_reveal(status_prefix)
-	if schedule_full_map_warmup:
-		_schedule_background_level_warmup(_chunk_y_for_render_y(world.top_render_y))
+	if render_level_controller != null:
+		render_level_controller.update_world(world)
+		await render_level_controller.prepare_world_for_reveal(status_prefix)
+	if schedule_full_map_warmup and render_level_controller != null:
+		render_level_controller.schedule_background_warmup(
+			render_level_controller.chunk_y_for_render_y(world.top_render_y)
+		)
 	world_started = true
 	_set_world_draw_enabled(true)
 	_refresh_menu_buttons()
@@ -549,7 +558,8 @@ func _start_new_world_with_loading() -> void:
 	_show_loading_screen("Starting new world...")
 	await get_tree().process_frame
 	world.start_new_world()
-	_reset_level_loading_state()
+	if render_level_controller != null:
+		render_level_controller.reset_loading_state()
 	if generate_full_map_on_startup:
 		await _prepare_full_map_arena_cook("Generating and caching full finite map")
 		var save_ms: float = await _save_generated_world_after_create()
@@ -579,7 +589,8 @@ func _load_world_with_loading() -> void:
 		_set_menu_status("Load failed.")
 		_refresh_menu_buttons()
 		return
-	_reset_level_loading_state()
+	if render_level_controller != null:
+		render_level_controller.reset_loading_state()
 	if generate_full_map_on_startup:
 		await _prepare_full_map_block_data("Loading full finite map")
 	_set_loading_status("Preparing view...")
@@ -589,106 +600,6 @@ func _load_world_with_loading() -> void:
 	_hide_loading_screen()
 	close_menu()
 
-
-func _empty_chunk_target_array() -> Array[Vector3i]:
-	var empty: Array[Vector3i] = []
-	return empty
-
-
-func _empty_int_array() -> Array[int]:
-	var empty: Array[int] = []
-	return empty
-
-func _prepare_world_for_reveal(status_prefix: String) -> void:
-	if render_level_controller == null:
-		return
-	render_level_controller.update_world(world)
-	await render_level_controller.prepare_world_for_reveal(status_prefix)
-
-
-func _ensure_render_y_ready(render_y: int, status_prefix: String) -> Dictionary:
-	if render_level_controller == null:
-		return {}
-	render_level_controller.update_world(world)
-	return await render_level_controller._ensure_render_y_ready(render_y, status_prefix)
-
-
-func _build_reveal_chunk_targets(render_y: int) -> Array[Vector3i]:
-	if render_level_controller == null:
-		return _empty_chunk_target_array()
-	return render_level_controller._build_reveal_chunk_targets(render_y)
-
-
-func _build_reveal_generation_targets(render_y: int) -> Array[Vector3i]:
-	if render_level_controller == null:
-		return _empty_chunk_target_array()
-	return render_level_controller._build_reveal_generation_targets(render_y)
-
-
-func _build_directional_y_prewarm_mesh_targets(render_y: int) -> Array[Vector3i]:
-	if render_level_controller == null:
-		return _empty_chunk_target_array()
-	return render_level_controller._build_directional_y_prewarm_mesh_targets(render_y)
-
-
-func _build_directional_y_prewarm_generation_targets(render_y: int) -> Array[Vector3i]:
-	if render_level_controller == null:
-		return _empty_chunk_target_array()
-	return render_level_controller._build_directional_y_prewarm_generation_targets(render_y)
-
-
-func _build_reveal_mesh_bands(render_y: int) -> Array[int]:
-	if render_level_controller == null:
-		return _empty_int_array()
-	return render_level_controller._build_reveal_mesh_bands(render_y)
-
-
-func _build_generation_bands_for_mesh_bands(mesh_bands: Array[int]) -> Array[int]:
-	if render_level_controller == null:
-		return _empty_int_array()
-	return render_level_controller._build_generation_bands_for_mesh_bands(mesh_bands)
-
-
-func _build_band_range(center_cy: int, radius: int) -> Array[int]:
-	if render_level_controller == null:
-		return _empty_int_array()
-	return render_level_controller._build_band_range(center_cy, radius)
-
-
-func _chunk_y_for_render_y(render_y: int) -> int:
-	if render_level_controller == null:
-		return 0
-	return render_level_controller._chunk_y_for_render_y(render_y)
-
-
-func _build_reveal_chunk_xz_bounds(render_y: int, include_render_buffer: bool) -> Dictionary:
-	if render_level_controller == null:
-		return {}
-	return render_level_controller._build_reveal_chunk_xz_bounds(render_y, include_render_buffer)
-
-
-func _chunk_coord_from_world_value(value: float) -> int:
-	if render_level_controller == null:
-		return 0
-	return render_level_controller._chunk_coord_from_world_value(value)
-
-
-func _build_chunk_targets_for_bands_in_bounds(bands: Array[int], bounds: Dictionary) -> Array[Vector3i]:
-	if render_level_controller == null:
-		return _empty_chunk_target_array()
-	return render_level_controller._build_chunk_targets_for_bands_in_bounds(bands, bounds)
-
-
-func _build_chunk_targets_for_bands(bands: Array[int]) -> Array[Vector3i]:
-	if render_level_controller == null:
-		return _empty_chunk_target_array()
-	return render_level_controller._build_chunk_targets_for_bands(bands)
-
-
-func _build_all_world_chunk_targets() -> Array[Vector3i]:
-	if render_level_controller == null:
-		return _empty_chunk_target_array()
-	return render_level_controller._build_all_world_chunk_targets()
 
 func _prepare_full_map_arena_cook(status_prefix: String) -> void:
 	if world == null or world.arena_cooker == null:
@@ -734,7 +645,7 @@ func _prepare_full_map_arena_cook(status_prefix: String) -> void:
 	await get_tree().process_frame
 
 func _prepare_full_map_block_data(status_prefix: String) -> void:
-	var targets: Array[Vector3i] = _build_all_world_chunk_targets()
+	var targets: Array[Vector3i] = render_level_controller.build_all_world_chunk_targets()
 	var total: int = targets.size()
 	if total <= 0:
 		_set_loading_progress(1, 1)
@@ -742,45 +653,13 @@ func _prepare_full_map_block_data(status_prefix: String) -> void:
 	_set_loading_progress(0, total)
 	_set_loading_status(_format_full_map_loading_status(status_prefix, 0, total))
 	await get_tree().process_frame
-	_request_startup_chunk_generation(targets, false, false)
-	var generated: int = _count_generated_startup_chunks(targets)
+	render_level_controller.request_startup_generation(targets, false, false)
+	var generated: int = render_level_controller.count_generated_chunks(targets)
 	while true:
-		generated = mini(total, generated + _pump_startup_loading_work())
+		generated = mini(total, generated + render_level_controller.pump_startup_loading_work())
 		_set_loading_progress(generated, total)
 		_set_loading_status(_format_full_map_loading_status(status_prefix, generated, total))
 		if generated >= total:
-			break
-		await get_tree().process_frame
-
-
-func _prepare_full_map_mesh_cache(status_prefix: String) -> void:
-	if world == null or world.renderer == null:
-		return
-	var targets: Array[Vector3i] = _build_all_world_chunk_targets()
-	var total: int = targets.size()
-	if total <= 0:
-		_set_loading_progress(1, 1)
-		return
-	var mesh_index: int = 0
-	var cached: int = _count_cached_full_mesh_chunks(targets)
-	_set_loading_progress(cached, total)
-	_set_loading_status(_format_full_map_mesh_cache_status(status_prefix, cached, total))
-	await get_tree().process_frame
-	while cached < total:
-		var queued: int = 0
-		while mesh_index < total and queued < STARTUP_MESH_QUEUE_BUDGET:
-			var coord: Vector3i = targets[mesh_index]
-			mesh_index += 1
-			if _queue_startup_chunk_mesh_cache(coord, false):
-				queued += 1
-		world.renderer.process_mesh_results(STARTUP_MESH_RESULT_BUDGET)
-		cached = _count_cached_full_mesh_chunks(targets)
-		_set_loading_progress(cached, total)
-		_set_loading_status(_format_full_map_mesh_cache_status(status_prefix, cached, total))
-		if cached >= total:
-			break
-		if mesh_index >= total and not world.renderer.has_pending_mesh_work(true):
-			push_warning("Full mesh cache preparation stopped early: %d/%d chunks cached." % [cached, total])
 			break
 		await get_tree().process_frame
 
@@ -800,63 +679,6 @@ func _save_generated_world_after_create() -> float:
 	_set_loading_progress(1, 1)
 	await get_tree().process_frame
 	return elapsed_ms
-
-func _pump_startup_loading_work() -> int:
-	if render_level_controller == null:
-		return 0
-	return render_level_controller._pump_startup_loading_work()
-
-
-func _request_startup_chunk_generation(targets: Array[Vector3i], queue_mesh_on_complete: bool, high_priority: bool = true) -> void:
-	if render_level_controller != null:
-		render_level_controller._request_startup_chunk_generation(targets, queue_mesh_on_complete, high_priority)
-
-
-func _queue_startup_chunk_mesh(coord: Vector3i, high_priority: bool) -> bool:
-	if render_level_controller == null:
-		return false
-	return render_level_controller._queue_startup_chunk_mesh(coord, high_priority)
-
-
-func _queue_startup_chunk_mesh_cache(coord: Vector3i, high_priority: bool) -> bool:
-	if render_level_controller == null:
-		return false
-	return render_level_controller._queue_startup_chunk_mesh_cache(coord, high_priority)
-
-
-func _chunk_full_top_y(coord: Vector3i) -> int:
-	if render_level_controller == null:
-		return coord.y * World.CHUNK_SIZE + World.CHUNK_SIZE - 1
-	return render_level_controller._chunk_full_top_y(coord)
-
-
-func _count_cached_full_mesh_chunks(targets: Array[Vector3i]) -> int:
-	if render_level_controller == null:
-		return 0
-	return render_level_controller._count_cached_full_mesh_chunks(targets)
-
-
-func _count_ready_startup_chunks(targets: Array[Vector3i]) -> int:
-	if render_level_controller == null:
-		return 0
-	return render_level_controller._count_ready_startup_chunks(targets)
-
-
-func _count_generated_startup_chunks(targets: Array[Vector3i]) -> int:
-	if render_level_controller == null:
-		return 0
-	return render_level_controller._count_generated_startup_chunks(targets)
-
-
-func _is_render_y_ready(render_y: int) -> bool:
-	if render_level_controller == null:
-		return false
-	return render_level_controller._is_render_y_ready(render_y)
-
-
-func _mark_prepared_bands(bands: Array[int]) -> void:
-	if render_level_controller != null:
-		render_level_controller._mark_prepared_bands(bands)
 
 func _format_arena_cook_status(status_prefix: String, phase: String, progress: Dictionary) -> String:
 	var done: int = int(progress.get("done", 0))
@@ -971,20 +793,6 @@ func _format_full_map_loading_status(status_prefix: String, generated: int, tota
 	]
 
 
-func _format_full_map_mesh_cache_status(status_prefix: String, cached: int, total: int) -> String:
-	var remaining: int = maxi(total - cached, 0)
-	var percent := 0.0
-	if total > 0:
-		percent = float(cached) / float(total) * 100.0
-	return "%s\nMeshes cached: %d / %d (%.0f%%)\nMesh builds left: %d" % [
-		status_prefix,
-		cached,
-		total,
-		percent,
-		remaining,
-	]
-
-
 func _report_load_metrics(label: String, start_usec: int) -> void:
 	var total_ms: float = float(Time.get_ticks_usec() - start_usec) / 1000.0
 	var save_metrics: Dictionary = {}
@@ -1023,46 +831,6 @@ func _report_load_metrics(label: String, start_usec: int) -> void:
 	print(message)
 	_set_menu_status(message)
 
-
-func _schedule_directional_y_prewarm(delta: int, current_y: int) -> void:
-	if render_level_controller != null:
-		render_level_controller._schedule_directional_y_prewarm(delta, current_y)
-
-
-func _pump_directional_y_prewarm() -> void:
-	if render_level_controller != null:
-		render_level_controller._pump_directional_y_prewarm(world_started)
-
-
-func _clear_directional_y_prewarm() -> void:
-	if render_level_controller != null:
-		render_level_controller._clear_directional_y_prewarm()
-
-
-func _reset_level_loading_state() -> void:
-	if render_level_controller != null:
-		render_level_controller._reset_level_loading_state()
-
-
-func _schedule_background_level_warmup(center_cy: int) -> void:
-	if render_level_controller != null:
-		render_level_controller._schedule_background_level_warmup(center_cy)
-
-
-func _pump_background_level_warmup() -> void:
-	if render_level_controller != null:
-		render_level_controller._pump_background_level_warmup(world_started)
-
-
-func _clear_background_warmup_active() -> void:
-	if render_level_controller != null:
-		render_level_controller._clear_background_warmup_active()
-
-
-func _is_chunk_band_ready(cy: int) -> bool:
-	if render_level_controller == null:
-		return false
-	return render_level_controller._is_chunk_band_ready(cy)
 
 func _refresh_menu_buttons() -> void:
 	if loading_active:
@@ -1113,6 +881,8 @@ func _setup_debug_overlay() -> void:
 		debug_overlay.layer = hud_layer.layer + 1
 	add_child(debug_overlay)
 	debug_overlay.initialize(world, camera)
+	if render_level_controller != null:
+		render_level_controller.set_debug_overlay(debug_overlay)
 #endregion
 
 

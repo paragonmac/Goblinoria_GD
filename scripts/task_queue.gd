@@ -25,7 +25,13 @@ class Task:
 	signal visual_state_changed
 
 	var id: int
-	var pos: Vector3i
+	var _pos_initialized := false
+	var pos: Vector3i:
+		set(value):
+			if _pos_initialized and pos != value:
+				push_error("Queued task positions are immutable; replace the task instead")
+				return
+			pos = value
 	var type: int
 	var status: int:
 		set(value):
@@ -63,6 +69,7 @@ class Task:
 	func _init(task_id: int, task_pos: Vector3i, task_type: int, task_material: int) -> void:
 		id = task_id
 		pos = task_pos
+		_pos_initialized = true
 		type = task_type
 		status = TaskStatus.PENDING
 		accessibility = TaskAccessibility.UNKNOWN

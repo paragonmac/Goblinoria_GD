@@ -49,8 +49,33 @@ func get_cache() -> Dictionary:
 	return bulk_chunk_blocks
 
 
+func replace_chunk_blocks(coord: Vector3i, blocks: PackedByteArray) -> void:
+	if blocks.size() != World.CHUNK_VOLUME:
+		return
+	bulk_chunk_blocks[coord] = blocks.duplicate()
+
+
 func get_last_load_stats() -> Dictionary:
 	return last_load_stats.duplicate(true)
+
+
+func snapshot_state() -> Dictionary:
+	var cache: Dictionary = {}
+	for coord in bulk_chunk_blocks.keys():
+		var blocks_value: Variant = bulk_chunk_blocks[coord]
+		if typeof(blocks_value) == TYPE_PACKED_BYTE_ARRAY:
+			cache[coord] = PackedByteArray(blocks_value).duplicate()
+	return {
+		"cache": cache,
+		"loaded": bulk_chunks_loaded,
+		"stats": last_load_stats.duplicate(true),
+	}
+
+
+func restore_state(snapshot: Dictionary) -> void:
+	bulk_chunk_blocks = snapshot.get("cache", {}).duplicate(true)
+	bulk_chunks_loaded = bool(snapshot.get("loaded", false))
+	last_load_stats = snapshot.get("stats", {}).duplicate(true)
 
 
 func remember_chunk(world: World, coord: Vector3i, chunk: ChunkData) -> void:
@@ -109,7 +134,12 @@ func save_bulk_chunks(world: World, world_dir: String, block_table_hash: int) ->
 	return true
 
 
-func load_bulk_chunks(world: World, world_dir: String, block_table_hash: int) -> bool:
+func load_bulk_chunks(
+	world: World,
+	world_dir: String,
+	block_table_hash: int,
+	allow_legacy_block_table_hash: bool = false
+) -> bool:
 	clear_cache()
 	var path := world_dir.path_join(BULK_CHUNKS_FILE_NAME)
 	if not FileAccess.file_exists(path):
@@ -139,11 +169,12 @@ func load_bulk_chunks(world: World, world_dir: String, block_table_hash: int) ->
 		push_warning("World load failed: bulk map chunk volume mismatch")
 		return false
 	var stored_block_hash: int = file.get_32()
-	if stored_block_hash != block_table_hash:
+	if stored_block_hash != block_table_hash and not allow_legacy_block_table_hash:
 		push_warning("World load failed: bulk map block table hash mismatch")
 		return false
 	var count: int = file.get_32()
 	var stats := _new_bulk_load_stats(bulk_version, count)
+	stats["legacy_block_table"] = stored_block_hash != block_table_hash
 	for _i in range(count):
 		var entry := _read_bulk_chunk_entry(file, bulk_version, chunk_volume)
 		if entry.is_empty():

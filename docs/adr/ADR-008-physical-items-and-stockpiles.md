@@ -17,6 +17,8 @@ Each stockpile cell holds one material type with a base capacity of 16 items. De
 
 The global `world.inventory` dictionary is now a derived compatibility view over stockpiled item stacks. Placement/build checks consume from stored item stacks through the inventory bridge; construction hauling is a later feature.
 
+Haul assignment and delivery paths run through the threaded path scheduler. If carrying is interrupted, the item becomes loose at the worker position, the old haul task is removed, and dirty-driven hauling creates a new task at that position. Queued task coordinates are immutable so task indexes remain coherent.
+
 ## Consequences
 
 - Mining creates visible loose items instead of invisible global counts.
@@ -33,3 +35,4 @@ The global `world.inventory` dictionary is now a derived compatibility view over
 - Code pointer: `scripts/task_manager.gd`, `rebuild_haul_tasks()`.
 - Code pointer: `scripts/worker.gd`, `_advance_haul_task()`.
 - Contract: `tools/validate_stockpile_hauling.gd`.
+- Contract: `tools/validate_worker_path_safety.gd` covers threaded haul delivery paths.
