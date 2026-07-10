@@ -36,11 +36,11 @@ Full-map arena cook is two-stage:
 
 ## Layered World Generation
 
-Full-map new-world creation uses `WorldGenerationPipeline` through `WorldGenerator` and `WorldArenaCooker`. The pipeline builds finite-world intermediate maps in world coordinates before baking final block IDs into normal chunk buffers. Current maps are elevation, moisture, temperature, biome, soil/stone region, tree density, and feature reservations.
+Full-map new-world creation uses `WorldGenerationPipeline` through `WorldGenerator` and `WorldArenaCooker`. The pipeline builds finite-world intermediate maps in world coordinates before baking final block IDs into normal chunk buffers. Current maps are elevation, moisture, temperature, biome, soil/stone region, and feature reservations.
 
-Generation pass order is serial and explicit: climate maps, biome, geology, solid terrain fill, caves, static underground water, ores, surface blocks, ramps, trees, flowers, cleanup, then chunk baking. The result is still ordinary `ChunkData.blocks`; intermediate maps are not saved yet. Persistent saves continue to store final block data and optional raw mesh-cache entries only.
+Generation pass order is serial and explicit: climate maps, biome, geology, solid terrain fill, caves, static underground water, ores, surface blocks, ramps, flowers, cleanup, then chunk baking. Trees are no longer generated as blocks; future tree visuals should be placed as 3D assets. The result is still ordinary `ChunkData.blocks`; intermediate maps are not saved yet. Persistent saves continue to store final block data and optional raw mesh-cache entries only.
 
-`WorldGenerationPipeline` owns configuration, pass ordering and timing, climate and biome maps, generation statistics, and final chunk baking. Deterministic generation details are split by responsibility: `WorldTerrainHeightSampler` samples terrain, `WorldRampRules` selects ramp IDs, `WorldCaveGenerator` carves caves, `WorldTerrainMaterialGenerator` applies geology and block materials, and `WorldVegetationGenerator` places trees and flowers. Runtime fallback chunks use `WorldTerrainChunkBuilder` and `WorldTerrainRampBuilder`; `WorldGenerationJobQueue` owns asynchronous queue state.
+`WorldGenerationPipeline` owns configuration, pass ordering and timing, climate and biome maps, generation statistics, and final chunk baking. Deterministic generation details are split by responsibility: `WorldTerrainHeightSampler` samples terrain, `WorldRampRules` selects ramp IDs, `WorldCaveGenerator` carves caves, `WorldTerrainMaterialGenerator` applies geology and block materials, and `WorldVegetationGenerator` places flowers. Runtime fallback chunks use `WorldTerrainChunkBuilder` and `WorldTerrainRampBuilder`; `WorldGenerationJobQueue` owns asynchronous queue state.
 
 The richer layered pipeline is used for the full-map arena cook. Runtime on-demand chunk generation remains compatible as a fallback path for non-full-map startup modes.
 ## Load Flow
@@ -106,6 +106,10 @@ Mining creates physical item stacks through `BlockDropTable` and `ItemStackStore
 Loose stacks use camera-facing cells from `assets/textures/fantasy_resource_icons_6x6_real_alpha.png`; materials without a mapped cell retain the colored-box fallback.
 
 Haul-task reconstruction is dirty-driven: item and stockpile mutations request one coalesced rebuild. Completed tasks are removed from queue indexes immediately, so neither operation requires an unconditional full scan each frame.
+
+Task accessibility is also dirty-driven. New or locally invalidated tasks enter a budgeted accessibility queue. Tasks without a work position wait for nearby terrain mutation; tasks rejected by all worker paths use individual 2.5-second retry deadlines managed by one timer.
+
+Persistent task, item, and stockpile overlays have independent dirty flags. They synchronize after relevant state changes or render-level changes; assigned pulse animation remains shader-driven. Drag and hover previews remain input-driven.
 
 Ordinary DIG work is horizontal-only: the worker and target block must share a Y level. Downward excavation requires the stairs workflow to establish controlled access to the next level.
 

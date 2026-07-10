@@ -17,13 +17,17 @@ func build_planes(camera: Camera3D, near_sample_offset: float, near_sample_min: 
 	return planes
 
 
-func is_chunk_in_view(planes: Array, coord: Vector3i, chunk_size: int) -> bool:
+func is_chunk_in_view(planes: Array, coord: Vector3i, chunk_size: int, padding: float = 0.0) -> bool:
 	var min_corner := Vector3(
 		coord.x * chunk_size,
 		coord.y * chunk_size,
 		coord.z * chunk_size
 	)
 	var max_corner := min_corner + Vector3(chunk_size, chunk_size, chunk_size)
+	if padding > 0.0:
+		var pad := Vector3(padding, padding, padding)
+		min_corner -= pad
+		max_corner += pad
 	for entry in planes:
 		var p: Plane = entry["plane"]
 		var inside_positive: bool = entry["inside_positive"]
@@ -45,4 +49,3 @@ func is_chunk_in_view(planes: Array, coord: Vector3i, chunk_size: int) -> bool:
 			if p.distance_to(v) > 0.0:
 				return false
 	return true
-

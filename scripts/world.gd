@@ -7,6 +7,12 @@ signal stockpiles_changed
 signal player_mode_changed(mode: int)
 signal render_level_changed(level: int)
 
+const OVERLAY_REFRESH_TASKS := 1
+const OVERLAY_REFRESH_ITEMS := 2
+const OVERLAY_REFRESH_STOCKPILES := 4
+const OVERLAY_REFRESH_ALL := \
+	OVERLAY_REFRESH_TASKS | OVERLAY_REFRESH_ITEMS | OVERLAY_REFRESH_STOCKPILES
+
 #region Preloads
 const BlockRegistryScript = preload("res://scripts/block_registry.gd")
 const ChunkDataScript = preload("res://scripts/chunk_data.gd")
@@ -192,6 +198,12 @@ var block_drop_table = BlockDropTableScript.new()
 var item_store = ItemStackStoreScript.new()
 var stockpile_store = StockpileStoreScript.new()
 var drop_rng := RandomNumberGenerator.new()
+var overlay_refresh_mask := OVERLAY_REFRESH_ALL
+var overlay_refresh_counts := {
+	"tasks": 0,
+	"items": 0,
+	"stockpiles": 0,
+}
 #endregion
 
 #region Ramp Lookup Table
@@ -206,6 +218,9 @@ func _ready() -> void:
 	block_drop_table.load_from_csv(BLOCK_DROPS_PATH)
 	drop_rng.seed = Time.get_ticks_usec()
 	stockpile_store.haul_state_changed.connect(_on_stockpile_state_changed)
+	task_queue.task_visual_state_changed.connect(_on_task_visual_state_changed)
+	item_store.visual_state_changed.connect(_on_item_visual_state_changed)
+	stockpile_store.visual_state_changed.connect(_on_stockpile_visual_state_changed)
 	task_manager = TaskManager.new(self, task_queue)
 	generator = WorldGeneratorScript.new(self)
 	save_load = WorldSaveLoadScript.new(self)
@@ -227,6 +242,7 @@ func init_world(seed_world_flag: bool = true) -> void:
 	clear_items_and_stockpiles()
 	if renderer != null:
 		renderer.clear_chunks()
+	request_overlay_refresh(OVERLAY_REFRESH_ALL)
 	chunks.clear()
 	chunk_access_tick = 0
 	sea_level = max(world_size_y - SEA_LEVEL_DEPTH, SEA_LEVEL_MIN)
@@ -600,7 +616,7 @@ func update_world(dt: float) -> void:
 	update_task_assignments()
 	update_workers(dt)
 	update_task_queue()
-	update_blocked_tasks(dt)
+	update_task_accessibility()
 	update_reassign_tasks(dt)
 	update_task_overlays_phase()
 
@@ -629,17 +645,40 @@ func update_task_queue() -> void:
 
 
 func update_task_overlays_phase() -> void:
-	if renderer == null:
+	# SEE-ADR-010: Persistent overlay sections synchronize only after state changes.
+	if renderer == null or overlay_refresh_mask == 0:
 		return
-	var blocked: Array = []
-	if task_manager != null:
-		blocked = task_manager.blocked_tasks
-	renderer.update_task_overlays(task_queue.tasks, blocked)
-	renderer.update_item_and_stockpile_overlays(item_store.items, stockpile_store.stockpiles)
+	var refresh_mask := overlay_refresh_mask
+	overlay_refresh_mask = 0
+	if (refresh_mask & OVERLAY_REFRESH_TASKS) != 0:
+		renderer.update_task_overlays(task_queue.tasks)
+		overlay_refresh_counts["tasks"] = int(overlay_refresh_counts["tasks"]) + 1
+	if (refresh_mask & OVERLAY_REFRESH_ITEMS) != 0:
+		renderer.update_item_overlays(item_store.items)
+		overlay_refresh_counts["items"] = int(overlay_refresh_counts["items"]) + 1
+	if (refresh_mask & OVERLAY_REFRESH_STOCKPILES) != 0:
+		renderer.update_stockpile_overlays(stockpile_store.stockpiles)
+		overlay_refresh_counts["stockpiles"] = int(overlay_refresh_counts["stockpiles"]) + 1
 
-func update_blocked_tasks(dt: float) -> void:
+
+func request_overlay_refresh(mask: int) -> void:
+	overlay_refresh_mask |= mask
+
+
+func _on_task_visual_state_changed(_task_id: int) -> void:
+	request_overlay_refresh(OVERLAY_REFRESH_TASKS)
+
+
+func _on_item_visual_state_changed(_reason: String) -> void:
+	request_overlay_refresh(OVERLAY_REFRESH_ITEMS)
+
+
+func _on_stockpile_visual_state_changed(_reason: String) -> void:
+	request_overlay_refresh(OVERLAY_REFRESH_STOCKPILES)
+
+func update_task_accessibility() -> void:
 	if task_manager != null:
-		task_manager.update_blocked_tasks(dt)
+		task_manager.update_task_accessibility()
 
 
 func update_reassign_tasks(dt: float) -> void:
@@ -910,9 +949,9 @@ func reset_streaming_state() -> void:
 		streaming.reset_state()
 
 
-func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
+func update_streaming(view_rect: Rect2, plane_y: float, dt: float, camera: Camera3D = null) -> void:
 	if streaming != null:
-		streaming.update_streaming(view_rect, plane_y, dt)
+		streaming.update_streaming(view_rect, plane_y, dt, camera)
 	if renderer != null:
 		var center_x: float = view_rect.position.x + view_rect.size.x * 0.5
 		var center_z: float = view_rect.position.y + view_rect.size.y * 0.5
@@ -981,6 +1020,8 @@ func spawn_initial_workers() -> void:
 		add_child(worker)
 		workers.append(worker)
 		trace_worker_event(worker, "spawned")
+	if task_manager != null:
+		task_manager.notify_worker_availability_changed()
 
 
 func find_surface_y(x: int, z: int) -> int:
@@ -1003,6 +1044,7 @@ func _start_worker_trace_for_spawned_workers() -> void:
 	if worker_trace == null:
 		return
 	worker_trace.start(workers)
+	request_overlay_refresh(OVERLAY_REFRESH_TASKS)
 
 
 func clear_tasks() -> void:
@@ -1010,11 +1052,8 @@ func clear_tasks() -> void:
 	if task_queue != null:
 		task_queue.clear()
 	if task_manager != null:
-		task_manager.blocked_tasks.clear()
-		task_manager.blocked_recheck_timer = task_manager.BLOCKED_RECHECK_INTERVAL
 		task_manager.reassign_timer = task_manager.REASSIGN_INTERVAL
-		task_manager.accessibility_recheck_index = 0
-		task_manager.accessibility_worker_index = 0
+		task_manager.reset_accessibility_state()
 		task_manager.reset_assignment_auction()
 		task_manager.request_haul_rebuild("tasks_cleared")
 
@@ -1030,8 +1069,11 @@ func clear_workers() -> void:
 func toggle_worker_trace() -> bool:
 	if worker_trace.enabled:
 		worker_trace.stop()
+		request_overlay_refresh(OVERLAY_REFRESH_TASKS)
 		return false
-	return worker_trace.start(workers)
+	var started := worker_trace.start(workers)
+	request_overlay_refresh(OVERLAY_REFRESH_TASKS)
+	return started
 
 
 func trace_worker_event(worker: Worker, event: String, task = null, details: String = "") -> void:
@@ -1096,6 +1138,7 @@ func set_top_render_y(new_y: int) -> void:
 	if renderer != null:
 		renderer.set_top_render_y(top_render_y)
 		renderer.clear_render_height_queue()
+	request_overlay_refresh(OVERLAY_REFRESH_ALL)
 	render_level_changed.emit(top_render_y)
 
 

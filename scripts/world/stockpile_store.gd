@@ -2,6 +2,7 @@ extends RefCounted
 class_name StockpileStore
 
 signal haul_state_changed(reason: String)
+signal visual_state_changed(reason: String)
 
 const CATEGORY_SOIL := "soil"
 const CATEGORY_STONE := "stone"
@@ -33,6 +34,7 @@ func clear() -> void:
 	next_id = 1
 	if had_stockpiles:
 		haul_state_changed.emit("stockpiles_cleared")
+		visual_state_changed.emit("stockpiles_cleared")
 
 
 func create_stockpile(cell_list: Array[Vector3i]) -> int:
@@ -49,6 +51,7 @@ func create_stockpile(cell_list: Array[Vector3i]) -> int:
 	}
 	add_cells(stockpile_id, cell_list)
 	haul_state_changed.emit("stockpile_created")
+	visual_state_changed.emit("stockpile_created")
 	return stockpile_id
 
 
@@ -70,6 +73,7 @@ func restore_stockpile(stockpile: Dictionary) -> void:
 			restored_cells.append(cell)
 	add_cells(stockpile_id, restored_cells)
 	haul_state_changed.emit("stockpile_restored")
+	visual_state_changed.emit("stockpile_restored")
 
 
 func add_cells(stockpile_id: int, cell_list: Array[Vector3i]) -> void:
@@ -88,6 +92,7 @@ func add_cells(stockpile_id: int, cell_list: Array[Vector3i]) -> void:
 	stockpiles[stockpile_id] = stockpile
 	if added:
 		haul_state_changed.emit("stockpile_cells_added")
+		visual_state_changed.emit("stockpile_cells_added")
 
 
 func remove_cells(cell_list: Array[Vector3i]) -> Array[int]:
@@ -111,6 +116,7 @@ func remove_cells(cell_list: Array[Vector3i]) -> Array[int]:
 		ids.append(int(stockpile_id))
 	if not ids.is_empty():
 		haul_state_changed.emit("stockpile_cells_removed")
+		visual_state_changed.emit("stockpile_cells_removed")
 	return ids
 
 

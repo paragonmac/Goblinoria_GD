@@ -25,7 +25,8 @@ const MESH_RESULT_BACKLOG_MAX := 32
 const MESH_RESULT_BACKLOG_SLEEP_USEC := 500
 const MESH_CACHE_RADIUS := 0
 const MESH_PREFETCH_BELOW_ONLY := true
-const MESHER_CACHE_VERSION := 3
+const MESHER_CACHE_VERSION := 5
+const RENDER_FRUSTUM_PADDING_CHUNKS := 1.0
 #endregion
 
 #region State
@@ -797,16 +798,30 @@ func _hide_chunk_mesh(coord: Vector3i) -> void:
 
 
 #region Render Zone
-func update_render_zone(min_cx: int, max_cx: int, min_cz: int, max_cz: int, min_cy: int, max_cy: int) -> void:
+func update_render_zone(
+	min_cx: int,
+	max_cx: int,
+	min_cz: int,
+	max_cz: int,
+	min_cy: int,
+	max_cy: int,
+	camera: Camera3D = null
+) -> void:
 	var new_visible: Dictionary = {}
+	var frustum_planes: Array = []
+	var frustum_padding := RENDER_FRUSTUM_PADDING_CHUNKS * float(World.CHUNK_SIZE)
+	if camera != null:
+		frustum_planes = frustum_culler.build_planes(camera, NEAR_SAMPLE_OFFSET, NEAR_SAMPLE_MIN)
 	if min_cx <= max_cx and min_cz <= max_cz and min_cy <= max_cy:
 		for cy: int in range(min_cy, max_cy + 1):
 			for cx: int in range(min_cx, max_cx + 1):
 				for cz: int in range(min_cz, max_cz + 1):
 					var coord := Vector3i(cx, cy, cz)
+					if camera != null and not frustum_culler.is_chunk_in_view(frustum_planes, coord, World.CHUNK_SIZE, frustum_padding):
+						continue
 					new_visible[coord] = true
 					_set_chunk_visibility(coord, true)
-	for key in render_zone_visible.keys():
+	for key in chunk_cache.get_keys():
 		if not new_visible.has(key):
 			_set_chunk_visibility(key, false)
 	render_zone_visible = new_visible
@@ -849,6 +864,10 @@ func set_min_render_y(value: int) -> void:
 
 func toggle_debug_normals() -> void:
 	material_helper.toggle_debug_normals()
+
+
+func set_poly_debug_enabled(enabled: bool) -> void:
+	material_helper.set_poly_debug_enabled(enabled)
 #endregion
 
 
@@ -908,21 +927,48 @@ func get_mesh_work_stats() -> Dictionary:
 
 
 func get_camera_tris_rendered(camera: Camera3D) -> Dictionary:
-	return render_stats.get_camera_tris_rendered(camera, frustum_culler, World.CHUNK_SIZE, NEAR_SAMPLE_OFFSET, NEAR_SAMPLE_MIN)
+	if camera == null:
+		return {"rendered": 0, "total": 0, "percent": 0.0}
+	var planes: Array = frustum_culler.build_planes(camera, NEAR_SAMPLE_OFFSET, NEAR_SAMPLE_MIN)
+	var rendered_faces := 0
+	var total_faces := 0
+	for key in chunk_cache.get_keys():
+		var coord: Vector3i = key
+		var mesh_instance: MeshInstance3D = chunk_cache.get_chunk(coord)
+		if mesh_instance == null or not mesh_instance.visible or mesh_instance.mesh == null:
+			continue
+		var faces: int = render_stats.get_chunk_visible_faces(coord)
+		if faces <= 0:
+			continue
+		total_faces += faces
+		if frustum_culler.is_chunk_in_view(planes, coord, World.CHUNK_SIZE):
+			rendered_faces += faces
+	var rendered_tris: int = rendered_faces * 2
+	var total_tris: int = total_faces * 2
+	var percent := 0.0
+	if total_tris > 0:
+		percent = float(rendered_tris) / float(total_tris) * 100.0
+	return {"rendered": rendered_tris, "total": total_tris, "percent": percent}
 #endregion
 
 
 #region Overlay Management
-func update_task_overlays(tasks: Array, blocked_tasks: Array) -> void:
+func update_task_overlays(tasks: Array) -> void:
 	if overlay_renderer == null:
 		return
-	overlay_renderer.update_task_overlays(tasks, blocked_tasks)
+	overlay_renderer.update_task_overlays(tasks)
 
 
-func update_item_and_stockpile_overlays(items: Dictionary, stockpiles: Dictionary) -> void:
+func update_item_overlays(items: Dictionary) -> void:
 	if overlay_renderer == null:
 		return
-	overlay_renderer.update_item_and_stockpile_overlays(items, stockpiles)
+	overlay_renderer.update_item_overlays(items)
+
+
+func update_stockpile_overlays(stockpiles: Dictionary) -> void:
+	if overlay_renderer == null:
+		return
+	overlay_renderer.update_stockpile_overlays(stockpiles)
 
 
 func set_drag_preview(rect: Dictionary, mode: int) -> void:

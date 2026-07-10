@@ -14,6 +14,7 @@ const FACE_HALF_SIZE := 0.5
 const ATLAS_COLUMNS := 4
 const ATLAS_ROWS := 4
 const GREEDY_UV2_FLAG := 2.0
+const DEBUG_FACE_BUCKET_COUNT := 16
 #endregion
 
 #region State
@@ -166,7 +167,9 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 					continue
 
 				var base := Vector3(lx, ly, lz)
-				var block_center_y: float = float(wy)
+				# Ramps connect two levels. Encode their shader visibility one level lower so
+				# down-stairs remain visible from the destination level.
+				var block_center_y: float = float(wy - 1)
 
 				var above_id := padded_block(padded_blocks, padded_size, lx + 1, ly + 2, lz + 1, air_id)
 				var below_id := padded_block(padded_blocks, padded_size, lx + 1, ly, lz + 1, air_id)
@@ -626,6 +629,15 @@ func _same_greedy_cell(a: Variant, b: Variant) -> bool:
 	return String(a.get("key", "")) == String(b.get("key", ""))
 
 
+func _debug_face_alpha(face_start_vertex: int) -> float:
+	var bucket := int(face_start_vertex / 3) % DEBUG_FACE_BUCKET_COUNT
+	return (float(bucket) + 0.5) / float(DEBUG_FACE_BUCKET_COUNT)
+
+
+func _with_debug_alpha(color: Color, face_start_vertex: int) -> Color:
+	return Color(color.r, color.g, color.b, _debug_face_alpha(face_start_vertex))
+
+
 func _emit_greedy_xz_face(
 	vertices: PackedVector3Array,
 	normals: PackedVector3Array,
@@ -793,7 +805,7 @@ func _emit_greedy_quad(
 	var color := block_color_from_table(color_table, block_id, wx, wy, wz)
 	var tile_index := _tile_index_for_id(block_id, tile_count)
 	var shade := face_shade(normal)
-	var shaded := Color(color.r * shade, color.g * shade, color.b * shade, COLOR_MAX)
+	var shaded := _with_debug_alpha(Color(color.r * shade, color.g * shade, color.b * shade, COLOR_MAX), vertices.size())
 	var encoded_top_flag: float = GREEDY_UV2_FLAG + float(tile_index) * 2.0 + float(cell.get("top_flag", 0.0))
 	var uv2 := Vector2(float(wy), encoded_top_flag)
 	vertices.append_array([v1, v3, v2, v1, v4, v3])
@@ -857,7 +869,7 @@ func add_face(
 		v4 = base + Vector3(-h, h, -h)
 
 	var shade := face_shade(normal)
-	var shaded := Color(color.r * shade, color.g * shade, color.b * shade, COLOR_MAX)
+	var shaded := _with_debug_alpha(Color(color.r * shade, color.g * shade, color.b * shade, COLOR_MAX), vertices.size())
 	var uv2 := Vector2(block_center_y, top_flag)
 	var uv1 := _atlas_uv(_planar_uv(v1, base, normal), tile_offset, tile_scale)
 	var uv2_local := _atlas_uv(_planar_uv(v2, base, normal), tile_offset, tile_scale)
@@ -897,7 +909,7 @@ func add_quad_with_normal(
 	if flip_winding:
 		reverse = not reverse
 	var shade := face_shade(normal)
-	var shaded := Color(color.r * shade, color.g * shade, color.b * shade, COLOR_MAX)
+	var shaded := _with_debug_alpha(Color(color.r * shade, color.g * shade, color.b * shade, COLOR_MAX), vertices.size())
 	var uv2 := Vector2(block_center_y, top_flag)
 	var uv1 := _atlas_uv(_planar_uv(v1, base, expected_normal), tile_offset, tile_scale)
 	var uv2_local := _atlas_uv(_planar_uv(v2, base, expected_normal), tile_offset, tile_scale)
@@ -944,7 +956,7 @@ func add_tri_with_normal(
 		v2 = v3
 		v3 = swap
 	var shade := face_shade(normal)
-	var shaded := Color(color.r * shade, color.g * shade, color.b * shade, COLOR_MAX)
+	var shaded := _with_debug_alpha(Color(color.r * shade, color.g * shade, color.b * shade, COLOR_MAX), vertices.size())
 	var uv2 := Vector2(block_center_y, top_flag)
 	var uv1 := _atlas_uv(_planar_uv(v1, base, expected_normal), tile_offset, tile_scale)
 	var uv2_local := _atlas_uv(_planar_uv(v2, base, expected_normal), tile_offset, tile_scale)

@@ -8,14 +8,9 @@ const PathSearchSchedulerScript = preload("res://scripts/pathfinding/path_search
 var world: World
 var task_queue: TaskQueue
 var path_search_scheduler = PathSearchSchedulerScript.new()
-var blocked_tasks: Array = []
-var blocked_recheck_timer := 1.0
 var reassign_timer := 1.0
-var accessibility_recheck_index: int = 0
-var accessibility_worker_index: int = 0
 const REASSIGN_INTERVAL := 1.0
-const BLOCKED_RECHECK_INTERVAL := 0.1
-const BLOCKED_RECHECK_BUDGET := 8
+const ACCESSIBILITY_CHECK_BUDGET := 8
 const ACCESSIBILITY_INVALIDATION_RADIUS_XZ := 1
 const ACCESSIBILITY_INVALIDATION_RADIUS_Y := 1
 const ASSIGNMENT_TASK_TYPES := [
@@ -42,6 +37,11 @@ var haul_rebuild_requested := true
 var haul_rebuild_in_progress := false
 var haul_rebuild_reasons: Dictionary = {"initial": true}
 var haul_rebuild_count := 0
+var pending_accessibility_ids: Array[int] = []
+var pending_accessibility_set: Dictionary = {}
+var path_retry_due_by_task: Dictionary = {}
+var path_retry_timer: Timer
+var accessibility_check_count := 0
 #endregion
 
 
@@ -52,11 +52,51 @@ func _init(world_ref: World, queue_ref: TaskQueue) -> void:
 	if world != null:
 		world.item_store.haul_state_changed.connect(request_haul_rebuild)
 		world.stockpile_store.haul_state_changed.connect(request_haul_rebuild)
+	task_queue.task_added.connect(_on_task_added)
+	task_queue.task_removed.connect(_on_task_removed)
+	task_queue.task_visual_state_changed.connect(_on_task_visual_state_changed)
+	for task in task_queue.tasks:
+		request_accessibility_check(task.id, "manager_initialized")
+	_setup_path_retry_timer()
 	path_search_scheduler.start()
 
 
 func shutdown() -> void:
 	path_search_scheduler.stop()
+	if path_retry_timer != null and is_instance_valid(path_retry_timer):
+		path_retry_timer.stop()
+		path_retry_timer.queue_free()
+	path_retry_timer = null
+
+
+func _setup_path_retry_timer() -> void:
+	if world == null:
+		return
+	path_retry_timer = Timer.new()
+	path_retry_timer.name = "TaskPathRetryTimer"
+	path_retry_timer.one_shot = true
+	path_retry_timer.timeout.connect(_on_path_retry_timeout)
+	world.add_child(path_retry_timer)
+
+
+func _on_task_added(task) -> void:
+	if task != null:
+		request_accessibility_check(task.id, "task_added")
+
+
+func _on_task_removed(task_id: int) -> void:
+	pending_accessibility_set.erase(task_id)
+	if path_retry_due_by_task.has(task_id):
+		path_retry_due_by_task.erase(task_id)
+		_schedule_path_retry_timer()
+
+
+func _on_task_visual_state_changed(task_id: int) -> void:
+	var task = task_queue.get_task(task_id)
+	if task != null \
+			and task.status == TaskQueue.TaskStatus.PENDING \
+			and task.accessibility == TaskQueue.TaskAccessibility.UNKNOWN:
+		request_accessibility_check(task_id, "task_state_unknown")
 #endregion
 
 
@@ -78,6 +118,127 @@ func request_haul_rebuild(reason: String = "unspecified") -> void:
 		return
 	haul_rebuild_requested = true
 	haul_rebuild_reasons[reason] = true
+
+
+func request_accessibility_check(task_id: int, _reason: String = "unspecified") -> void:
+	# SEE-ADR-010: Accessibility work is deduplicated and budgeted.
+	if task_id < 0 or pending_accessibility_set.has(task_id):
+		return
+	if task_queue.get_task(task_id) == null:
+		return
+	pending_accessibility_set[task_id] = true
+	pending_accessibility_ids.append(task_id)
+
+
+func update_task_accessibility() -> void:
+	var checked := 0
+	while not pending_accessibility_ids.is_empty() and checked < ACCESSIBILITY_CHECK_BUDGET:
+		var task_id: int = pending_accessibility_ids.pop_front()
+		if not pending_accessibility_set.erase(task_id):
+			continue
+		var task = task_queue.get_task(task_id)
+		if task == null or task.status != TaskQueue.TaskStatus.PENDING:
+			continue
+		_classify_task_accessibility(task)
+		checked += 1
+		accessibility_check_count += 1
+
+
+func _classify_task_accessibility(task) -> void:
+	var now_msec := Time.get_ticks_msec()
+	if task.type != TaskQueue.TaskType.STAIRS \
+			and task.type != TaskQueue.TaskType.HAUL \
+			and not world.pathfinder.has_walkable_adjacent_on_level(world, task.pos, task.pos.y):
+		_clear_path_retry(task.id)
+		task.set_accessibility(
+			TaskQueue.TaskAccessibility.UNREACHABLE,
+			now_msec,
+			TaskQueue.TaskBlockReason.NO_WORK_POSITION
+		)
+		return
+	if world.workers.is_empty():
+		_mark_task_path_blocked(task, now_msec)
+		return
+	_clear_path_retry(task.id)
+	task.unreachable_workers.clear()
+	task.set_accessibility(TaskQueue.TaskAccessibility.REACHABLE, now_msec)
+
+
+func _mark_task_path_blocked(task, now_msec: int) -> void:
+	var retry_due := now_msec + TaskQueue.TASK_UNREACHABLE_TTL_MSEC
+	task.retry_due_msec = retry_due
+	task.set_accessibility(
+		TaskQueue.TaskAccessibility.UNREACHABLE,
+		now_msec,
+		TaskQueue.TaskBlockReason.NO_WORKER_PATH
+	)
+	path_retry_due_by_task[task.id] = retry_due
+	_schedule_path_retry_timer()
+
+
+func _clear_path_retry(task_id: int) -> void:
+	if not path_retry_due_by_task.has(task_id):
+		return
+	path_retry_due_by_task.erase(task_id)
+	_schedule_path_retry_timer()
+
+
+func _schedule_path_retry_timer(now_msec: int = -1) -> void:
+	if path_retry_timer == null:
+		return
+	if now_msec < 0:
+		now_msec = Time.get_ticks_msec()
+	if path_retry_due_by_task.is_empty():
+		path_retry_timer.stop()
+		return
+	var earliest_due := -1
+	for due in path_retry_due_by_task.values():
+		if earliest_due < 0 or int(due) < earliest_due:
+			earliest_due = int(due)
+	path_retry_timer.wait_time = maxf(float(earliest_due - now_msec) / 1000.0, 0.001)
+	if path_retry_timer.is_inside_tree():
+		path_retry_timer.start()
+
+
+func _on_path_retry_timeout() -> void:
+	process_due_path_retries(Time.get_ticks_msec())
+
+
+func process_due_path_retries(now_msec: int) -> void:
+	for task_id in path_retry_due_by_task.keys().duplicate():
+		if int(path_retry_due_by_task[task_id]) > now_msec:
+			continue
+		path_retry_due_by_task.erase(task_id)
+		var task = task_queue.get_task(int(task_id))
+		if task == null \
+				or task.status != TaskQueue.TaskStatus.PENDING \
+				or task.block_reason != TaskQueue.TaskBlockReason.NO_WORKER_PATH:
+			continue
+		task.unreachable_workers.clear()
+		task.set_accessibility(TaskQueue.TaskAccessibility.UNKNOWN, now_msec)
+		request_accessibility_check(task.id, "path_retry_due")
+	_schedule_path_retry_timer(now_msec)
+
+
+func notify_worker_availability_changed() -> void:
+	var now_msec := Time.get_ticks_msec()
+	for task_id in path_retry_due_by_task.keys().duplicate():
+		path_retry_due_by_task.erase(task_id)
+		var task = task_queue.get_task(int(task_id))
+		if task == null or task.status != TaskQueue.TaskStatus.PENDING:
+			continue
+		task.unreachable_workers.clear()
+		task.set_accessibility(TaskQueue.TaskAccessibility.UNKNOWN, now_msec)
+		request_accessibility_check(task.id, "worker_availability_changed")
+	_schedule_path_retry_timer(now_msec)
+
+
+func reset_accessibility_state() -> void:
+	pending_accessibility_ids.clear()
+	pending_accessibility_set.clear()
+	path_retry_due_by_task.clear()
+	if path_retry_timer != null:
+		path_retry_timer.stop()
 
 
 func update_task_assignments() -> void:
@@ -112,7 +273,8 @@ func update_task_assignments() -> void:
 			float(best_bid["search_ms"])
 		)
 	elif not assignment_workers.is_empty():
-		task.set_accessibility(TaskQueue.TaskAccessibility.UNREACHABLE, Time.get_ticks_msec())
+		if task.block_reason != TaskQueue.TaskBlockReason.NO_WORKER_PATH:
+			_mark_task_path_blocked(task, Time.get_ticks_msec())
 	_reset_assignment_auction()
 
 
@@ -481,14 +643,6 @@ func _worker_ids(worker_list: Array) -> String:
 	return "|".join(ids)
 
 
-func update_blocked_tasks(dt: float) -> void:
-	blocked_recheck_timer -= dt
-	if blocked_recheck_timer <= 0.0:
-		recheck_blocked_tasks()
-		recheck_task_accessibility()
-		blocked_recheck_timer = BLOCKED_RECHECK_INTERVAL
-
-
 func update_reassign_tasks(dt: float) -> void:
 	reassign_timer -= dt
 	if reassign_timer <= 0.0:
@@ -523,11 +677,10 @@ func queue_task_request(task_type: int, pos: Vector3i, material: int) -> bool:
 	if is_task_already_queued(task_type, pos):
 		return false
 	if task_type == TaskQueue.TaskType.STAIRS \
-		and task_queue.has_active_task_at(pos, TaskQueue.TaskType.DIG) \
-		and not task_queue.remove_pending_task_at(pos, TaskQueue.TaskType.DIG):
+			and task_queue.has_active_task_at(pos, TaskQueue.TaskType.DIG) \
+			and not task_queue.remove_pending_task_at(pos, TaskQueue.TaskType.DIG):
 		return false
 	add_task_to_queue(task_type, pos, material)
-	blocked_recheck_timer = 0.0
 	return true
 
 
@@ -541,18 +694,7 @@ func cancel_pending_task_requests_at(pos: Vector3i) -> Array:
 		world.trace_task_event(task, "task_cancelled", "reason=player_erase")
 		if task.id == assignment_task_id:
 			_reset_assignment_auction()
-	_remove_blocked_task_requests_at(pos)
 	return removed
-
-
-func _remove_blocked_task_requests_at(pos: Vector3i) -> void:
-	var i := 0
-	while i < blocked_tasks.size():
-		var blocked: Dictionary = blocked_tasks[i]
-		if Vector3i(blocked.get("pos", Vector3i.ZERO)) == pos:
-			blocked_tasks.remove_at(i)
-		else:
-			i += 1
 
 
 func add_task_to_queue(task_type: int, pos: Vector3i, material: int) -> void:
@@ -568,111 +710,19 @@ func add_task_to_queue(task_type: int, pos: Vector3i, material: int) -> void:
 #endregion
 
 
-#region Blocked Task Handling
-func recheck_blocked_tasks() -> void:
-	var checked := 0
-	var i := 0
-	while i < blocked_tasks.size() and checked < BLOCKED_RECHECK_BUDGET:
-		var task = blocked_tasks[i]
-		var task_type: int = task["type"]
-		var pos: Vector3i = task["pos"]
-		checked += 1
-		if is_task_accessible(task_type, pos):
-			add_task_to_queue(task_type, pos, task["material"])
-			blocked_tasks.remove_at(i)
-		else:
-			i += 1
-
-
-func recheck_task_accessibility() -> void:
-	_refresh_stale_unreachable_tasks()
-	_classify_tasks_without_work_positions()
-	var unchecked_tasks: Array = []
-	for task in task_queue.tasks:
-		if task.status == TaskQueue.TaskStatus.PENDING \
-			and task.accessibility == TaskQueue.TaskAccessibility.UNKNOWN:
-			unchecked_tasks.append(task)
-	if unchecked_tasks.is_empty():
-		accessibility_recheck_index = 0
-		accessibility_worker_index = 0
-		return
-	var task_index: int = accessibility_recheck_index % unchecked_tasks.size()
-	var task = unchecked_tasks[task_index]
-	var now_msec := Time.get_ticks_msec()
-	if world == null or world.workers.is_empty():
-		task.set_accessibility(TaskQueue.TaskAccessibility.UNREACHABLE, now_msec)
-		_advance_accessibility_task(unchecked_tasks.size())
-		return
-	task.set_accessibility(TaskQueue.TaskAccessibility.REACHABLE, now_msec)
-	_advance_accessibility_task(unchecked_tasks.size())
-
-
-func _refresh_stale_unreachable_tasks() -> void:
-	var now_msec := Time.get_ticks_msec()
-	var refreshed := false
-	for task in task_queue.tasks:
-		if task.status != TaskQueue.TaskStatus.PENDING:
-			continue
-		if task.clear_expired_worker_unreachable(now_msec):
-			refreshed = true
-		if task.accessibility != TaskQueue.TaskAccessibility.UNREACHABLE:
-			continue
-		if task.accessibility_updated_msec > 0 \
-			and now_msec - task.accessibility_updated_msec <= TaskQueue.TASK_UNREACHABLE_TTL_MSEC:
-			continue
-		task.set_accessibility(TaskQueue.TaskAccessibility.UNKNOWN, now_msec)
-		task.unreachable_workers.clear()
-		refreshed = true
-	if not refreshed:
-		return
-	accessibility_recheck_index = 0
-	accessibility_worker_index = 0
-
-
-func _classify_tasks_without_work_positions() -> void:
-	if world == null or world.pathfinder == null:
-		return
-	var now_msec := Time.get_ticks_msec()
-	for task in task_queue.tasks:
-		if task.status != TaskQueue.TaskStatus.PENDING:
-			continue
-		if task.accessibility != TaskQueue.TaskAccessibility.UNKNOWN:
-			continue
-		if task.type == TaskQueue.TaskType.STAIRS or task.type == TaskQueue.TaskType.HAUL:
-			continue
-		if not world.pathfinder.has_walkable_adjacent_on_level(world, task.pos, task.pos.y):
-			task.set_accessibility(TaskQueue.TaskAccessibility.UNREACHABLE, now_msec)
-
-
-func _advance_accessibility_task(task_count: int) -> void:
-	accessibility_worker_index = 0
-	if task_count <= 1:
-		accessibility_recheck_index = 0
-	else:
-		accessibility_recheck_index %= task_count - 1
-
-
 func invalidate_task_accessibility(changed_pos: Vector3i) -> void:
-	var invalidated := false
-	for task in task_queue.tasks:
+	# SEE-ADR-010: Terrain changes only inspect tasks in the indexed local neighborhood.
+	for task in task_queue.tasks_near(
+		changed_pos,
+		ACCESSIBILITY_INVALIDATION_RADIUS_XZ,
+		ACCESSIBILITY_INVALIDATION_RADIUS_Y
+	):
 		if task.status != TaskQueue.TaskStatus.PENDING:
 			continue
-		if abs(task.pos.x - changed_pos.x) > ACCESSIBILITY_INVALIDATION_RADIUS_XZ:
-			continue
-		if abs(task.pos.z - changed_pos.z) > ACCESSIBILITY_INVALIDATION_RADIUS_XZ:
-			continue
-		if abs(task.pos.y - changed_pos.y) > ACCESSIBILITY_INVALIDATION_RADIUS_Y:
-			continue
 		task.unreachable_workers.clear()
-		if task.accessibility != TaskQueue.TaskAccessibility.UNREACHABLE:
-			continue
-		task.accessibility = TaskQueue.TaskAccessibility.UNKNOWN
-		invalidated = true
-	if not invalidated:
-		return
-	accessibility_recheck_index = 0
-	accessibility_worker_index = 0
-	blocked_recheck_timer = 0.0
+		_clear_path_retry(task.id)
+		task.set_accessibility(TaskQueue.TaskAccessibility.UNKNOWN, Time.get_ticks_msec())
+		request_accessibility_check(task.id, "nearby_terrain_changed")
 
 
 func mark_worker_unreachable_for_task(task, worker: Worker) -> void:
@@ -684,26 +734,10 @@ func mark_worker_unreachable_for_task(task, worker: Worker) -> void:
 	for candidate: Worker in world.workers:
 		if not task.is_worker_unreachable(candidate.worker_id, now_msec):
 			return
-	task.set_accessibility(TaskQueue.TaskAccessibility.UNREACHABLE, now_msec)
+	_mark_task_path_blocked(task, now_msec)
 #endregion
 
 
-#region Accessibility Checking
-func is_task_accessible(task_type: int, pos: Vector3i) -> bool:
-	if world == null or world.workers.is_empty():
-		return false
-	if not world.is_block_coord_valid(pos.x, pos.y, pos.z):
-		return false
-	if task_type == TaskQueue.TaskType.STAIRS or task_type == TaskQueue.TaskType.HAUL:
-		return true
-	return world.pathfinder.has_walkable_adjacent_on_level(world, pos, pos.y)
-
-
 func is_task_already_queued(task_type: int, pos: Vector3i) -> bool:
-	if task_queue.has_active_task_at(pos, task_type):
-		return true
-	for task in blocked_tasks:
-		if task["type"] == task_type and task["pos"] == pos:
-			return true
-	return false
+	return task_queue.has_active_task_at(pos, task_type)
 #endregion

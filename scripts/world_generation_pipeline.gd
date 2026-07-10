@@ -12,7 +12,7 @@ const WorldVegetationGeneratorScript = preload("res://scripts/world/world_vegeta
 #region Constants
 const MOISTURE_NOISE_FREQUENCY := 0.011
 const TEMPERATURE_NOISE_FREQUENCY := 0.008
-const TREE_NOISE_FREQUENCY := 0.025
+const MOISTURE_DETAIL_NOISE_FREQUENCY := 0.025
 const BIOME_COUNT := 5
 const PASS_NAMES := [
 	"climate_maps",
@@ -24,7 +24,6 @@ const PASS_NAMES := [
 	"add_ores",
 	"apply_surface_blocks",
 	"apply_ramps",
-	"place_trees",
 	"place_flowers",
 	"final_cleanup",
 	"collect_generation_stats",
@@ -61,7 +60,6 @@ var moisture := PackedFloat32Array()
 var temperature := PackedFloat32Array()
 var biome := PackedByteArray()
 var soil_region := PackedByteArray()
-var tree_density := PackedFloat32Array()
 var feature_reserved := PackedByteArray()
 var pipeline_metrics: Dictionary = {}
 var progress_callback := Callable()
@@ -76,7 +74,7 @@ var height_noise_large := FastNoiseLite.new()
 var height_noise_macro := FastNoiseLite.new()
 var moisture_noise := FastNoiseLite.new()
 var temperature_noise := FastNoiseLite.new()
-var tree_noise := FastNoiseLite.new()
+var moisture_detail_noise := FastNoiseLite.new()
 #endregion
 
 
@@ -110,7 +108,6 @@ func generate(config: Dictionary) -> Dictionary:
 	_run_pass("apply_surface_blocks", Callable(self, "_apply_surface_blocks").bind(volume))
 	_run_pass("apply_ramps", Callable(self, "_apply_ramps").bind(volume))
 	_configure_vegetation_generator()
-	_run_pass("place_trees", Callable(self, "_place_trees").bind(volume))
 	_run_pass("place_flowers", Callable(self, "_place_flowers").bind(volume))
 	_run_pass("final_cleanup", Callable(self, "_final_cleanup").bind(volume))
 	_run_pass("collect_generation_stats", Callable(self, "_collect_generation_stats").bind(volume))
@@ -125,7 +122,6 @@ func generate(config: Dictionary) -> Dictionary:
 			"temperature": temperature,
 			"biome": biome,
 			"soil_region": soil_region,
-			"tree_density": tree_density,
 			"feature_reserved": feature_reserved,
 		},
 		"metrics": pipeline_metrics,
@@ -163,9 +159,7 @@ func _resize_maps() -> void:
 	temperature.resize(map_size)
 	biome.resize(map_size)
 	soil_region.resize(map_size)
-	tree_density.resize(map_size)
 	feature_reserved.resize(map_size)
-	tree_density.fill(0.0)
 	feature_reserved.fill(0)
 
 
@@ -194,17 +188,11 @@ func _configure_vegetation_generator() -> void:
 		world_size_y,
 		world_size_z,
 		elevation,
-		moisture,
-		temperature,
 		biome,
-		tree_density,
 		feature_reserved,
 		{
 			"plains": Biome.PLAINS,
 			"forest": Biome.FOREST,
-			"wetland": Biome.WETLAND,
-			"dry": Biome.DRY,
-			"cold": Biome.COLD,
 		}
 	)
 
@@ -254,7 +242,7 @@ func _build_climate_maps() -> void:
 			var moist: float = _normalized_noise_2d(moisture_noise, wx, wz)
 			var temp_latitude: float = 1.0 - absf((float(local_z) / maxf(1.0, float(world_size_z - 1))) * 2.0 - 1.0) * 0.35
 			var temp_noise: float = _normalized_noise_2d(temperature_noise, wx, wz)
-			moisture[idx] = clampf(moist * 0.82 + _normalized_noise_2d(tree_noise, wx + 97, wz - 47) * 0.18, 0.0, 1.0)
+			moisture[idx] = clampf(moist * 0.82 + _normalized_noise_2d(moisture_detail_noise, wx + 97, wz - 47) * 0.18, 0.0, 1.0)
 			temperature[idx] = clampf(temp_noise * 0.55 + temp_latitude * 0.45, 0.0, 1.0)
 
 
@@ -325,19 +313,14 @@ func _apply_ramps(volume: PackedByteArray) -> void:
 			if ramp_y < 0 or ramp_y >= world_size_y:
 				continue
 			var idx: int = _volume_index(local_x, ramp_y, local_z)
-			if volume[idx] == World.BLOCK_ID_WATER or volume[idx] == World.BLOCK_ID_LOG or volume[idx] == World.BLOCK_ID_LEAVES:
+			if volume[idx] == World.BLOCK_ID_WATER:
 				continue
 			volume[idx] = ramp_id
 
 
-func _place_trees(volume: PackedByteArray) -> void:
-	vegetation_generator.place_trees(volume)
-	tree_density = vegetation_generator.get_tree_density()
-	feature_reserved = vegetation_generator.get_feature_reserved()
-
-
 func _place_flowers(volume: PackedByteArray) -> void:
 	vegetation_generator.place_flowers(volume)
+	feature_reserved = vegetation_generator.get_feature_reserved()
 
 
 func _final_cleanup(volume: PackedByteArray) -> void:
@@ -345,8 +328,6 @@ func _final_cleanup(volume: PackedByteArray) -> void:
 
 func _collect_generation_stats(volume: PackedByteArray) -> void:
 	var water_blocks: int = 0
-	var log_blocks: int = 0
-	var leaf_blocks: int = 0
 	var flower_blocks: int = 0
 	var coal_blocks: int = 0
 	var iron_blocks: int = 0
@@ -355,10 +336,6 @@ func _collect_generation_stats(volume: PackedByteArray) -> void:
 		match int(block_id):
 			World.BLOCK_ID_WATER:
 				water_blocks += 1
-			World.BLOCK_ID_LOG:
-				log_blocks += 1
-			World.BLOCK_ID_LEAVES:
-				leaf_blocks += 1
 			World.BLOCK_ID_FLOWER:
 				flower_blocks += 1
 			World.BLOCK_ID_COAL:
@@ -385,11 +362,8 @@ func _collect_generation_stats(volume: PackedByteArray) -> void:
 		"water_cells_placed": int(terrain_material_stats.get("water_cells_placed", 0)),
 		"coal_ore_cells_placed": int(terrain_material_stats.get("coal_ore_cells_placed", 0)),
 		"iron_ore_cells_placed": int(terrain_material_stats.get("iron_ore_cells_placed", 0)),
-		"trees_placed": int(vegetation_stats.get("trees_placed", 0)),
 		"flowers_placed": int(vegetation_stats.get("flowers_placed", 0)),
 		"water_blocks": water_blocks,
-		"log_blocks": log_blocks,
-		"leaf_blocks": leaf_blocks,
 		"flower_blocks": flower_blocks,
 		"coal_blocks": coal_blocks,
 		"iron_blocks": iron_blocks,
@@ -454,9 +428,9 @@ func _configure_noises() -> void:
 		TEMPERATURE_NOISE_FREQUENCY
 	)
 	WorldGenerationSharedScript.configure_noise(
-		tree_noise,
+		moisture_detail_noise,
 		WorldGenerationSharedScript.mix_seed(world_seed ^ 0x104),
-		TREE_NOISE_FREQUENCY
+		MOISTURE_DETAIL_NOISE_FREQUENCY
 	)
 
 

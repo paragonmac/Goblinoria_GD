@@ -6,14 +6,15 @@ class_name WorldStreaming
 const CHUNKS_PER_FRAME_DEFAULT := 6
 const STREAM_QUEUE_BUDGET_DEFAULT := 100
 const STREAM_RADIUS_DEFAULT := 12
-const RENDER_RADIUS_DEFAULT := 0
-const RENDER_VIEW_SCALE_DEFAULT := 0.5
+const RENDER_RADIUS_DEFAULT := 1
+const RENDER_VIEW_SCALE_DEFAULT := 0.0
+const RENDER_VERTICAL_MARGIN_BLOCKS_DEFAULT := 0
 const STREAM_VERTICAL_MARGIN_BLOCKS_DEFAULT := 20
 const STREAM_LEAD_TIME_DEFAULT := 0.4
 const STREAM_BASE_BUFFER_CHUNKS_DEFAULT := 32
 const STREAM_MAX_BUFFER_CHUNKS_DEFAULT := 128
 const STREAM_BUFFER_VIEW_SCALE_DEFAULT := 0.5
-const RENDER_ZONE_INTERVAL_DEFAULT := 0.1
+const RENDER_ZONE_INTERVAL_DEFAULT := 0.05
 const DUMMY_INT := 999_999
 const THROTTLE_IDLE_SEC := 1.0
 const THROTTLE_VIEW_CENTER_EPS := 0.25
@@ -38,6 +39,7 @@ var stream_radius_base: int = STREAM_RADIUS_DEFAULT
 var stream_radius_chunks: int = STREAM_RADIUS_DEFAULT
 var render_radius_chunks: int = RENDER_RADIUS_DEFAULT
 var render_view_scale: float = RENDER_VIEW_SCALE_DEFAULT
+var render_vertical_margin_blocks: int = RENDER_VERTICAL_MARGIN_BLOCKS_DEFAULT
 var stream_vertical_margin_blocks: int = STREAM_VERTICAL_MARGIN_BLOCKS_DEFAULT
 var stream_lead_time: float = STREAM_LEAD_TIME_DEFAULT
 var stream_base_buffer_chunks: int = STREAM_BASE_BUFFER_CHUNKS_DEFAULT
@@ -59,6 +61,8 @@ var stream_min_z: int = DUMMY_INT
 var stream_max_z: int = -DUMMY_INT
 var stream_min_y: int = DUMMY_INT
 var stream_max_y: int = -DUMMY_INT
+var render_min_y: int = DUMMY_INT
+var render_max_y: int = -DUMMY_INT
 
 var stream_pending: bool = false
 var stream_plane_index: int = 0
@@ -125,6 +129,8 @@ func reset_state() -> void:
 	stream_max_z = -DUMMY_INT
 	stream_min_y = DUMMY_INT
 	stream_max_y = -DUMMY_INT
+	render_min_y = DUMMY_INT
+	render_max_y = -DUMMY_INT
 	stream_pending = false
 	stream_plane_index = 0
 	stream_plane_size = 0
@@ -208,7 +214,7 @@ func _should_allow_stream_work(dt: float, render_plane_complete: bool) -> bool:
 	return true
 
 
-func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
+func update_streaming(view_rect: Rect2, plane_y: float, dt: float, camera: Camera3D = null) -> void:
 	if world.renderer == null:
 		return
 	var rect: Rect2 = view_rect.abs()
@@ -250,6 +256,15 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
 	min_cy = maxi(min_cy, min_cy_limit)
 	if min_cy > max_cy:
 		return
+
+	var render_margin_blocks: int = maxi(render_vertical_margin_blocks, 0)
+	var min_visible_y: int = center_y - render_margin_blocks
+	var max_visible_y: int = center_y + render_margin_blocks
+	var render_min_cy: int = clampi(int(floor(float(min_visible_y) / float(chunk_size))), min_cy_limit, world_max_cy)
+	var render_max_cy: int = clampi(int(floor(float(max_visible_y) / float(chunk_size))), min_cy_limit, world_max_cy)
+	if render_min_cy > render_max_cy:
+		render_min_cy = min_cy
+		render_max_cy = min_cy
 
 	# Compute render zone bounds
 	var render_pad: float = float(render_radius_chunks * chunk_size)
@@ -359,17 +374,19 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float) -> void:
 		or render_max_cx != last_render_zone_max_cx
 		or render_min_cz != last_render_zone_min_cz
 		or render_max_cz != last_render_zone_max_cz
-		or min_cy != last_render_zone_min_cy
-		or max_cy != last_render_zone_max_cy
+		or render_min_cy != last_render_zone_min_cy
+		or render_max_cy != last_render_zone_max_cy
 	)
-	if render_zone_changed and (render_zone_timer >= render_zone_interval or last_render_zone_min_cx == DUMMY_INT):
-		world.renderer.update_render_zone(render_min_cx, render_max_cx, render_min_cz, render_max_cz, min_cy, max_cy)
+	if (render_zone_changed or camera != null) and (render_zone_timer >= render_zone_interval or last_render_zone_min_cx == DUMMY_INT):
+		world.renderer.update_render_zone(render_min_cx, render_max_cx, render_min_cz, render_max_cz, render_min_cy, render_max_cy, camera)
 		last_render_zone_min_cx = render_min_cx
 		last_render_zone_max_cx = render_max_cx
 		last_render_zone_min_cz = render_min_cz
 		last_render_zone_max_cz = render_max_cz
-		last_render_zone_min_cy = min_cy
-		last_render_zone_max_cy = max_cy
+		last_render_zone_min_cy = render_min_cy
+		last_render_zone_max_cy = render_max_cy
+		render_min_y = render_min_cy
+		render_max_y = render_max_cy
 		render_zone_timer = 0.0
 #endregion
 

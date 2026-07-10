@@ -212,7 +212,7 @@ func clear_item_and_stockpile_overlays() -> void:
 	stockpile_overlays.clear()
 
 
-func update_task_overlays(tasks: Array, blocked_tasks: Array) -> void:
+func update_task_overlays(tasks: Array) -> void:
 	if world == null:
 		return
 	_sync_task_trace_session()
@@ -235,18 +235,6 @@ func update_task_overlays(tasks: Array, blocked_tasks: Array) -> void:
 		overlay.visible = world.is_visible_at_level(task.pos.y)
 		_trace_task_overlay(task, overlay, visual_state)
 
-	for blocked in blocked_tasks:
-		if int(blocked.get("type", -1)) == TaskQueue.TaskType.HAUL:
-			continue
-		var key := blocked_task_key(blocked)
-		live_ids[key] = true
-		if not task_overlays.has(key):
-			task_overlays[key] = create_blocked_task_overlay(blocked["type"])
-		var blocked_overlay: MeshInstance3D = task_overlays[key]
-		var blocked_pos: Vector3i = blocked["pos"]
-		blocked_overlay.position = Vector3(blocked_pos.x, blocked_pos.y + OVERLAY_Y_OFFSET, blocked_pos.z)
-		blocked_overlay.visible = world.is_visible_at_level(blocked_pos.y)
-
 	for task_id in task_overlays.keys():
 		if not live_ids.has(task_id):
 			_trace_task_overlay_removed(task_id)
@@ -256,11 +244,6 @@ func update_task_overlays(tasks: Array, blocked_tasks: Array) -> void:
 
 
 #region Overlay Helpers
-func blocked_task_key(task: Dictionary) -> String:
-	var pos: Vector3i = task["pos"]
-	return "blocked:%s:%s:%s:%s" % [task["type"], pos.x, pos.y, pos.z]
-
-
 enum TaskOverlayState {
 	# SEE-ADR-004: These states are player-facing task meanings, not arbitrary colors.
 	UNKNOWN,
@@ -330,22 +313,6 @@ func create_task_overlay(task) -> MeshInstance3D:
 	return mesh_instance
 
 
-func create_blocked_task_overlay(_task_type: int) -> MeshInstance3D:
-	var mesh_instance := MeshInstance3D.new()
-	if USE_FLAT_OVERLAYS:
-		var quad := QuadMesh.new()
-		quad.size = FLAT_OVERLAY_SIZE
-		mesh_instance.mesh = quad
-		mesh_instance.rotation_degrees.x = -90  # Face up
-	else:
-		var box := BoxMesh.new()
-		box.size = TASK_OVERLAY_SIZE
-		mesh_instance.mesh = box
-
-	mesh_instance.material_override = get_task_material(TaskOverlayState.BLOCKED)
-	_apply_overlay_instance_settings(mesh_instance)
-	add_child(mesh_instance)
-	return mesh_instance
 #endregion
 
 
@@ -540,8 +507,11 @@ func clear_drag_preview() -> void:
 
 
 #region Items And Stockpiles
-func update_item_and_stockpile_overlays(items: Dictionary, stockpiles: Dictionary) -> void:
+func update_item_overlays(items: Dictionary) -> void:
 	_update_item_overlays(items)
+
+
+func update_stockpile_overlays(stockpiles: Dictionary) -> void:
 	_update_stockpile_overlays(stockpiles)
 
 

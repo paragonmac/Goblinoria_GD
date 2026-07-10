@@ -452,14 +452,83 @@ func _init() -> void:
 	var local_invalidation_ok: bool = \
 		near_blocked.accessibility == TaskQueue.TaskAccessibility.UNKNOWN \
 		and far_blocked.accessibility == TaskQueue.TaskAccessibility.UNREACHABLE \
-		and near_reachable.accessibility == TaskQueue.TaskAccessibility.REACHABLE \
+		and near_reachable.accessibility == TaskQueue.TaskAccessibility.UNKNOWN \
 		and near_reachable.unreachable_workers.is_empty()
 	var batch_blocked_id := reservation_world.task_queue.add_dig_task(Vector3i(-2, 0, 2))
 	var batch_blocked = reservation_world.task_queue.get_task(batch_blocked_id)
-	task_manager.recheck_task_accessibility()
+	task_manager.update_task_accessibility()
 	var batch_classification_ok: bool = \
 		near_blocked.accessibility == TaskQueue.TaskAccessibility.UNREACHABLE \
-		and batch_blocked.accessibility == TaskQueue.TaskAccessibility.UNREACHABLE
+		and near_blocked.block_reason == TaskQueue.TaskBlockReason.NO_WORK_POSITION \
+		and batch_blocked.accessibility == TaskQueue.TaskAccessibility.UNREACHABLE \
+		and batch_blocked.block_reason == TaskQueue.TaskBlockReason.NO_WORK_POSITION
+	while not task_manager.pending_accessibility_ids.is_empty():
+		task_manager.update_task_accessibility()
+	var idle_accessibility_count := task_manager.accessibility_check_count
+	for _i in range(120):
+		task_manager.update_task_accessibility()
+	var idle_accessibility_ok: bool = \
+		task_manager.accessibility_check_count == idle_accessibility_count
+
+	var retry_task_id := reservation_world.task_queue.add_stairs_task(
+		Vector3i(2, 0, -2),
+		World.RAMP_NORTH_ID
+	)
+	task_manager.update_task_accessibility()
+	var retry_task = reservation_world.task_queue.get_task(retry_task_id)
+	task_manager.mark_worker_unreachable_for_task(retry_task, worker)
+	task_manager.mark_worker_unreachable_for_task(retry_task, worker_two)
+	var retry_due: int = int(retry_task.retry_due_msec)
+	task_manager.process_due_path_retries(retry_due - 1)
+	var retry_not_early_ok: bool = \
+		retry_task.accessibility == TaskQueue.TaskAccessibility.UNREACHABLE \
+		and retry_task.block_reason == TaskQueue.TaskBlockReason.NO_WORKER_PATH
+	task_manager.process_due_path_retries(retry_due)
+	task_manager.update_task_accessibility()
+	var timed_path_retry_ok: bool = \
+		retry_task.accessibility == TaskQueue.TaskAccessibility.REACHABLE \
+		and retry_task.block_reason == TaskQueue.TaskBlockReason.NONE \
+		and not task_manager.path_retry_due_by_task.has(retry_task.id)
+	var no_work_position_has_no_timer: bool = \
+		not task_manager.path_retry_due_by_task.has(near_blocked.id)
+	var retry_a_id := reservation_world.task_queue.add_stairs_task(
+		Vector3i(3, 0, -2),
+		World.RAMP_NORTH_ID
+	)
+	var retry_b_id := reservation_world.task_queue.add_stairs_task(
+		Vector3i(3, 0, -1),
+		World.RAMP_NORTH_ID
+	)
+	task_manager.update_task_accessibility()
+	var retry_a = reservation_world.task_queue.get_task(retry_a_id)
+	var retry_b = reservation_world.task_queue.get_task(retry_b_id)
+	task_manager._mark_task_path_blocked(retry_a, 1000)
+	task_manager._mark_task_path_blocked(retry_b, 1500)
+	task_manager.process_due_path_retries(3499)
+	var multiple_retry_not_early_ok: bool = \
+		retry_a.accessibility == TaskQueue.TaskAccessibility.UNREACHABLE \
+		and retry_b.accessibility == TaskQueue.TaskAccessibility.UNREACHABLE
+	task_manager.process_due_path_retries(3500)
+	var multiple_retry_first_due_ok: bool = \
+		retry_a.accessibility == TaskQueue.TaskAccessibility.UNKNOWN \
+		and retry_b.accessibility == TaskQueue.TaskAccessibility.UNREACHABLE
+	task_manager.process_due_path_retries(4000)
+	var multiple_retry_deadlines_ok: bool = multiple_retry_not_early_ok \
+		and multiple_retry_first_due_ok \
+		and retry_b.accessibility == TaskQueue.TaskAccessibility.UNKNOWN
+	while not task_manager.pending_accessibility_ids.is_empty():
+		task_manager.update_task_accessibility()
+	var pre_budget_check_count := task_manager.accessibility_check_count
+	for index in range(10):
+		reservation_world.task_queue.add_stairs_task(
+			Vector3i(10 + index, 0, -3),
+			World.RAMP_NORTH_ID
+		)
+	task_manager.update_task_accessibility()
+	var accessibility_budget_ok: bool = \
+		task_manager.accessibility_check_count - pre_budget_check_count \
+			== task_manager.ACCESSIBILITY_CHECK_BUDGET \
+		and task_manager.pending_accessibility_ids.size() == 2
 	task_manager.assignment_best_worker = worker_two
 	task_manager.assignment_best_path = [Vector3i.ZERO, Vector3i.RIGHT, Vector3i(2, 0, 0)]
 	var closest_bid_rule_ok: bool = \
@@ -608,6 +677,26 @@ func _init() -> void:
 		return
 	if not batch_classification_ok:
 		push_error("Impossible tasks were not classified in one accessibility update")
+		quit(1)
+		return
+	if not idle_accessibility_ok:
+		push_error("Idle updates performed accessibility work without queued changes")
+		quit(1)
+		return
+	if not retry_not_early_ok or not timed_path_retry_ok:
+		push_error("Worker-path blocked task did not honor its 2.5-second retry deadline")
+		quit(1)
+		return
+	if not no_work_position_has_no_timer:
+		push_error("No-work-position task incorrectly received a timed retry")
+		quit(1)
+		return
+	if not multiple_retry_deadlines_ok:
+		push_error("Multiple path retry deadlines were not processed independently")
+		quit(1)
+		return
+	if not accessibility_budget_ok:
+		push_error("Accessibility queue did not enforce its per-update budget")
 		quit(1)
 		return
 	if not stairs_replaced_pending_dig_ok:

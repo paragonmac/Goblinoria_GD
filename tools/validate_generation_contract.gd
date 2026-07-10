@@ -18,7 +18,6 @@ const EXPECTED_PASS_NAMES := [
 	"add_ores",
 	"apply_surface_blocks",
 	"apply_ramps",
-	"place_trees",
 	"place_flowers",
 	"final_cleanup",
 	"collect_generation_stats",
@@ -198,7 +197,6 @@ func _summarize_maps(maps: Dictionary) -> Dictionary:
 		"temperature": _summarize_float_array(maps.get("temperature", PackedFloat32Array())),
 		"biome": _summarize_byte_array(maps.get("biome", PackedByteArray())),
 		"soil_region": _summarize_byte_array(maps.get("soil_region", PackedByteArray())),
-		"tree_density": _summarize_float_array(maps.get("tree_density", PackedFloat32Array())),
 		"feature_reserved": _summarize_byte_array(maps.get("feature_reserved", PackedByteArray())),
 	}
 
@@ -358,12 +356,14 @@ func _validate_generation_stats(name: String, case_def: Dictionary, stats: Dicti
 	if biome_total != expected_map_size:
 		errors.append("%s: biome stat total does not match map size" % name)
 	_assert_stat_matches_block_count(name, stats, block_counts, "water_blocks", World.BLOCK_ID_WATER, errors)
-	_assert_stat_matches_block_count(name, stats, block_counts, "log_blocks", World.BLOCK_ID_LOG, errors)
-	_assert_stat_matches_block_count(name, stats, block_counts, "leaf_blocks", World.BLOCK_ID_LEAVES, errors)
 	_assert_stat_matches_block_count(name, stats, block_counts, "flower_blocks", World.BLOCK_ID_FLOWER, errors)
 	_assert_stat_matches_block_count(name, stats, block_counts, "coal_blocks", World.BLOCK_ID_COAL, errors)
 	_assert_stat_matches_block_count(name, stats, block_counts, "iron_blocks", World.BLOCK_ID_IRON_ORE, errors)
 	_assert_stat_matches_block_count(name, stats, block_counts, "moss_blocks", World.BLOCK_ID_MOSS, errors)
+	if int(block_counts.get(str(World.BLOCK_ID_LOG), 0)) != 0:
+		errors.append("%s: generation should not emit log blocks" % name)
+	if int(block_counts.get(str(World.BLOCK_ID_LEAVES), 0)) != 0:
+		errors.append("%s: generation should not emit leaf blocks" % name)
 	if int(stats.get("static_water_enabled", -1)) != 0:
 		errors.append("%s: static underground water is no longer disabled" % name)
 	if int(stats.get("water_cells_placed", -1)) != 0 or int(stats.get("water_blocks", -1)) != 0:

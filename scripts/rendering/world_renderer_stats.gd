@@ -127,6 +127,11 @@ func get_draw_burden_stats() -> Dictionary:
 	return {"drawn": drawn_tris, "culled": culled_tris, "percent": percent}
 
 
+func get_chunk_visible_faces(coord: Vector3i) -> int:
+	var counts: Vector2i = chunk_face_stats.get(coord, Vector2i(0, 0))
+	return counts.x
+
+
 func get_mesh_work_stats() -> Dictionary:
 	var greedy_saved_faces := int(max(0, total_greedy_source_visible_faces - total_greedy_visible_faces))
 	var greedy_reduction_percent := 0.0

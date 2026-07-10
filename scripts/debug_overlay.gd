@@ -37,6 +37,8 @@ const DEBUG_TIMING_LINES := 12
 const STREAMING_CAPTURE_INTERVAL := 0.25
 const DEBUG_POLL_INTERVAL_SEC := 0.25
 const DEBUG_TIMINGS_LOG_INTERVAL_SEC := 0.5
+const FRAME_TIMING_WINDOW_SEC := 2.0
+const FRAME_TIMING_HOLD_SEC := 0.5
 const MAP_EXPORT_RADIUS := 64
 const Y_TRANSITION_PROFILE_DIR := "user://diagnostics"
 const Y_TRANSITION_PROFILE_COLUMNS := [
@@ -103,6 +105,12 @@ var last_debug_timings_log_ms: int = 0
 var last_draw_burden_ms: int = 0
 var last_streaming_stats_ms: int = 0
 var last_debug_timings_ms: int = 0
+var frame_timing_samples: Array = []
+var frame_last_ms := 0.0
+var frame_avg_ms := 0.0
+var frame_peak_ms := 0.0
+var frame_display_ms := 0.0
+var frame_display_until_sec := 0.0
 #endregion
 
 
@@ -187,6 +195,8 @@ func toggle_streaming_stats() -> void:
 	show_streaming_stats = not show_streaming_stats
 	if streaming_stats_label != null:
 		streaming_stats_label.visible = show_streaming_stats
+	if world != null and world.renderer != null:
+		world.renderer.set_poly_debug_enabled(show_streaming_stats)
 
 
 func toggle_streaming_capture() -> void:
@@ -213,6 +223,7 @@ func run_timed(label: String, callable: Callable) -> void:
 func step_world(dt: float) -> void:
 	if world == null:
 		return
+	_record_frame_timing(dt)
 	if show_debug_timings and debug_profiler != null and debug_profiler.enabled:
 		debug_profiler.begin("World.process_generation_results")
 		world.process_generation_results()
@@ -234,17 +245,17 @@ func step_world(dt: float) -> void:
 		world.update_task_queue()
 		debug_profiler.end("World.update_task_queue")
 
-		debug_profiler.begin("World.update_task_overlays")
-		world.update_task_overlays_phase()
-		debug_profiler.end("World.update_task_overlays")
-
-		debug_profiler.begin("World.update_blocked_tasks")
-		world.update_blocked_tasks(dt)
-		debug_profiler.end("World.update_blocked_tasks")
+		debug_profiler.begin("World.update_task_accessibility")
+		world.update_task_accessibility()
+		debug_profiler.end("World.update_task_accessibility")
 
 		debug_profiler.begin("World.update_reassign_tasks")
 		world.update_reassign_tasks(dt)
 		debug_profiler.end("World.update_reassign_tasks")
+
+		debug_profiler.begin("World.update_task_overlays")
+		world.update_task_overlays_phase()
+		debug_profiler.end("World.update_task_overlays")
 
 		debug_profiler.finish_frame()
 		update_debug_timings_label()
@@ -294,12 +305,14 @@ func update_streaming_stats() -> void:
 		return
 	last_streaming_stats_ms = Time.get_ticks_msec()
 	var stats := _collect_streaming_stats()
-	streaming_stats_label.text = "Streaming chunks:%d build:%d pending:%s y:%d..%d\nMesh q:%d res:%d act:%d pre:%d nbr:%d/%d q:%d\nNodes a:%d p:%d/%d new:%d reuse:%d free:%d\nGeo v:%d tri:%d faces:%d/%d\nGreedy %d/%d saved:%.0f%% ramp:%d\nCache h:%d m:%d i:%d ms:%.0f/%.0f\nRadii s:%d r:%d\nBuffer %d (base %d max %d)" % [
+	streaming_stats_label.text = "Streaming chunks:%d build:%d pending:%s stream y:%d..%d render y:%d..%d\nMesh q:%d res:%d act:%d pre:%d nbr:%d/%d q:%d\nNodes a:%d p:%d/%d new:%d reuse:%d free:%d\nGeo v:%d tri:%d faces:%d/%d\nCamera tri:%d/%d %.0f%% outside:%.0f%%\nGreedy %d/%d saved:%.0f%% ramp:%d\nCache h:%d m:%d i:%d ms:%.0f/%.0f\nRadii s:%d r:%d\nBuffer %d (base %d max %d)" % [
 		int(stats["loaded_chunks"]),
 		int(stats["build_queue"]),
 		"true" if int(stats["stream_pending"]) != 0 else "false",
 		int(stats["stream_min_y"]),
 		int(stats["stream_max_y"]),
+		int(stats["render_min_y"]),
+		int(stats["render_max_y"]),
 		int(stats["mesh_job_queue"]),
 		int(stats["mesh_result_queue"]),
 		int(stats["mesh_job_set"]),
@@ -317,6 +330,10 @@ func update_streaming_stats() -> void:
 		int(stats["mesh_triangles"]),
 		int(stats["mesh_visible_faces"]),
 		int(stats["mesh_occluded_faces"]),
+		int(stats["camera_rendered_triangles"]),
+		int(stats["camera_total_triangles"]),
+		float(stats["camera_rendered_percent"]),
+		float(stats["camera_outside_percent"]),
 		int(stats["greedy_visible_faces"]),
 		int(stats["greedy_source_visible_faces"]),
 		float(stats["greedy_reduction_percent"]),
@@ -504,6 +521,8 @@ func _collect_streaming_stats() -> Dictionary:
 		"stream_pending": 0,
 		"stream_min_y": 0,
 		"stream_max_y": 0,
+		"render_min_y": 0,
+		"render_max_y": 0,
 		"stream_radius": 0,
 		"render_radius": 0,
 		"buffer_base": 0,
@@ -537,6 +556,10 @@ func _collect_streaming_stats() -> Dictionary:
 		"mesh_cache_imports": 0,
 		"mesh_build_ms": 0.0,
 		"mesh_upload_ms": 0.0,
+		"camera_rendered_triangles": 0,
+		"camera_total_triangles": 0,
+		"camera_rendered_percent": 0.0,
+		"camera_outside_percent": 0.0,
 	}
 	if world == null:
 		return stats
@@ -552,6 +575,12 @@ func _collect_streaming_stats() -> Dictionary:
 		else:
 			stats["stream_min_y"] = streaming.stream_min_y * World.CHUNK_SIZE
 			stats["stream_max_y"] = ((streaming.stream_max_y + 1) * World.CHUNK_SIZE) - 1
+		if streaming.render_min_y == streaming.DUMMY_INT:
+			stats["render_min_y"] = 0
+			stats["render_max_y"] = 0
+		else:
+			stats["render_min_y"] = streaming.render_min_y * World.CHUNK_SIZE
+			stats["render_max_y"] = ((streaming.render_max_y + 1) * World.CHUNK_SIZE) - 1
 		stats["stream_radius"] = streaming.stream_radius_chunks
 		stats["render_radius"] = streaming.render_radius_chunks
 		stats["buffer_base"] = streaming.stream_base_buffer_chunks
@@ -588,6 +617,11 @@ func _collect_streaming_stats() -> Dictionary:
 		stats["mesh_cache_imports"] = int(mesh_stats.get("cache_imports", 0))
 		stats["mesh_build_ms"] = float(mesh_stats.get("mesh_build_ms", 0.0))
 		stats["mesh_upload_ms"] = float(mesh_stats.get("mesh_upload_ms", 0.0))
+		var camera_stats: Dictionary = world.renderer.get_camera_tris_rendered(camera)
+		stats["camera_rendered_triangles"] = int(camera_stats.get("rendered", 0))
+		stats["camera_total_triangles"] = int(camera_stats.get("total", 0))
+		stats["camera_rendered_percent"] = float(camera_stats.get("percent", 0.0))
+		stats["camera_outside_percent"] = maxf(0.0, 100.0 - float(stats["camera_rendered_percent"]))
 	return stats
 
 
@@ -655,13 +689,15 @@ func setup_streaming_stats_label() -> void:
 	streaming_stats_label = Label.new()
 	streaming_stats_label.name = "StreamingStatsLabel"
 	streaming_stats_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	streaming_stats_label.vertical_alignment = VERTICAL_ALIGNMENT_TOP
+	streaming_stats_label.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
 	streaming_stats_label.anchor_left = 0.0
 	streaming_stats_label.anchor_right = 0.0
+	streaming_stats_label.anchor_top = 1.0
+	streaming_stats_label.anchor_bottom = 1.0
 	streaming_stats_label.offset_left = 10.0
-	streaming_stats_label.offset_top = 10.0
-	streaming_stats_label.offset_right = 380.0
-	streaming_stats_label.offset_bottom = 86.0
+	streaming_stats_label.offset_top = -190.0
+	streaming_stats_label.offset_right = 420.0
+	streaming_stats_label.offset_bottom = -10.0
 	streaming_stats_label.text = ""
 	streaming_stats_label.visible = show_streaming_stats
 	add_child(streaming_stats_label)
@@ -693,9 +729,35 @@ func update_debug_timings_label() -> void:
 		return
 	last_debug_timings_ms = Time.get_ticks_msec()
 	var lines: Array = debug_profiler.get_report_lines(DEBUG_TIMING_LINES)
-	debug_timings_label.text = "Debug Timings (ms)\n" + "\n".join(lines)
+	var frame_line := "Frame.dt  last %.3f  avg %.3f  peak %.3f" % [
+		frame_last_ms,
+		frame_avg_ms,
+		frame_peak_ms,
+	]
+	debug_timings_label.text = "Debug Timings (ms)\n%s\n%s" % [frame_line, "\n".join(lines)]
 	_maybe_append_debug_timings_log()
 #endregion
+
+
+func _record_frame_timing(dt: float) -> void:
+	var now_sec := float(Time.get_ticks_msec()) / 1000.0
+	var cutoff := now_sec - FRAME_TIMING_WINDOW_SEC
+	frame_last_ms = dt * 1000.0
+	frame_timing_samples.append({"t": now_sec, "ms": frame_last_ms})
+	while frame_timing_samples.size() > 0 and float(frame_timing_samples[0]["t"]) < cutoff:
+		frame_timing_samples.remove_at(0)
+	var sum := 0.0
+	var peak := 0.0
+	for entry in frame_timing_samples:
+		var value := float(entry["ms"])
+		sum += value
+		if value > peak:
+			peak = value
+	frame_avg_ms = sum / float(frame_timing_samples.size()) if frame_timing_samples.size() > 0 else frame_last_ms
+	frame_peak_ms = peak
+	if now_sec >= frame_display_until_sec or frame_last_ms >= frame_display_ms:
+		frame_display_ms = frame_last_ms
+		frame_display_until_sec = now_sec + FRAME_TIMING_HOLD_SEC
 
 
 func _start_debug_timings_log() -> void:
@@ -746,6 +808,15 @@ func _maybe_append_debug_timings_log() -> void:
 		total_last_ms,
 		0.0,
 		0.0,
+	])
+	_append_line(debug_timings_log_path, "%d,%s,%s,%.3f,%.3f,%.3f,%.3f" % [
+		now_ms,
+		now_dt,
+		"Frame.dt",
+		frame_display_ms,
+		frame_last_ms,
+		frame_avg_ms,
+		frame_peak_ms,
 	])
 	for e in entries:
 		var label := String(e.get("label", ""))

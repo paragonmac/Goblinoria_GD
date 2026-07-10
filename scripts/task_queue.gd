@@ -3,11 +3,15 @@ class_name TaskQueue
 ## Priority queue for dig, place, and stairs tasks.
 
 signal active_count_changed(count: int)
+signal task_added(task)
+signal task_removed(task_id: int)
+signal task_visual_state_changed(task_id: int)
 
 #region Enums
 enum TaskType {DIG, PLACE, STAIRS, HAUL}
 enum TaskStatus {PENDING, IN_PROGRESS, COMPLETED}
 enum TaskAccessibility {UNKNOWN, REACHABLE, UNREACHABLE}
+enum TaskBlockReason {NONE, NO_WORK_POSITION, NO_WORKER_PATH}
 #endregion
 
 #region Constants
@@ -18,14 +22,41 @@ const TASK_UNREACHABLE_TTL_MSEC := 2500
 
 #region Task Class
 class Task:
+	signal visual_state_changed
+
 	var id: int
 	var pos: Vector3i
 	var type: int
-	var status: int
-	var accessibility: int
+	var status: int:
+		set(value):
+			if status == value:
+				return
+			status = value
+			visual_state_changed.emit()
+	var accessibility: int:
+		set(value):
+			if accessibility == value:
+				return
+			accessibility = value
+			if accessibility != TaskAccessibility.UNREACHABLE:
+				block_reason = TaskBlockReason.NONE
+				retry_due_msec = 0
+			visual_state_changed.emit()
 	var accessibility_updated_msec: int
 	var material: int
-	var assigned_worker = null
+	var assigned_worker = null:
+		set(value):
+			if assigned_worker == value:
+				return
+			assigned_worker = value
+			visual_state_changed.emit()
+	var block_reason: int:
+		set(value):
+			if block_reason == value:
+				return
+			block_reason = value
+			visual_state_changed.emit()
+	var retry_due_msec: int = 0
 	var unreachable_workers: Dictionary = {}
 	var data: Dictionary = {}
 
@@ -37,10 +68,17 @@ class Task:
 		accessibility = TaskAccessibility.UNKNOWN
 		accessibility_updated_msec = 0
 		material = task_material
+		block_reason = TaskBlockReason.NONE
 
-	func set_accessibility(new_accessibility: int, now_msec: int) -> void:
+	func set_accessibility(
+		new_accessibility: int,
+		now_msec: int,
+		new_block_reason: int = TaskBlockReason.NONE
+	) -> void:
 		accessibility = new_accessibility
 		accessibility_updated_msec = now_msec
+		block_reason = new_block_reason if new_accessibility == TaskAccessibility.UNREACHABLE \
+			else TaskBlockReason.NONE
 
 	func mark_worker_unreachable(worker_id: int, now_msec: int) -> void:
 		unreachable_workers[worker_id] = now_msec
@@ -85,12 +123,15 @@ func add_task(pos: Vector3i, task_type: int, material: int) -> int:
 	var task_id = next_id
 	next_id += 1
 	var task := Task.new(task_id, pos, task_type, material)
+	task.visual_state_changed.connect(_on_task_visual_state_changed.bind(task))
 	tasks.append(task)
 	_tasks_by_id[task_id] = task
 	if not _tasks_by_pos.has(pos):
 		_tasks_by_pos[pos] = []
 	_tasks_by_pos[pos].append(task)
 	active_count_changed.emit(tasks.size())
+	task_added.emit(task)
+	task_visual_state_changed.emit(task.id)
 	return task_id
 
 
@@ -160,6 +201,8 @@ func remove_pending_tasks_at(pos: Vector3i, task_types: Array = []) -> Array:
 		pos_tasks.erase(task)
 		tasks.erase(task)
 		removed.append(task)
+		task_removed.emit(task.id)
+		task_visual_state_changed.emit(task.id)
 	if pos_tasks.is_empty():
 		_tasks_by_pos.erase(pos)
 	else:
@@ -183,6 +226,8 @@ func remove_task(task) -> bool:
 		_tasks_by_pos[task.pos] = pos_tasks
 	tasks.erase(task)
 	active_count_changed.emit(tasks.size())
+	task_removed.emit(task.id)
+	task_visual_state_changed.emit(task.id)
 	return true
 
 
@@ -295,6 +340,7 @@ func _prune_invalid_assist_waiters() -> void:
 #region Task Maintenance
 func clear() -> void:
 	var had_tasks := not tasks.is_empty()
+	var removed_ids: Array = _tasks_by_id.keys()
 	tasks.clear()
 	_tasks_by_id.clear()
 	_tasks_by_pos.clear()
@@ -303,10 +349,32 @@ func clear() -> void:
 	next_id = 1
 	if had_tasks:
 		active_count_changed.emit(0)
+		for task_id in removed_ids:
+			task_removed.emit(int(task_id))
+			task_visual_state_changed.emit(int(task_id))
 
 
 func active_count() -> int:
 	return tasks.size()
+
+
+func tasks_near(
+	pos: Vector3i,
+	radius_xz: int,
+	radius_y: int
+) -> Array:
+	var nearby: Array = []
+	for x in range(pos.x - radius_xz, pos.x + radius_xz + 1):
+		for y in range(pos.y - radius_y, pos.y + radius_y + 1):
+			for z in range(pos.z - radius_xz, pos.z + radius_xz + 1):
+				for task in _tasks_by_pos.get(Vector3i(x, y, z), []):
+					nearby.append(task)
+	return nearby
+
+
+func _on_task_visual_state_changed(task) -> void:
+	if task != null and _tasks_by_id.has(task.id):
+		task_visual_state_changed.emit(task.id)
 
 
 func count_active_by_type_and_material(task_type: int, material: int) -> int:

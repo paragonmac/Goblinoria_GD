@@ -111,8 +111,12 @@ func _process(dt: float) -> void:
 		return
 	_handle_gameplay_input()
 	_run_frame_updates(dt)
-	_pump_directional_y_prewarm()
-	_pump_background_level_warmup()
+	if debug_overlay != null:
+		debug_overlay.run_timed("Main.pump_directional_y_prewarm", Callable(self, "_pump_directional_y_prewarm"))
+		debug_overlay.run_timed("Main.pump_background_level_warmup", Callable(self, "_pump_background_level_warmup"))
+	else:
+		_pump_directional_y_prewarm()
+		_pump_background_level_warmup()
 
 
 func _input(event: InputEvent) -> void:
@@ -284,7 +288,7 @@ func _run_timed_updates(dt: float) -> void:
 	debug_overlay.run_timed("Main.update_camera", Callable(self, "update_camera").bind(dt))
 	var view_rect: Rect2 = get_stream_view_rect()
 	var plane_y: float = float(world.top_render_y)
-	debug_overlay.run_timed("World.update_streaming", Callable(world, "update_streaming").bind(view_rect, plane_y, dt))
+	debug_overlay.run_timed("World.update_streaming", Callable(world, "update_streaming").bind(view_rect, plane_y, dt, camera))
 	debug_overlay.run_timed("Main.handle_mouse", Callable(self, "handle_mouse"))
 	debug_overlay.run_timed("Main.update_hover_preview", Callable(self, "update_hover_preview"))
 	debug_overlay.run_timed("Main.update_info_hover", Callable(self, "update_info_hover"))
@@ -299,7 +303,7 @@ func _run_direct_updates(dt: float) -> void:
 	update_camera(dt)
 	var view_rect: Rect2 = get_stream_view_rect()
 	var plane_y: float = float(world.top_render_y)
-	world.update_streaming(view_rect, plane_y, dt)
+	world.update_streaming(view_rect, plane_y, dt, camera)
 	handle_mouse()
 	update_hover_preview()
 	update_info_hover()
@@ -886,7 +890,7 @@ func _format_arena_generation_detail(phase: String, progress: Dictionary) -> Str
 		return stats_line
 	var pass_name: String = str(progress.get("pipeline_pass_name", ""))
 	if pass_name.is_empty():
-		return "Layers: climate, biome, strata, caves, water, ores, trees, flowers"
+		return "Layers: climate, biome, strata, caves, water, ores, flowers"
 	var pass_completed: int = int(progress.get("pipeline_pass_completed", 0))
 	var pass_total: int = maxi(int(progress.get("pipeline_pass_total", 0)), 1)
 	var pass_state: String = str(progress.get("pipeline_pass_state", ""))
@@ -895,7 +899,7 @@ func _format_arena_generation_detail(phase: String, progress: Dictionary) -> Str
 		pass_number = clampi(pass_completed, 1, pass_total)
 	var lines: Array[String] = [
 		"Now: %s (%d/%d)" % [_humanize_generation_pass(pass_name), pass_number, pass_total],
-		"Layers: climate, biome, strata, caves, water, ores, trees, flowers",
+		"Layers: climate, biome, strata, caves, water, ores, flowers",
 	]
 	if not stats_line.is_empty():
 		lines.append(stats_line)
@@ -912,8 +916,7 @@ func _format_generation_stats_line(progress: Dictionary) -> String:
 	var stats: Dictionary = stats_value
 	if stats.is_empty():
 		return ""
-	return "Stats: trees %d | flowers %d | water %d | coal %d | iron %d | caves %d cells, %d rooms | cave steps %d | brushes %d" % [
-		int(stats.get("trees_placed", 0)),
+	return "Stats: flowers %d | water %d | coal %d | iron %d | caves %d cells, %d rooms | cave steps %d | brushes %d" % [
 		int(stats.get("flower_blocks", stats.get("flowers_placed", 0))),
 		int(stats.get("water_blocks", 0)),
 		int(stats.get("coal_blocks", 0)),
@@ -945,8 +948,6 @@ func _humanize_generation_pass(pass_name: String) -> String:
 			return "Painting surfaces"
 		"apply_ramps":
 			return "Applying ramps"
-		"place_trees":
-			return "Planting trees"
 		"place_flowers":
 			return "Placing flowers"
 		"final_cleanup":

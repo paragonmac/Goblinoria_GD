@@ -29,9 +29,6 @@ const DIG_DURATION_COAL := 15.0
 const DIG_DURATION_IRON_ORE := 20.0
 const MOVE_TARGET_EPSILON := 0.01
 const ADJACENT_MANHATTAN_DISTANCE := 1
-const WANDER_ATTEMPTS := 8
-const WANDER_DIST_MIN := 1
-const WANDER_DIST_MAX := 10
 const IDLE_TASK_SEARCH_INTERVAL := 0.15
 const WAITING_REPATH_INTERVAL := 2.5
 const FALL_SPEED := 14.0
@@ -844,34 +841,26 @@ func update_wander(dt: float, world, pathfinder) -> void:
 		return
 
 	var start: Vector3i = get_block_coord()
-	for _i in range(WANDER_ATTEMPTS):
-		var dist: int = rng.randi_range(WANDER_DIST_MIN, WANDER_DIST_MAX)
-		var dx: int = rng.randi_range(-dist, dist)
-		var dz: int = rng.randi_range(-dist, dist)
-		if dx == 0 and dz == 0:
-			continue
-		var x: int = start.x + dx
-		var y: int = start.y
-		var z: int = start.z + dz
-		if not world.is_block_coord_valid(x, y, z):
-			continue
-		if not pathfinder.is_walkable(world, x, y, z):
-			continue
-		var goal: Vector3i = Vector3i(x, y, z)
-		var found: Array = pathfinder.find_path(world, start, goal)
-		if found.size() > 0:
-			if world != null and world.task_queue != null:
-				world.task_queue.clear_assist_waiter(self)
-			path = found
-			path_index = 0
-			movement_intent = MovementIntent.WANDER
-			assist_task_id = -1
-			set_target_from_path(world)
-			set_state(WorkerState.MOVING)
-			_trace(world, "wander_started", null, "target=%s path_length=%d" % [goal, path.size()])
-			return
+	var neighbors: Array = pathfinder.get_neighbors(world, start)
+	if not neighbors.is_empty():
+		var goal: Vector3i = neighbors[rng.randi_range(0, neighbors.size() - 1)]
+		if world != null and world.task_queue != null:
+			world.task_queue.clear_assist_waiter(self)
+		path = [goal]
+		path_index = 0
+		movement_intent = MovementIntent.WANDER
+		assist_task_id = -1
+		set_target_from_path(world)
+		set_state(WorkerState.MOVING)
+		_trace(world, "wander_started", null, "target=%s path_length=%d mode=local_step candidates=%d" % [
+			goal,
+			path.size(),
+			neighbors.size(),
+		])
+		return
 
 	wander_wait = rng.randf_range(WANDER_WAIT_MIN, WANDER_WAIT_MAX)
+	_trace(world, "wander_failed", null, "reason=no_local_neighbors")
 #endregion
 
 

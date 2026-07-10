@@ -11,9 +11,10 @@ const Y_DIRECTIONAL_PREWARM_BLOCKS_AHEAD := 8
 const Y_DIRECTIONAL_PREWARM_GENERATION_RESULT_BUDGET := 8
 const Y_DIRECTIONAL_PREWARM_MESH_RESULT_BUDGET := 4
 const Y_DIRECTIONAL_PREWARM_MESH_QUEUE_BUDGET := 32
-const BACKGROUND_WARMUP_GENERATION_RESULT_BUDGET := 16
-const BACKGROUND_WARMUP_MESH_RESULT_BUDGET := 8
-const BACKGROUND_WARMUP_MESH_QUEUE_BUDGET := 32
+const BACKGROUND_WARMUP_GENERATION_RESULT_BUDGET := 2
+const BACKGROUND_WARMUP_MESH_RESULT_BUDGET := 2
+const BACKGROUND_WARMUP_MESH_RESULT_TIME_BUDGET_MS := 2.0
+const BACKGROUND_WARMUP_MESH_QUEUE_BUDGET := 4
 
 var owner_node: Node
 var world: World
@@ -96,7 +97,7 @@ func _change_render_layer_with_loading(delta: int, from_y: int, target_y: int, s
 	_log_render_height_change(delta)
 	if world != null:
 		var view_rect: Rect2 = _get_stream_view_rect_for_y(world.top_render_y)
-		world.update_streaming(view_rect, float(world.top_render_y), 0.0)
+		world.update_streaming(view_rect, float(world.top_render_y), 0.0, _active_camera())
 	var snapshot_after: Dictionary = y_transition_profiler.capture_snapshot()
 	ready_profile["mesh_total"] = mesh_targets_before.size()
 	ready_profile["mesh_ready_before"] = mesh_ready_before
@@ -144,7 +145,7 @@ func prepare_world_for_reveal(status_prefix: String) -> void:
 	var view_rect: Rect2 = _get_stream_view_rect_for_y(world.top_render_y)
 	var plane_y: float = float(world.top_render_y)
 	await _ensure_render_y_ready(world.top_render_y, status_prefix)
-	world.update_streaming(view_rect, plane_y, 0.0)
+	world.update_streaming(view_rect, plane_y, 0.0, _active_camera())
 
 
 func _ensure_render_y_ready(render_y: int, status_prefix: String) -> Dictionary:
@@ -467,7 +468,10 @@ func _pump_background_level_warmup(world_started: bool) -> void:
 	if world.generator != null:
 		world.generator.process_generation_results(BACKGROUND_WARMUP_GENERATION_RESULT_BUDGET)
 	if world.renderer != null:
-		world.renderer.process_mesh_results(BACKGROUND_WARMUP_MESH_RESULT_BUDGET)
+		world.renderer.process_mesh_results_time_budget(
+			BACKGROUND_WARMUP_MESH_RESULT_TIME_BUDGET_MS,
+			BACKGROUND_WARMUP_MESH_RESULT_BUDGET
+		)
 	if background_warmup_mesh_targets.is_empty():
 		_begin_next_background_warmup_band()
 		if background_warmup_mesh_targets.is_empty():
@@ -479,13 +483,13 @@ func _pump_background_level_warmup(world_started: bool) -> void:
 		var processed: int = 0
 		while background_warmup_mesh_index < background_warmup_mesh_targets.size() and processed < BACKGROUND_WARMUP_MESH_QUEUE_BUDGET:
 			var coord: Vector3i = background_warmup_mesh_targets[background_warmup_mesh_index]
-			_queue_startup_chunk_mesh(coord, false)
+			_queue_startup_chunk_mesh_cache(coord, false)
 			background_warmup_mesh_index += 1
 			processed += 1
 		if background_warmup_mesh_index >= background_warmup_mesh_targets.size():
 			background_warmup_meshes_queued = true
 	if background_warmup_meshes_queued:
-		var ready: int = _count_ready_startup_chunks(background_warmup_mesh_targets)
+		var ready: int = _count_cached_full_mesh_chunks(background_warmup_mesh_targets)
 		if ready >= background_warmup_mesh_targets.size():
 			prepared_chunk_bands[background_warmup_band] = true
 			_clear_background_warmup_active()
@@ -496,7 +500,7 @@ func _begin_next_background_warmup_band() -> void:
 		var cy: int = int(background_warmup_queue.pop_front())
 		if cy < 0 or cy >= World.WORLD_CHUNKS_Y:
 			continue
-		if _is_chunk_band_ready(cy):
+		if _is_chunk_band_cached(cy):
 			prepared_chunk_bands[cy] = true
 			continue
 		var mesh_bands: Array[int] = []
@@ -519,11 +523,11 @@ func _clear_background_warmup_active() -> void:
 	background_warmup_meshes_queued = false
 
 
-func _is_chunk_band_ready(cy: int) -> bool:
+func _is_chunk_band_cached(cy: int) -> bool:
 	var bands: Array[int] = []
 	bands.append(cy)
 	var targets: Array[Vector3i] = _build_chunk_targets_for_bands(bands)
-	return not targets.is_empty() and _count_ready_startup_chunks(targets) >= targets.size()
+	return not targets.is_empty() and _count_cached_full_mesh_chunks(targets) >= targets.size()
 
 
 func _debug_overlay() -> DebugOverlay:
@@ -532,6 +536,15 @@ func _debug_overlay() -> DebugOverlay:
 	var overlay: Variant = owner_node.get("debug_overlay")
 	if overlay is DebugOverlay:
 		return overlay
+	return null
+
+
+func _active_camera() -> Camera3D:
+	if owner_node == null:
+		return null
+	var camera_value: Variant = owner_node.get("camera")
+	if camera_value is Camera3D:
+		return camera_value
 	return null
 
 
