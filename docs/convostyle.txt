@@ -1,0 +1,157 @@
+Looks like we've more or less got the cow level content 
+
+Step 1 was getting this far: https://youtu.be/58LQdnnz6cU?si=P-vnI0NF71lXLguY
+
+But apparently we've gotten past the dead end there to get to the real cow level and the cow king kill:
+https://youtu.be/OKiTVZ6pheg?si=5Ivbtio9t0XCtRI6
+Edited5:05 AM
+
+Sounds like there could be an even deeper cow secret but there's just speculation right now based on some of the unique cow king drops like prime rib
+
+Also, classy move by the Mets radio team
+https://x.com/i/status/2051466579464925574
+11:40 PM
+
+That's awesome
+11:42 PM
+
+Wed, May 6
+
+Yeah I mean I've got so many summer back yard memories with John Sterling narrating it all. Baseball is still good on radio in a way that none of the other sports are, especially when they're as good as Sterling
+
+These days I can stream everything and I have access to lots of screens, so I tend to get the Michael Kay version which I still love... But even so, when there's a big Yankee moment I'd find myself on Twitter trying to find the John Sterling call
+2:31 AM
+
+Well said. It weird knowing you wont hear him anymore.
+
+He will be missed, he did a lot with the time he had and it shows
+12:49 PM
+
+Fri, May 8
+
+Just randomly thought about how bad the head manager at McDonald's was when she was handed the golden ticket of an award winning staff that got along
+
+I'm watching some job market stuff and it reminded me I guess
+
+I think I never fully internalized it because before having a real career job in software it was actually super common that the managers were selfish terrible monsters
+
+Thankfully in the real professional world that's more rare it seems
+2:07 AM
+
+The whole place was a shit show, but we made it work
+4:27 AM
+
+I'd say for a mcdonalds it was probably less of a shit show than average, and really just commenting on the management quality. She's gotta be like the second worst manager I've ever worked for in my life, only beaten by the manager at 7-11
+2:26 PM
+
+Lol
+
+Yes
+
+Remember when she yelled at us to get out of the building after closing
+2:43 PM
+
+Yep
+2:57 PM
+
+She was distant, she never left the office to help, and it's like the more popular and helpful you became, the more she resented you for some unknown reason
+3:15 PM
+
+I got a good laugh out of this epic met hater call
+https://youtu.be/6AbTFnFooxw?t=1408&si=tgzhiKsQDJxbAqKp
+3:28 PM
+
+holyshit this guy
+4:27 PM
+
+Spencer Jones MLB debut tonight. Hoping the kid gets off to a strong start 🤞
+5:49 PM
+
+Sat, May 9
+
+It's wild to me how much game designers don't have respect for their players time.
+
+Bad in general throughout the industry imo, but worse in AAA and even worse in Japanese AAA
+
+I've got like 20 minutes while I get some lunch heated up... Can basically not play anything except specific indie titles or else I'll be in the middle of a cut scene or I'll have to replay part of it over again next time because I had to leave before all the shit finished
+
+So I guess I don't play anything at all. Cool man 👍
+3:18 PM
+
+its a common thing that I am noticing now... how much filler is games. I have few "fuck around for 10 minutes" games and they are all indie titles
+3:19 PM
+
+Yep
+
+I had to replay the beginning of two quests in the d4 loh campaign because the devs decided it's impossible to stop where I stopped and the only resolution was to snap the quest back to the beginning
+3:21 PM
+
+yea, d4 is so bad with that
+
+and you walk away to take a shit and the game logs out out
+
+and you have to start over
+3:22 PM
+
+Imagine having the attitude "don't play my game unless you can dedicate 2-2.5 hours min and you won't know exactly how much ahead of time either"
+3:22 PM
+
+I think it's bullshit and I'm not a parent. Parents particularly fucked I'd say
+3:52 PM
+
+Sun, May 10
+
+On a random note: I'm doing Linux gaming on hard mode using nixos with hyprland which uses wayland on a 32:9 monitor and I've been such a happy user compared to what my last few months using Windows were like
+Edited12:25 AM
+
+It's like after years of windows getting just a bit worse with each release, I'm back to that old feeling of truly owning and controlling my shit
+
+The slow erosion of it all made me not realize how bad it had gotten until I finally pulled the trigger on leaving
+12:27 AM
+
+yea, you are on the other side of the learn curve and there is no trillion dollar company about to fuck your shit up and ruin your OS
+6:07 AM
+
+Tue, May 12
+
+Further optimizations led to being able to create 100k empty commits with my version control system in under 3 minutes 30, down from 9 minutes in the initial implementation
+
+So now I'm well under 1 frame to create an empty commit when there's already 100k of them, assuming 60hz monitor
+Edited2:38 AM
+
+Which means the commit is created before the monitor can tell you, which is going to remain the benchmark goal as more features are added
+Edited2:39 AM
+
+60hz admittedly a low benchmark in 2026 for nerds like me, but I think I would still qualify on a 120hz monitor most of the time, and the Microsoft windows devs are celebrating getting their "run" UI that has done literally no processing yet on the screen in 90-100 milliseconds. They're like high fiving each other and telling people about it
+Edited2:43 AM
+
+My program had to read and evaluate 100k entries to finish and it's like an order of magnitude faster
+2:44 AM
+
+Thats pretty awesome
+
+Im wondering what microsoft ms would be if it wasnt so scope/feature bloated
+4:59 PM
+
+The company structure is also a problem. "Head" of GitHub is a guy in the ai division and it shows. There's nobody in charge of GitHub that only cares about the betterment of GitHub and that loves open source development
+
+Same can be said with how the Xbox division has been run in recent years. Business person in change instead of how Xbox started with game lover in charge
+
+It's clear as day too and yet somehow Microsoft either doesn't care for some unknown reason, or is completely blind to it for some unknown reason
+5:12 PM
+
+and they ban the term microslop and then shut down the discord/reddit I forget which
+5:21 PM
+
+From the Steam community on Reddit: Apparently, the new Steam Controller sometimes does the Wilhelm scream when dropped while in Big Picture Mode.
+Explore this post and more from the Steam community
+www.reddit.com
+
+https://www.reddit.com/r/Steam/comments/1tblc7e/apparently_the_new_steam_controller_sometimes/
+
+Thats pretty funny
+11:06 PM
+
+Assuming real, which it looks like from the comments, yeah
+
+I kinda want a steam controller but it's expensive and has the left thumbstick in towards the middle like Playstation instead of the xbox style where it's on the left like I'm used to. I'm assuming I could get used to it

@@ -3,5 +3,6 @@
     "godotTools.lsp.serverPort": 6005,
     "files.exclude": {
         "**/*.uid": true
-    }
+    },
+    "godotTools.editorPath.godot4": "c:\\Users\\trito\\Downloads\\Godot_v4.7.2-stable_win64.exe"
 }
