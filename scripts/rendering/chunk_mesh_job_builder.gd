@@ -34,9 +34,7 @@ func build_mesh_job(
 		return {}
 	if top_render_y < 0:
 		top_render_y = world.top_render_y
-	var chunk_base_y: int = coord.y * World.CHUNK_SIZE
-	if top_render_y < chunk_base_y:
-		return {}
+	# Geometry and cache entries cover the full chunk; the shader cuts the slice.
 	var local_top: int = World.CHUNK_SIZE - 1
 	var missing_neighbors: Array = []
 	var neighbors: Dictionary = {

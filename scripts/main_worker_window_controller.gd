@@ -2,6 +2,25 @@ extends RefCounted
 class_name MainWorkerWindowController
 ## Worker management window shown as an in-game panel.
 
+signal popup_dismissed_by_right_click
+
+# Embedded OptionButton popups normally dismiss only on an outside left click.
+# Their viewport owns outside right clicks too, so Main cannot arbitrate them.
+class RolePopupInput extends Node:
+	var popup: PopupMenu
+	var dismissed: Callable
+
+	func _input(event: InputEvent) -> void:
+		if not popup.visible or not event is InputEventMouseButton:
+			return
+		if event.button_index != MOUSE_BUTTON_RIGHT or not event.pressed:
+			return
+		if Rect2(Vector2.ZERO, Vector2(popup.size)).has_point(event.position):
+			return
+		get_viewport().set_input_as_handled()
+		popup.hide()
+		dismissed.call()
+
 #region Constants
 const WINDOW_TITLE := "Workers"
 const WINDOW_HINT := "Press W to close"
@@ -124,6 +143,15 @@ func toggle() -> void:
 		poll_timer.stop()
 
 
+func open() -> void:
+	visible = true
+	if panel != null:
+		panel.show()
+	update_window(current_world)
+	if poll_timer != null:
+		poll_timer.start()
+
+
 func close() -> void:
 	visible = false
 	if panel != null:
@@ -235,6 +263,11 @@ func _create_role_selector(worker_id: int) -> OptionButton:
 		selector.add_item(WorkerRolesScript.display_name(role_id), role_id)
 	selector.item_selected.connect(_on_role_selected.bind(worker_id, selector))
 	row.add_child(selector)
+	var popup_input := RolePopupInput.new()
+	popup_input.name = "OutsideRightDismissal"
+	popup_input.popup = selector.get_popup()
+	popup_input.dismissed = func() -> void: popup_dismissed_by_right_click.emit()
+	selector.get_popup().add_child(popup_input)
 	return selector
 
 

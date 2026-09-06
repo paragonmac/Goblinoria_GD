@@ -8,10 +8,11 @@
 
 ## Current Implementation
 
-In [world_streaming.gd](scripts/world_streaming.gd):
+In [world_streaming.gd](../scripts/world_streaming.gd):
+
 - `update_streaming()` computes the render-zone bounds and partitions spiral offsets into `render_spiral_offsets` and `buffer_spiral_offsets`.
 - `enqueue_stream_chunks()` enqueues render-zone offsets first, then buffer-zone offsets (preserving center-spiral order within each group).
-- `process_chunk_queue()` remains FIFO; prioritization comes from enqueue ordering.
+- `process_chunk_queue()` remains FIFO; stream-level prioritization comes from enqueue ordering. Downstream generation and mesh queues also receive priority flags; the generation queue can promote already-queued work.
 
 ## Remaining Work (Optional)
 
@@ -32,7 +33,7 @@ In [world_streaming.gd](scripts/world_streaming.gd):
 
 - **Anchor change:** Both queues cleared and rebuilt - no special handling needed
 - **Render zone expansion:** New render-zone chunks already in buffer queue should ideally be promoted. For simplicity, queue reset on bound change handles this.
-- **Spiral order preserved:** Each tier maintains center-spiral order independently
+- **Spiral enqueue order preserved:** Each tier maintains center-spiral stream enqueue order independently; asynchronous completion order is not guaranteed.
 
 ---
 

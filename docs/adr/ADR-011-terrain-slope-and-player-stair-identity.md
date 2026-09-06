@@ -13,6 +13,8 @@ Player stairs retain IDs 100 through 111. Generated terrain slopes use IDs 112 t
 
 The mesher encodes player stairs one level below their physical Y for render-level visibility. Terrain slopes encode their physical Y and are therefore removed when their level is above the selected slice.
 
+The upper connection exception does not restrict visibility below the selected slice. Exposed cave walls and floors in lower chunk bands remain eligible down to the world's minimum render Y. A block being covered from above does not hide its exposed side faces; only synthetic internal top faces are suppressed below the cut. Camera orientation must not determine whether a real wall exists.
+
 Save format V5 records the expanded block table. Loading a V4 save migrates only a legacy ramp that matches the deterministic terrain ramp ID and height at the same position. Old mesh caches are rejected through the mesher cache version.
 
 ## Consequences

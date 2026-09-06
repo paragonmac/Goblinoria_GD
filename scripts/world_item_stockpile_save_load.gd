@@ -1,6 +1,8 @@
 extends RefCounted
 class_name WorldItemStockpileSaveLoad
 
+const WorldSaveTransactionScript = preload("res://scripts/world_save_transaction.gd")
+
 const ITEM_STOCKPILE_FILE_NAME := "items_stockpiles.dat"
 const ITEM_STOCKPILE_MAGIC := 0x49544D53
 
@@ -22,13 +24,11 @@ func save_items_and_stockpiles(world: World, world_dir: String) -> bool:
 				item["pos"] = worker.get_block_coord()
 				item["stored_stockpile_id"] = -1
 				break
-	file.store_32(ITEM_STOCKPILE_MAGIC)
-	file.store_var({
+	var ok := file.store_32(ITEM_STOCKPILE_MAGIC) and file.store_var({
 		"items": items,
 		"stockpiles": world.stockpile_store.as_save_array(),
 	})
-	file.flush()
-	return true
+	return WorldSaveTransactionScript.finish_write(file) and ok
 
 
 func load_items_and_stockpiles(world: World, world_dir: String) -> bool:

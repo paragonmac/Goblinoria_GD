@@ -2,10 +2,12 @@
 
 This is the working plan for chunked storage, streaming, and persistence.
 
+Reading guide (2026-09-05): this mixes historical implementation steps with future proposals. [Current Architecture](current_architecture.md) and source constants describe the running prototype; [Prototype Checkpoint](prototype_checkpoint.md) distinguishes implementation from validation. The historical defaults at the end are not active configuration.
+
 Active follow-up work is tracked in GitHub Issues. Historical completed checklist items remain here for context; open work is linked to issues instead of tracked as local TODO checkboxes.
 
 ## Goals
-- Finite chunked in-memory storage (no full-world array).
+- Finite chunked resident storage; full-map generation temporarily uses a full-world volume before baking chunks.
 - Deterministic on-demand generation (seed + coord).
 - Versioned save/load with explicit mismatch detection.
 - Streaming with load priorities for the current finite resident world.
@@ -21,7 +23,7 @@ Active follow-up work is tracked in GitHub Issues. Historical completed checklis
 - Render-level reveal readiness is viewport-bounded to the visible view plus a 1-chunk X/Z margin; directional Y prewarm handles the broader buffered bounds in the background.
 - Current scope is a finite 32x32x32 chunk world centered on origin; signed chunk coords and negative-safe coordinate math are still required for the negative half of the map.
 - Hard invisible bounds prevent generation, selection, pathing, camera movement, and streaming outside the finite X/Z rectangle.
-- The title-screen/menu checkbox `Generate and cache full map` controls `Main.generate_full_map_on_startup`: off keeps startup to the limited streamed view, while on runs the parallel arena cooker to generate every finite chunk and raw full-chunk mesh cache before reveal.
+- The title-screen/menu checkbox `Generate and cache full map` controls `Main.generate_full_map_on_startup`: off keeps startup to the limited streamed view, while on runs the arena cooker to generate every finite chunk and raw full-chunk mesh cache before reveal. Layered block generation uses one background task; mesh-cache builds run in parallel.
 
 ## Phase 0: Coord Math Fixes
 - [x] Add `floor_div()` and `positive_mod()` helpers for negative-safe chunk math.
@@ -76,10 +78,10 @@ Active follow-up work is tracked in GitHub Issues. Historical completed checklis
 - [x] Buffer zone: meshed and cached, but `visible = false`.
 - Tracked in [#7](https://github.com/paragonmac/Goblinoria_GD/issues/7): Decide whether runtime cache eviction is needed for worlds larger than the current finite map.
 - [x] View-scaled buffer expansion for stream/render bounds.
-- [x] Vertical streaming uses a centered render-level margin of +/-20 blocks, rounded to chunk boundaries.
+- [x] Render visibility retains cave surfaces from the selected level down to the world's minimum render Y, plus the adjacent upper connection band when required for player stairs. Readiness uses per-band camera footprints and generation-neighbor halos; see `current_architecture.md` and ADR-011. Cave GPU appearance and the increased visible-depth cost still need graphical validation.
 - [x] Y-level reveal gate prepares only the camera-visible bounds plus a 1-chunk X/Z safety margin.
 - [x] Directional Y prewarm queues the next chunk-height ahead using broader buffered render bounds.
-- [x] New-world full-map mode uses the arena cooker: parallel block generation, parallel raw mesh-cache builds, frame-budgeted merge, and a diagnostics CSV under `user://diagnostics`.
+- [x] New-world full-map mode uses the arena cooker: serial layered generation on one background task, parallel raw mesh-cache builds, frame-budgeted merge, and a diagnostics CSV under `user://diagnostics`.
 - Tracked in [#9](https://github.com/paragonmac/Goblinoria_GD/issues/9): Tighten the blocking Y-level reveal gate to the actual visible chunk set, targeting roughly 100 chunks at max zoom instead of the current axis-aligned camera rectangle.
 
 ## Milestone 6: Render Streaming Tied to Chunk State
@@ -123,15 +125,18 @@ Active follow-up work is tracked in GitHub Issues. Historical completed checklis
 - Tracked in [#14](https://github.com/paragonmac/Goblinoria_GD/issues/14): Use debug metrics and chunk node pool stats to decide whether SceneTree chunk instance overhead justifies a RenderingServer migration.
 - Tracked in [#14](https://github.com/paragonmac/Goblinoria_GD/issues/14): Keep current ArrayMesh output path until vertex count, triangle count, upload time, or node overhead is measured as the next bottleneck.
 
-## Open Decisions
-- Chunk size (current: 8).
-- World size (256^3 vs 512^3 for current build).
+## Future Scale Decisions (Not Current Configuration)
+- Revisit chunk size only with explicit save-version implications (current: 8).
+- Revisit world size beyond the current 256^3 blocks / 32x32x32 chunks only with an explicit scale decision.
 - Render radius + sim radius.
 - Memory budget limits for loaded chunks.
 - Block table hash strategy (CRC32 of CSV).
 - Spawn anchor format and migration rules.
 
-## Suggested Defaults (Tunable)
+## Historical Suggested Defaults (Not Applied)
+
+These earlier tuning proposals are retained as background, not instructions to change the current world or introduce cache eviction. In particular, the active chunk size is 8, not the proposed 16 below. Larger-world cache policy remains tracked in issue #7.
+
 - Chunk size: 16 (balances mesh granularity vs overhead).
 - Zone radii: `RENDER_RADIUS = 8`, `BUFFER_RADIUS = 10` (chunks).
 - Memory budget: soft cap 2000 chunks, hard cap 2500 chunks.

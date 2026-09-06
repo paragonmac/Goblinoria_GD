@@ -15,6 +15,12 @@ Selection previews and task overlays must be world-space block overlays, not scr
 
 Raycast selection respects `top_render_y`; hidden blocks above the current render level should not be selectable.
 
+World selection only starts from mouse presses that the GUI has not consumed. A release consumed by the GUI cancels an active world drag rather than committing a selection behind a panel. Erase targeting and previews include stockpile cells, including the cell above a clicked floor.
+
+Right-click opens a context menu on release; a right gesture that moves at least six viewport pixels becomes a camera pan for the rest of that gesture. Right-press during left selection cancels it without opening a menu. GUI-origin and popup-dismissal gestures cannot acquire world input. While the context popup owns input, camera and selection controls are suspended but simulation and streaming continue.
+
+Context tool entries select the existing active mode; they do not designate the opening cell. Immediate actions capture a visible hit with a non-generating raycast. Inspect uses the hit; pending-task cancellation and stockpile removal independently prefer the hit, then the cell above. These actions revalidate captured identities before changing state, never silently retarget, and leave the active mode unchanged. Inspection displays a closable cell snapshot rather than replacing hover state.
+
 ## Consequences
 
 - Changing camera angle should not detach the selection preview from the world grid.

@@ -25,9 +25,13 @@ const CATEGORIES := [
 var stockpiles: Dictionary = {}
 var cells: Dictionary = {}
 var next_id := 1
+var live_diagnostics = null
 
 
 func clear() -> void:
+	if _diagnostics_enabled():
+		for stockpile_id in stockpiles:
+			live_diagnostics.invalidate("stockpile", str(stockpile_id), "stockpiles_cleared")
 	var had_stockpiles := not stockpiles.is_empty()
 	stockpiles.clear()
 	cells.clear()
@@ -91,6 +95,9 @@ func add_cells(stockpile_id: int, cell_list: Array[Vector3i]) -> void:
 	stockpile["cells"] = stockpile_cells
 	stockpiles[stockpile_id] = stockpile
 	if added:
+		if _diagnostics_enabled():
+			live_diagnostics.invalidate("stockpile", str(stockpile_id), "stockpile_cells_added")
+			live_diagnostics.observe("stockpile", str(stockpile_id), "stockpile_cells_added", {"cell_count": stockpile_cells.size()})
 		haul_state_changed.emit("stockpile_cells_added")
 		visual_state_changed.emit("stockpile_cells_added")
 
@@ -114,6 +121,8 @@ func remove_cells(cell_list: Array[Vector3i]) -> Array[int]:
 	var ids: Array[int] = []
 	for stockpile_id in touched.keys():
 		ids.append(int(stockpile_id))
+		if _diagnostics_enabled():
+			live_diagnostics.invalidate("stockpile", str(stockpile_id), "stockpile_cells_removed")
 	if not ids.is_empty():
 		haul_state_changed.emit("stockpile_cells_removed")
 		visual_state_changed.emit("stockpile_cells_removed")
@@ -169,6 +178,9 @@ func set_category_allowed(stockpile_id: int, category: String, allowed_value: bo
 	stockpile["allowed_categories"] = allowed
 	stockpiles[stockpile_id] = stockpile
 	haul_state_changed.emit("stockpile_category_changed")
+	if _diagnostics_enabled():
+		live_diagnostics.invalidate("stockpile", str(stockpile_id), "stockpile_category_changed")
+		live_diagnostics.observe("stockpile", str(stockpile_id), "stockpile_category_changed", {"category": category, "allowed": allowed_value})
 
 
 func set_material_override(stockpile_id: int, material_id: int, allowed_value: bool) -> void:
@@ -182,6 +194,9 @@ func set_material_override(stockpile_id: int, material_id: int, allowed_value: b
 	stockpile["material_overrides"] = overrides
 	stockpiles[stockpile_id] = stockpile
 	haul_state_changed.emit("stockpile_material_changed")
+	if _diagnostics_enabled():
+		live_diagnostics.invalidate("stockpile", str(stockpile_id), "stockpile_material_changed")
+		live_diagnostics.observe("stockpile", str(stockpile_id), "stockpile_material_changed", {"material_id": material_id, "allowed": allowed_value})
 
 
 func category_for_material(material_id: int) -> String:
@@ -220,3 +235,7 @@ func _normalize_categories(value) -> Dictionary:
 		if source.has(category):
 			allowed[category] = bool(source[category])
 	return allowed
+
+
+func _diagnostics_enabled() -> bool:
+	return live_diagnostics != null and live_diagnostics.enabled

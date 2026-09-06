@@ -2,6 +2,8 @@ extends RefCounted
 class_name WorldWorkerSaveLoad
 ## Persists worker role assignments while workers continue to respawn on load.
 
+const WorldSaveTransactionScript = preload("res://scripts/world_save_transaction.gd")
+
 const WORKER_FILE_NAME := "workers.dat"
 const WORKER_MAGIC := 0x574F524B
 const WorkerRolesScript = preload("res://scripts/worker_roles.gd")
@@ -23,10 +25,8 @@ func save_workers(world: World, world_dir: String) -> bool:
 	if file == null:
 		push_warning("Worker save failed: %s" % path)
 		return false
-	file.store_32(WORKER_MAGIC)
-	file.store_var({"roles": roles}, false)
-	file.flush()
-	return true
+	var ok := file.store_32(WORKER_MAGIC) and file.store_var({"roles": roles}, false)
+	return WorldSaveTransactionScript.finish_write(file) and ok
 
 
 func read_snapshot(world_dir: String) -> Dictionary:

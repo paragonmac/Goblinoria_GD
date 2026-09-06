@@ -52,8 +52,7 @@ func initialize(camera_ref: Camera3D, viewport_ref: Viewport) -> void:
 
 
 func reset_mouse_state() -> void:
-	right_mouse_down = false
-	prev_mouse_pos = Vector2.ZERO
+	end_pan()
 	free_orbit_dragging = false
 	free_orbit_prev_mouse_pos = Vector2.ZERO
 
@@ -85,7 +84,6 @@ func setup_camera(world: World) -> void:
 func update_camera(dt: float) -> void:
 	_update_free_orbit()
 	_apply_camera_rotation()
-	_update_camera_pan()
 	_update_camera_keyboard_movement(dt)
 	_clamp_camera_to_world()
 
@@ -237,21 +235,23 @@ func _snap_yaw_to_isometric_step(yaw: float) -> float:
 	return fposmod(ISO_YAW_DEG + steps * YAW_ROTATION_STEP_DEG, 360.0)
 
 
-func _update_camera_pan() -> void:
-	if viewport == null:
+func begin_pan(screen_pos: Vector2) -> void:
+	prev_mouse_pos = screen_pos
+	right_mouse_down = true
+
+
+func update_pan(screen_pos: Vector2) -> void:
+	if not right_mouse_down:
 		return
-	var down := Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT)
+	var delta := screen_pos - prev_mouse_pos
+	prev_mouse_pos = screen_pos
+	_apply_camera_pan(delta)
+	_clamp_camera_to_world()
 
-	if down and not right_mouse_down:
-		prev_mouse_pos = viewport.get_mouse_position()
 
-	if down:
-		var mouse_pos := viewport.get_mouse_position()
-		var delta := mouse_pos - prev_mouse_pos
-		_apply_camera_pan(delta)
-		prev_mouse_pos = mouse_pos
-
-	right_mouse_down = down
+func end_pan() -> void:
+	right_mouse_down = false
+	prev_mouse_pos = Vector2.ZERO
 
 
 func _apply_camera_pan(delta: Vector2) -> void:

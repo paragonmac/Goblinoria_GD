@@ -26,5 +26,9 @@ Toolchain-agnostic design intent for the project. The original Zig-era context h
 - **Fixed timestep:** 60 Hz baseline.
 
 ## Current Divergences / Open Questions
+
 - **World bounds:** current Godot prototype uses `World.CHUNK_SIZE = 8` and a finite 32x32x32 chunk world centered on origin (`x/z = -128..127`, `y = 0..255`). Treat as authoritative unless explicitly changed.
 - **Path caching:** design calls for short path segments; current pathfinder returns full paths.
+- **Simulation timing:** current `Main._process()` passes frame delta into world updates. A fixed 60 Hz simulation remains a design target, not an implemented determinism guarantee.
+- **Vertical axis:** the carried-forward Z-movement wording above predates Godot. Godot Y is vertical; generated terrain slopes and player stairs provide vertical access under ADR-002 and ADR-011.
+- **Feature status:** see the dated [Prototype Checkpoint](prototype_checkpoint.md). These design principles do not certify that every named system exists or has passed playtesting.

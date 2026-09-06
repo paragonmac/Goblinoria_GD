@@ -2,6 +2,8 @@ extends RefCounted
 class_name WorldBulkChunkSaveLoad
 ## Handles finite-world bulk block persistence through world_blocks.dat.
 
+const WorldSaveTransactionScript = preload("res://scripts/world_save_transaction.gd")
+
 #region Constants
 const BULK_CHUNKS_MAGIC := 0x474D4150
 const BULK_CHUNKS_VERSION := 2
@@ -113,22 +115,25 @@ func save_bulk_chunks(world: World, world_dir: String, block_table_hash: int) ->
 	if file == null:
 		push_warning("World bulk save failed: %s" % path)
 		return false
-	file.store_32(BULK_CHUNKS_MAGIC)
-	file.store_16(BULK_CHUNKS_VERSION)
-	file.store_16(World.CHUNK_SIZE)
-	file.store_16(World.WORLD_CHUNKS_X)
-	file.store_16(World.WORLD_CHUNKS_Y)
-	file.store_16(World.WORLD_CHUNKS_Z)
-	file.store_32(World.CHUNK_VOLUME)
-	file.store_32(block_table_hash)
-	file.store_32(entries.size())
+	if not (file.store_32(BULK_CHUNKS_MAGIC) \
+		and file.store_16(BULK_CHUNKS_VERSION) \
+		and file.store_16(World.CHUNK_SIZE) \
+		and file.store_16(World.WORLD_CHUNKS_X) \
+		and file.store_16(World.WORLD_CHUNKS_Y) \
+		and file.store_16(World.WORLD_CHUNKS_Z) \
+		and file.store_32(World.CHUNK_VOLUME) \
+		and file.store_32(block_table_hash) \
+		and file.store_32(entries.size())):
+		return false
 	for key in entries.keys():
 		var coord: Vector3i = key
 		var blocks = entries[coord]
 		if typeof(blocks) != TYPE_PACKED_BYTE_ARRAY:
 			continue
-		_write_bulk_chunk_entry(file, coord, PackedByteArray(blocks))
-	file.flush()
+		if not _write_bulk_chunk_entry(file, coord, PackedByteArray(blocks)):
+			return false
+	if not WorldSaveTransactionScript.finish_write(file):
+		return false
 	bulk_chunk_blocks = entries
 	bulk_chunks_loaded = true
 	return true
@@ -202,18 +207,16 @@ func load_bulk_chunks(
 
 
 #region Bulk Entry Format
-func _write_bulk_chunk_entry(file: FileAccess, coord: Vector3i, blocks: PackedByteArray) -> void:
-	_store_signed_32(file, coord.x)
-	_store_signed_32(file, coord.y)
-	_store_signed_32(file, coord.z)
+func _write_bulk_chunk_entry(file: FileAccess, coord: Vector3i, blocks: PackedByteArray) -> bool:
+	if not (_store_signed_32(file, coord.x) and _store_signed_32(file, coord.y) and _store_signed_32(file, coord.z)):
+		return false
 	var fill_id: int = _uniform_block_id(blocks)
 	if fill_id >= 0:
-		file.store_8(BULK_ENTRY_FILL)
-		file.store_16(fill_id)
-		file.store_8(COMPRESSION_NONE)
-		file.store_32(0)
-		file.store_32(blocks.size())
-		return
+		return file.store_8(BULK_ENTRY_FILL) \
+			and file.store_16(fill_id) \
+			and file.store_8(COMPRESSION_NONE) \
+			and file.store_32(0) \
+			and file.store_32(blocks.size())
 	var payload := blocks
 	var entry_kind: int = BULK_ENTRY_RAW
 	var compression: int = COMPRESSION_NONE
@@ -222,12 +225,12 @@ func _write_bulk_chunk_entry(file: FileAccess, coord: Vector3i, blocks: PackedBy
 		payload = compressed
 		entry_kind = BULK_ENTRY_COMPRESSED
 		compression = COMPRESSION_ZSTD
-	file.store_8(entry_kind)
-	file.store_16(0)
-	file.store_8(compression)
-	file.store_32(payload.size())
-	file.store_32(blocks.size())
-	file.store_buffer(payload)
+	return file.store_8(entry_kind) \
+		and file.store_16(0) \
+		and file.store_8(compression) \
+		and file.store_32(payload.size()) \
+		and file.store_32(blocks.size()) \
+		and file.store_buffer(payload)
 
 
 func _read_bulk_chunk_entry(file: FileAccess, bulk_version: int, chunk_volume: int) -> Dictionary:
@@ -333,8 +336,8 @@ func _update_bulk_load_stats(stats: Dictionary, entry: Dictionary) -> void:
 	stats["uncompressed_bytes"] = int(stats.get("uncompressed_bytes", 0)) + int(entry.get("uncompressed_len", 0))
 
 
-func _store_signed_32(file: FileAccess, value: int) -> void:
-	file.store_32(value & 0xffffffff)
+func _store_signed_32(file: FileAccess, value: int) -> bool:
+	return file.store_32(value & 0xffffffff)
 
 
 func _read_signed_32(file: FileAccess) -> int:

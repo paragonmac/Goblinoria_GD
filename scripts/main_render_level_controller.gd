@@ -78,6 +78,10 @@ func get_last_startup_load_metrics() -> Dictionary:
 	return last_startup_load_metrics.duplicate()
 
 
+func get_render_band_view_rects(render_y: int) -> Dictionary:
+	return target_builder.get_render_band_view_rects(render_y)
+
+
 func reset_loading_state() -> void:
 	_reset_level_loading_state()
 
@@ -152,7 +156,7 @@ func _refresh_streaming_after_render_level_change(render_y: int) -> void:
 		return
 	var view_rect: Rect2 = _get_stream_view_rect_for_y(render_y)
 	var active_camera := _active_camera()
-	world.update_streaming(view_rect, float(render_y), 0.0, active_camera)
+	world.update_streaming(view_rect, float(render_y), 0.0, active_camera, get_render_band_view_rects(render_y))
 	if world.streaming != null:
 		world.streaming.refresh_render_zone(active_camera)
 
@@ -218,8 +222,10 @@ func prepare_world_for_reveal(status_prefix: String) -> void:
 		return
 	var view_rect: Rect2 = _get_stream_view_rect_for_y(world.top_render_y)
 	var plane_y: float = float(world.top_render_y)
+	# Culling needs camera/bounds only; overlap it with mesh/terrain readiness.
+	world.update_streaming(view_rect, plane_y, 0.0, _active_camera(), get_render_band_view_rects(world.top_render_y))
 	await _ensure_render_y_ready(world.top_render_y, status_prefix)
-	world.update_streaming(view_rect, plane_y, 0.0, _active_camera())
+	world.update_streaming(view_rect, plane_y, 0.0, _active_camera(), get_render_band_view_rects(world.top_render_y))
 
 
 func _ensure_render_y_ready(render_y: int, status_prefix: String) -> Dictionary:

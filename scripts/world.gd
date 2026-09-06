@@ -202,6 +202,11 @@ var arena_cooker: WorldArenaCookerScript
 var streaming: WorldStreamingScript
 var raycaster: WorldRaycasterScript
 var debug_profiler: DebugProfiler
+# Main owns the recorder. Keep untyped so headless loading needs no class cache.
+var performance_recorder = null
+var live_diagnostics = null
+var diagnostics_workers_revision := 0
+var diagnostics_workers_by_id: Dictionary = {}
 var worker_trace = WorkerTraceScript.new()
 #endregion
 
@@ -266,6 +271,8 @@ func _ready() -> void:
 
 #region World Initialization
 func init_world(seed_world_flag: bool = true) -> void:
+	if live_diagnostics != null:
+		live_diagnostics.begin_world("world_initialized")
 	clear_tasks()
 	clear_workers()
 	clear_inventory()
@@ -305,11 +312,20 @@ func start_new_world(seed_value: int = -1) -> void:
 
 #region Save/Load
 func save_world(path: String) -> bool:
-	return save_load.save_world(path)
+	if live_diagnostics != null:
+		live_diagnostics.mark_event("saving_started")
+	var ok := save_load.save_world(path)
+	if live_diagnostics != null:
+		live_diagnostics.mark_event("saving_finished", {"success": ok})
+	return ok
 
 
 func load_world(path: String) -> bool:
+	if live_diagnostics != null:
+		live_diagnostics.mark_event("loading_started")
 	var ok := save_load.load_world(path)
+	if live_diagnostics != null:
+		live_diagnostics.mark_event("loading_finished", {"success": ok})
 	if ok:
 		clear_tasks()
 	if ok and renderer != null:
@@ -463,10 +479,14 @@ func set_block_raw(x: int, y: int, z: int, value: int, mark_dirty: bool) -> void
 		return
 	chunk.blocks[idx] = value
 	if mark_dirty:
+		if performance_recorder != null and performance_recorder.enabled:
+			performance_recorder.add_counter("terrain_change")
 		chunk.dirty = true
 		chunk.generated = true
 		chunk.mesh_state = ChunkDataScript.MESH_STATE_NONE
 		chunk.mesh_revision += 1
+		if live_diagnostics != null and live_diagnostics.enabled:
+			live_diagnostics.invalidate("chunk", coord, "terrain_changed")
 		if task_manager != null:
 			task_manager.invalidate_task_accessibility(Vector3i(x, y, z))
 		if renderer != null:
@@ -658,14 +678,67 @@ func get_generation_stats() -> Dictionary:
 
 #region World Update Loop
 func update_world(dt: float) -> void:
-	process_generation_results()
-	update_render_height_queue()
-	update_task_assignments()
-	update_workers(dt)
-	update_task_queue()
-	update_task_accessibility()
-	update_reassign_tasks(dt)
-	update_task_overlays_phase()
+	# SEE-ADR-013: Keep one phase sequence, independent of either timing sink.
+	run_performance_timed("World.process_generation_results", process_generation_results)
+	run_performance_timed("World.update_render_height_queue", update_render_height_queue)
+	run_performance_timed("World.update_task_assignments", update_task_assignments)
+	run_performance_timed("World.update_workers", update_workers.bind(dt))
+	run_performance_timed("World.update_task_queue", update_task_queue)
+	run_performance_timed("World.update_task_accessibility", update_task_accessibility)
+	run_performance_timed("World.update_reassign_tasks", update_reassign_tasks.bind(dt))
+	run_performance_timed("World.update_task_overlays", update_task_overlays_phase)
+
+
+func run_performance_timed(label: String, callback: Callable) -> void:
+	var started_usec := begin_performance_timing()
+	callback.call()
+	end_performance_timing(label, started_usec)
+
+
+## Main-thread spans; disabled sinks avoid clock reads and metric allocation.
+func begin_performance_timing() -> int:
+	if (debug_profiler != null and debug_profiler.enabled) or (performance_recorder != null and performance_recorder.enabled):
+		return Time.get_ticks_usec()
+	return -1
+
+
+func end_performance_timing(label: String, started_usec: int) -> void:
+	if started_usec < 0:
+		return
+	var elapsed_ms := float(Time.get_ticks_usec() - started_usec) / 1000.0
+	if debug_profiler != null and debug_profiler.enabled:
+		debug_profiler.add_sample(label, elapsed_ms)
+	if performance_recorder != null and performance_recorder.enabled:
+		performance_recorder.add_timing(label, elapsed_ms)
+
+
+## Main-thread only; call at the recorder's once-per-second sampling cadence.
+## No task/terrain/geometry scans. Missing subsystems are unavailable, not idle.
+func get_performance_snapshot() -> Dictionary:
+	var generation_stats: Dictionary = generator.get_generation_stats() if generator != null else {}
+	var mesh_stats: Dictionary = renderer.get_performance_snapshot() if renderer != null else {}
+	var path_stats: Dictionary = task_manager.path_search_scheduler.get_performance_snapshot() if task_manager != null else {}
+	var snapshot := {
+		"workers": workers.size(),
+		"active_tasks": task_queue.active_count() if task_queue != null else null,
+		"loaded_chunks": chunks.size(),
+		"top_render_y": top_render_y,
+		"memory_static_bytes": OS.get_static_memory_usage() if OS.is_debug_build() else null,
+		"generation_queued": generation_stats.get("queued"),
+		"generation_results_pending": generation_stats.get("results"),
+		"generation_executing": generation_stats.get("active"),
+		"path_queued": path_stats.get("queued"),
+		"path_results_pending": path_stats.get("results_pending"),
+		"path_executing": path_stats.get("executing"),
+		"haul_rebuilds_total": task_manager.haul_rebuild_count if task_manager != null else null,
+		"accessibility_checks_total": task_manager.accessibility_check_count if task_manager != null else null,
+	}
+	for key in ["queued", "results_pending", "in_flight", "visible_records", "prefetch_records", "cache_hits_total", "cache_misses_total", "cache_imports_total", "build_ms_total", "upload_ms_total", "pending_neighbor_remesh_chunks"]:
+		snapshot["mesh_" + key] = mesh_stats.get(key)
+	var visibility: Dictionary = renderer.get_visibility_snapshot() if renderer != null else {}
+	for key in ["pending", "in_flight", "result_pending", "fallback", "application_pending", "application_remaining", "requested_sequence", "accepted_sequence", "applied_sequence", "result_age_ms"]:
+		snapshot["visibility_" + key] = visibility.get(key)
+	return snapshot
 
 
 func update_workers(dt: float) -> void:
@@ -914,17 +987,27 @@ func find_stockpile_destination_for_item(item: Dictionary) -> Dictionary:
 	var best: Dictionary = {}
 	var best_priority := 3
 	var best_distance := INF
+	var observing: bool = live_diagnostics != null and live_diagnostics.enabled
+	var rejection_counts := {"candidates": 0, "material_conflict": 0, "reservation_conflict": 0, "full": 0} if observing else {}
 	for candidate: Dictionary in stockpile_store.candidate_cells_for_material(material_id):
+		if observing:
+			rejection_counts.candidates += 1
 		var pos: Vector3i = candidate.get("pos", Vector3i.ZERO)
 		var stored := item_store.stored_item_at(pos)
 		if not stored.is_empty() and int(stored.get("material_id", 0)) != material_id:
+			if observing:
+				rejection_counts.material_conflict += 1
 			continue
 		var reserved := _reserved_haul_space_at(pos, material_id)
 		if bool(reserved.get("blocked", false)):
+			if observing:
+				rejection_counts.reservation_conflict += 1
 			continue
 		var used := int(stored.get("count", 0)) + int(reserved.get("count", 0))
 		var capacity := stockpile_store.cell_capacity(pos)
 		if used >= capacity:
+			if observing:
+				rejection_counts.full += 1
 			continue
 		var priority := 0 if not stored.is_empty() else (1 if int(reserved.get("count", 0)) > 0 else 2)
 		var distance := pos.distance_squared_to(from_pos)
@@ -936,6 +1019,9 @@ func find_stockpile_destination_for_item(item: Dictionary) -> Dictionary:
 				"pos": pos,
 				"available_capacity": capacity - used,
 			}
+	if observing:
+		live_diagnostics.observe("item_destination", item.get("id", -1), "destination_selected" if not best.is_empty() else "no_destination",
+			{"rejections": rejection_counts, "selected": best, "material_id": material_id})
 	return best
 
 
@@ -996,13 +1082,15 @@ func reset_streaming_state() -> void:
 		streaming.reset_state()
 
 
-func update_streaming(view_rect: Rect2, plane_y: float, dt: float, camera: Camera3D = null) -> void:
+func update_streaming(view_rect: Rect2, plane_y: float, dt: float, camera: Camera3D = null, render_band_rects: Dictionary = {}) -> void:
 	if streaming != null:
-		streaming.update_streaming(view_rect, plane_y, dt, camera)
+		streaming.update_streaming(view_rect, plane_y, dt, camera, render_band_rects)
 	if renderer != null:
+		var anchor_started := begin_performance_timing()
 		var center_x: float = view_rect.position.x + view_rect.size.x * 0.5
 		var center_z: float = view_rect.position.y + view_rect.size.y * 0.5
 		renderer.update_render_height_anchor(clamp_block_xz(Vector3(center_x, plane_y, center_z)))
+		end_performance_timing("Streaming.height_anchor_ms", anchor_started)
 
 
 func prewarm_render_cache(view_rect: Rect2, plane_y: float) -> void:
@@ -1067,6 +1155,8 @@ func spawn_initial_workers() -> void:
 		worker.position = Vector3(spawn_x, surface_y + WORKER_SPAWN_HEIGHT_OFFSET, spawn_z)
 		add_child(worker)
 		workers.append(worker)
+		diagnostics_workers_by_id[worker.worker_id] = worker
+		diagnostics_workers_revision += 1
 		trace_worker_event(worker, "spawned")
 	if task_manager != null:
 		task_manager.notify_worker_availability_changed()
@@ -1133,6 +1223,8 @@ func clear_tasks() -> void:
 
 
 func clear_workers() -> void:
+	diagnostics_workers_by_id.clear()
+	diagnostics_workers_revision += 1
 	for worker in workers:
 		trace_worker_event(worker, "despawned")
 		worker.queue_free()
@@ -1200,6 +1292,8 @@ func clear_drag_preview() -> void:
 
 #region Render Height
 func set_top_render_y(new_y: int) -> void:
+	if live_diagnostics != null and live_diagnostics.enabled and new_y != top_render_y:
+		live_diagnostics.mark_event("render_level_requested", {"from": top_render_y, "to": new_y})
 	var old_y: int = top_render_y
 	top_render_y = clampi(new_y, 0, world_size_y - 1)
 	if top_render_y == old_y:
@@ -1260,8 +1354,8 @@ func is_visible_at_level(y_value: float) -> bool:
 
 
 #region Raycasting
-func raycast_block(ray_origin: Vector3, ray_dir: Vector3, max_distance: float) -> Dictionary:
+func raycast_block(ray_origin: Vector3, ray_dir: Vector3, max_distance: float, generate_missing: bool = true) -> Dictionary:
 	if raycaster != null:
-		return raycaster.raycast_block(ray_origin, ray_dir, max_distance)
+		return raycaster.raycast_block(ray_origin, ray_dir, max_distance, generate_missing)
 	return {"hit": false}
 #endregion

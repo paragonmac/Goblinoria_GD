@@ -73,11 +73,15 @@ var render_plane_index: int = 0
 var buffer_plane_index: int = 0
 var render_plane_size: int = 0
 var buffer_plane_size: int = 0
+var deep_render_plane_size: int = 0
 var stream_layer_y: int = 0
 var stream_layer_remaining: int = 0
 var stream_spiral_offsets: Array = []
 var render_spiral_offsets: Array = []
 var buffer_spiral_offsets: Array = []
+var deep_render_spiral_offsets: Array = []
+var render_band_chunk_bounds: Dictionary = {}
+var deep_render_offsets_by_band: Dictionary = {}
 var last_spiral_x_range: int = -1
 var last_spiral_z_range: int = -1
 var last_render_zone_min_cx: int = DUMMY_INT
@@ -92,6 +96,8 @@ var current_render_min_cz: int = DUMMY_INT
 var current_render_max_cz: int = -DUMMY_INT
 var current_render_min_cy: int = DUMMY_INT
 var current_render_max_cy: int = -DUMMY_INT
+var near_level_min_cy: int = 0
+var near_level_max_cy: int = 0
 
 var chunk_build_queue: Array = []
 var chunk_build_set: Dictionary = {}
@@ -121,6 +127,8 @@ func _init(world_ref) -> void:
 
 #region Reset
 func reset_state() -> void:
+	if world != null and world.renderer != null:
+		world.renderer.invalidate_render_zone()
 	chunk_build_queue.clear()
 	chunk_build_set.clear()
 	chunk_build_priority.clear()
@@ -146,11 +154,15 @@ func reset_state() -> void:
 	buffer_plane_index = 0
 	render_plane_size = 0
 	buffer_plane_size = 0
+	deep_render_plane_size = 0
 	stream_layer_y = 0
 	stream_layer_remaining = 0
 	stream_spiral_offsets.clear()
 	render_spiral_offsets.clear()
 	buffer_spiral_offsets.clear()
+	deep_render_spiral_offsets.clear()
+	render_band_chunk_bounds.clear()
+	deep_render_offsets_by_band.clear()
 	last_spiral_x_range = -1
 	last_spiral_z_range = -1
 	render_zone_timer = render_zone_interval
@@ -166,6 +178,8 @@ func reset_state() -> void:
 	current_render_max_cz = -DUMMY_INT
 	current_render_min_cy = DUMMY_INT
 	current_render_max_cy = -DUMMY_INT
+	near_level_min_cy = 0
+	near_level_max_cy = 0
 	last_speed_buffer_chunks = 0
 	last_buffer_chunks = 0
 	throttle_stream_step_accum = 0.0
@@ -228,9 +242,16 @@ func _should_allow_stream_work(dt: float, render_plane_complete: bool) -> bool:
 	return true
 
 
-func update_streaming(view_rect: Rect2, plane_y: float, dt: float, camera: Camera3D = null) -> void:
+func update_streaming(
+	view_rect: Rect2,
+	plane_y: float,
+	dt: float,
+	camera: Camera3D = null,
+	render_band_rects: Dictionary = {}
+) -> void:
 	if world.renderer == null:
 		return
+	var bounds_started: int = world.begin_performance_timing()
 	var rect: Rect2 = view_rect.abs()
 	var center_x: float = rect.position.x + rect.size.x * 0.5
 	var center_z: float = rect.position.y + rect.size.y * 0.5
@@ -261,40 +282,61 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float, camera: Camer
 	var world_max_cy: int = int(floor(float(world.world_size_y - 1) / float(chunk_size)))
 	var center_y: int = int(floor(plane_y))
 	var margin_blocks: int = maxi(stream_vertical_margin_blocks, 0)
-	var min_stream_y: int = center_y - margin_blocks
+	var min_render_y: int = world.get_min_render_y()
+	var min_cy_limit: int = maxi(0, int(floor(float(min_render_y) / float(chunk_size))))
+	var near_level_min_y: int = center_y - margin_blocks
+	var near_level_min_cy_value: int = clampi(int(floor(float(near_level_min_y) / float(chunk_size))), 0, world_max_cy)
+	var near_level_max_y: int = center_y + margin_blocks
+	var near_level_max_cy_value: int = clampi(int(floor(float(near_level_max_y) / float(chunk_size))), 0, world_max_cy)
+	var next_near_level_min_cy: int = maxi(near_level_min_cy_value, min_cy_limit)
+	var next_near_level_max_cy: int = maxi(near_level_max_cy_value, min_cy_limit)
+	var near_level_bounds_changed: bool = next_near_level_min_cy != near_level_min_cy \
+		or next_near_level_max_cy != near_level_max_cy
+	near_level_min_cy = next_near_level_min_cy
+	near_level_max_cy = next_near_level_max_cy
+	# The normal stream buffer remains centered on the active level. The
+	# lower render range is added to the stream range, but deep layers will
+	# only use render columns in enqueue_stream_chunks().
+	var min_stream_y: int = mini(near_level_min_y, min_render_y)
 	var max_stream_y: int = center_y + margin_blocks
 	var min_cy: int = clampi(int(floor(float(min_stream_y) / float(chunk_size))), 0, world_max_cy)
 	var max_cy: int = clampi(int(floor(float(max_stream_y) / float(chunk_size))), 0, world_max_cy)
-	var min_render_y: int = world.get_min_render_y()
-	var min_cy_limit: int = maxi(0, int(floor(float(min_render_y) / float(chunk_size))))
 	min_cy = maxi(min_cy, min_cy_limit)
-	if min_cy > max_cy:
-		return
 
-	var render_margin_blocks: int = maxi(render_vertical_margin_blocks, 0)
-	var render_y_bounds := compute_render_chunk_y_bounds(
-		center_y,
-		render_margin_blocks,
-		maxi(render_upper_connection_margin_blocks, 0),
-		chunk_size,
-		min_cy_limit,
-		world_max_cy
-	)
+	var render_y_bounds: Vector2i = get_render_chunk_y_bounds(center_y)
 	var render_min_cy: int = render_y_bounds.x
 	var render_max_cy: int = render_y_bounds.y
+	# Custom zero-margin streams must still load the upper connection band.
+	max_cy = maxi(max_cy, render_max_cy)
+	if min_cy > max_cy:
+		world.end_performance_timing("Streaming.bounds_ms", bounds_started)
+		return
 
-	# Compute render zone bounds
+	# Rendering spans deep viewport footprints; camera motion and the normal
+	# buffer above still use only the active-slice rect.
+	var render_rect := rect
+	var next_band_bounds := {}
+	for cy_value in render_band_rects:
+		var cy: int = int(cy_value)
+		if cy < render_min_cy or cy > render_max_cy or typeof(render_band_rects[cy_value]) != TYPE_RECT2:
+			continue
+		var band_rect: Rect2 = render_band_rects[cy_value]
+		render_rect = render_rect.merge(band_rect.abs())
+		next_band_bounds[cy] = _render_chunk_xz_bounds(band_rect.abs())
+	var band_bounds_changed: bool = next_band_bounds != render_band_chunk_bounds
+	render_band_chunk_bounds = next_band_bounds
+	# Compute the broad render zone; the renderer additionally frustum-culls.
 	var render_pad: float = float(render_radius_chunks * chunk_size)
 	var render_scale: float = maxf(render_view_scale, 0.0)
 	var render_buffer_x: float = render_pad
 	var render_buffer_z: float = render_pad
 	if render_scale > 0.0:
-		render_buffer_x = maxf(render_buffer_x, rect.size.x * render_scale)
-		render_buffer_z = maxf(render_buffer_z, rect.size.y * render_scale)
-	var render_min_x: float = rect.position.x - render_buffer_x
-	var render_max_x: float = rect.position.x + rect.size.x + render_buffer_x
-	var render_min_z: float = rect.position.y - render_buffer_z
-	var render_max_z: float = rect.position.y + rect.size.y + render_buffer_z
+		render_buffer_x = maxf(render_buffer_x, render_rect.size.x * render_scale)
+		render_buffer_z = maxf(render_buffer_z, render_rect.size.y * render_scale)
+	var render_min_x: float = render_rect.position.x - render_buffer_x
+	var render_max_x: float = render_rect.position.x + render_rect.size.x + render_buffer_x
+	var render_min_z: float = render_rect.position.y - render_buffer_z
+	var render_max_z: float = render_rect.position.y + render_rect.size.y + render_buffer_z
 	var render_min_cx: int = _chunk_coord_from_world(render_min_x, chunk_size)
 	var render_max_cx: int = _chunk_coord_from_world(render_max_x, chunk_size)
 	var render_min_cz: int = _chunk_coord_from_world(render_min_z, chunk_size)
@@ -303,6 +345,10 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float, camera: Camer
 	render_max_cx = clampi(render_max_cx, world.WORLD_MIN_CHUNK_X, world.WORLD_MAX_CHUNK_X)
 	render_min_cz = clampi(render_min_cz, world.WORLD_MIN_CHUNK_Z, world.WORLD_MAX_CHUNK_Z)
 	render_max_cz = clampi(render_max_cz, world.WORLD_MIN_CHUNK_Z, world.WORLD_MAX_CHUNK_Z)
+	var render_bounds_changed: bool = render_min_cx != current_render_min_cx \
+		or render_max_cx != current_render_max_cx \
+		or render_min_cz != current_render_min_cz \
+		or render_max_cz != current_render_max_cz
 	current_render_min_cx = render_min_cx
 	current_render_max_cx = render_max_cx
 	current_render_min_cz = render_min_cz
@@ -321,6 +367,12 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float, camera: Camer
 	var max_cx: int = _chunk_coord_from_world(stream_pos_2d.x + stream_size_2d.x, chunk_size)
 	var min_cz: int = _chunk_coord_from_world(stream_pos_2d.y, chunk_size)
 	var max_cz: int = _chunk_coord_from_world(stream_pos_2d.y + stream_size_2d.y, chunk_size)
+	# Even a zero-buffer stream must contain visible lower chunks and their
+	# neighbors. This expands coverage, never the camera-following anchor.
+	min_cx = mini(min_cx, render_min_cx - 1)
+	max_cx = maxi(max_cx, render_max_cx + 1)
+	min_cz = mini(min_cz, render_min_cz - 1)
+	max_cz = maxi(max_cz, render_max_cz + 1)
 	min_cx = clampi(min_cx, world.WORLD_MIN_CHUNK_X, world.WORLD_MAX_CHUNK_X)
 	max_cx = clampi(max_cx, world.WORLD_MIN_CHUNK_X, world.WORLD_MAX_CHUNK_X)
 	min_cz = clampi(min_cz, world.WORLD_MIN_CHUNK_Z, world.WORLD_MAX_CHUNK_Z)
@@ -346,8 +398,13 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float, camera: Camer
 		or max_cx != stream_max_x
 		or min_cz != stream_min_z
 		or max_cz != stream_max_z
+		or render_bounds_changed
+		or band_bounds_changed
+		or near_level_bounds_changed
 	)
+	world.end_performance_timing("Streaming.bounds_ms", bounds_started)
 	if anchor_changed:
+		var reset_started: int = world.begin_performance_timing()
 		last_stream_chunk = Vector2i(anchor_cx, anchor_cz)
 		last_stream_max_cy = max_cy
 
@@ -367,40 +424,43 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float, camera: Camer
 		stream_plane_index = 0
 		if x_range <= 0 or z_range <= 0 or y_range <= 0:
 			stream_plane_size = 0
+			deep_render_plane_size = 0
+			render_plane_size = 0
+			buffer_plane_size = 0
 			stream_pending = false
 		else:
+			var partition_started: int = world.begin_performance_timing()
 			if x_range != last_spiral_x_range or z_range != last_spiral_z_range or stream_spiral_offsets.is_empty():
 				stream_spiral_offsets = build_spiral_offsets_2d(x_range, z_range)
 				last_spiral_x_range = x_range
 				last_spiral_z_range = z_range
 			_partition_spiral_offsets(render_min_cx, render_max_cx, render_min_cz, render_max_cz)
+			world.end_performance_timing("Streaming.partition_ms", partition_started)
 			stream_plane_size = render_plane_size + buffer_plane_size
-			stream_pending = stream_plane_size > 0
+			stream_pending = stream_plane_size > 0 or deep_render_plane_size > 0
 		stream_layer_y = stream_max_y
-		stream_layer_remaining = stream_plane_size
 		stream_plane_index = 0
 		render_plane_index = 0
 		buffer_plane_index = 0
+		stream_layer_remaining = _stream_layer_plane_size()
 		throttle_idle_sec = 0.0
 		throttled = false
+		world.end_performance_timing("Streaming.reset_ms", reset_started)
 
 	# Throttle / stream work gate
-	var render_plane_complete := render_plane_index >= render_plane_size
+	var render_plane_complete: bool = render_plane_index >= _stream_render_plane_size()
 	if _should_allow_stream_work(dt, render_plane_complete):
-		enqueue_stream_chunks()
-		process_chunk_queue()
+		world.run_performance_timed("Streaming.enqueue_ms", enqueue_stream_chunks)
+		world.run_performance_timed("Streaming.process_queue_ms", process_chunk_queue)
 
-	# Periodic render zone update
+	# Keep the existing cadence for moving views, but skip unchanged views.
+	# Queue work above and mesh-result application continue independently.
 	render_zone_timer += dt
-	var render_zone_changed: bool = (
-		render_min_cx != last_render_zone_min_cx
-		or render_max_cx != last_render_zone_max_cx
-		or render_min_cz != last_render_zone_min_cz
-		or render_max_cz != last_render_zone_max_cz
-		or render_min_cy != last_render_zone_min_cy
-		or render_max_cy != last_render_zone_max_cy
-	)
-	if (render_zone_changed or camera != null) and (render_zone_timer >= render_zone_interval or last_render_zone_min_cx == DUMMY_INT):
+	var refresh_due: bool = render_zone_timer >= render_zone_interval or last_render_zone_min_cx == DUMMY_INT
+	if refresh_due:
+		render_zone_timer = 0.0
+	if refresh_due and world.renderer.needs_render_zone_update(render_min_cx, render_max_cx, render_min_cz, render_max_cz, render_min_cy, render_max_cy, camera):
+		var render_started: int = world.begin_performance_timing()
 		world.renderer.update_render_zone(render_min_cx, render_max_cx, render_min_cz, render_max_cz, render_min_cy, render_max_cy, camera)
 		last_render_zone_min_cx = render_min_cx
 		last_render_zone_max_cx = render_max_cx
@@ -411,6 +471,7 @@ func update_streaming(view_rect: Rect2, plane_y: float, dt: float, camera: Camer
 		render_min_y = render_min_cy
 		render_max_y = render_max_cy
 		render_zone_timer = 0.0
+		world.end_performance_timing("Streaming.render_zone_ms", render_started)
 #endregion
 
 
@@ -489,6 +550,8 @@ func enqueue_stream_chunks() -> void:
 	if x_range <= 0 or z_range <= 0 or y_range <= 0:
 		stream_pending = false
 		return
+	# A deep layer has no offscreen buffer work. Advance past empty deep
+	# layers in this call instead of consuming one skipped offset per frame.
 	while stream_pending and stream_layer_remaining <= 0:
 		if stream_layer_y <= stream_min_y:
 			stream_pending = false
@@ -497,10 +560,9 @@ func enqueue_stream_chunks() -> void:
 		stream_plane_index = 0
 		render_plane_index = 0
 		buffer_plane_index = 0
-		stream_layer_remaining = stream_plane_size
-	var plane_size: int = stream_plane_size
+		stream_layer_remaining = _stream_layer_plane_size()
+	var plane_size: int = _stream_layer_plane_size()
 	if plane_size <= 0:
-		stream_pending = false
 		return
 	var remaining_in_plane: int = plane_size - stream_plane_index
 	if remaining_in_plane <= 0:
@@ -510,13 +572,21 @@ func enqueue_stream_chunks() -> void:
 		budget = min(budget, THROTTLED_STREAM_QUEUE_BUDGET)
 	elif slow_moving:
 		budget = min(budget, SLOW_MOVE_STREAM_QUEUE_BUDGET)
-	while budget > 0 and render_plane_index < render_plane_size:
-		var offset: Vector2i = render_spiral_offsets[render_plane_index]
+	var render_only_layer: bool = _is_render_only_stream_layer()
+	var render_offsets: Array = _render_only_offsets() if render_only_layer else render_spiral_offsets
+	var render_size: int = render_offsets.size()
+	while budget > 0 and render_plane_index < render_size:
+		var offset: Vector2i = render_offsets[render_plane_index]
 		render_plane_index += 1
 		stream_plane_index += 1
 		_queue_stream_offset(offset, true)
 		budget -= 1
-	if (throttled or slow_moving) and render_plane_index >= render_plane_size:
+	if render_only_layer:
+		# Buffer columns are intentionally not streamed outside the near-level
+		# vertical window, including an upper connection-only layer.
+		buffer_plane_index = buffer_plane_size
+		return
+	if (throttled or slow_moving) and render_plane_index >= render_size:
 		if throttle_frame_ms > THROTTLE_ALLOW_BUFFER_FRAME_MS:
 			return
 		budget = min(budget, 1)
@@ -530,6 +600,26 @@ func enqueue_stream_chunks() -> void:
 
 
 #region Helpers
+func _is_render_only_stream_layer() -> bool:
+	return stream_layer_y < near_level_min_cy or stream_layer_y > near_level_max_cy
+
+
+func _render_only_offsets() -> Array:
+	return deep_render_offsets_by_band.get(stream_layer_y, deep_render_spiral_offsets)
+
+
+func _stream_layer_plane_size() -> int:
+	if _is_render_only_stream_layer():
+		return _render_only_offsets().size()
+	return stream_plane_size
+
+
+func _stream_render_plane_size() -> int:
+	if _is_render_only_stream_layer():
+		return _render_only_offsets().size()
+	return render_plane_size
+
+
 func _decrement_stream_layer(chunk_y: int) -> void:
 	if stream_pending and chunk_y == stream_layer_y and stream_layer_remaining > 0:
 		stream_layer_remaining -= 1
@@ -566,6 +656,25 @@ func warmup_streaming(view_rect: Rect2, plane_y: float) -> void:
 
 func _chunk_coord_from_world(value: float, chunk_size: int) -> int:
 	return int(floor(value / float(chunk_size)))
+
+
+func get_render_chunk_y_bounds(render_y: int) -> Vector2i:
+	if world == null:
+		return Vector2i.ZERO
+	var chunk_size: int = world_chunk_size
+	var world_max_cy: int = int(floor(float(world.world_size_y - 1) / float(chunk_size)))
+	var min_render_y: int = world.get_min_render_y()
+	var min_cy: int = maxi(0, int(floor(float(min_render_y) / float(chunk_size))))
+	min_cy = clampi(min_cy, 0, world_max_cy)
+	var bounded: Vector2i = compute_render_chunk_y_bounds(
+		render_y,
+		maxi(render_vertical_margin_blocks, 0),
+		maxi(render_upper_connection_margin_blocks, 0),
+		chunk_size,
+		min_cy,
+		world_max_cy
+	)
+	return Vector2i(min_cy, bounded.y)
 
 
 static func compute_render_chunk_y_bounds(
@@ -627,8 +736,17 @@ func build_spiral_offsets_2d(x_range: int, z_range: int) -> Array:
 func _partition_spiral_offsets(render_min_cx: int, render_max_cx: int, render_min_cz: int, render_max_cz: int) -> void:
 	render_spiral_offsets.clear()
 	buffer_spiral_offsets.clear()
+	deep_render_spiral_offsets.clear()
 	render_plane_size = 0
 	buffer_plane_size = 0
+	deep_render_plane_size = 0
+	# Deep layers need the actively rendered columns. Include a one-chunk
+	# X/Z halo so their boundary neighbors can be generated before meshing;
+	# the normal stream buffer remains the broader center-following region.
+	var deep_min_cx: int = maxi(render_min_cx - 1, stream_min_x)
+	var deep_max_cx: int = mini(render_max_cx + 1, stream_max_x)
+	var deep_min_cz: int = maxi(render_min_cz - 1, stream_min_z)
+	var deep_max_cz: int = mini(render_max_cz + 1, stream_max_z)
 	for offset: Vector2i in stream_spiral_offsets:
 		var cx: int = stream_min_x + offset.x
 		var cz: int = stream_min_z + offset.y
@@ -638,6 +756,36 @@ func _partition_spiral_offsets(render_min_cx: int, render_max_cx: int, render_mi
 		else:
 			buffer_spiral_offsets.append(offset)
 			buffer_plane_size += 1
+		if cx >= deep_min_cx and cx <= deep_max_cx and cz >= deep_min_cz and cz <= deep_max_cz:
+			deep_render_spiral_offsets.append(offset)
+			deep_render_plane_size += 1
+	deep_render_offsets_by_band.clear()
+	for cy: int in render_band_chunk_bounds:
+		var bounds: Rect2i = render_band_chunk_bounds[cy]
+		var offsets: Array = []
+		if bounds.has_area():
+			var min_x: int = maxi(bounds.position.x - 1, stream_min_x)
+			var max_x: int = mini(bounds.end.x, stream_max_x)
+			var min_z: int = maxi(bounds.position.y - 1, stream_min_z)
+			var max_z: int = mini(bounds.end.y, stream_max_z)
+			# Enumerate only this band's projected footprint, not the swept
+			# volume at every height. Preserve center-out queue order.
+			for offset: Vector2i in build_spiral_offsets_2d(max_x - min_x + 1, max_z - min_z + 1):
+				offsets.append(offset + Vector2i(min_x - stream_min_x, min_z - stream_min_z))
+		deep_render_offsets_by_band[cy] = offsets
+
+
+func _render_chunk_xz_bounds(rect: Rect2) -> Rect2i:
+	var pad: float = float(render_radius_chunks * world_chunk_size)
+	var pad_x: float = maxf(pad, rect.size.x * maxf(render_view_scale, 0.0))
+	var pad_z: float = maxf(pad, rect.size.y * maxf(render_view_scale, 0.0))
+	var min_x: int = maxi(_chunk_coord_from_world(rect.position.x - pad_x, world_chunk_size), world.WORLD_MIN_CHUNK_X)
+	var max_x: int = mini(_chunk_coord_from_world(rect.end.x + pad_x, world_chunk_size), world.WORLD_MAX_CHUNK_X)
+	var min_z: int = maxi(_chunk_coord_from_world(rect.position.y - pad_z, world_chunk_size), world.WORLD_MIN_CHUNK_Z)
+	var max_z: int = mini(_chunk_coord_from_world(rect.end.y + pad_z, world_chunk_size), world.WORLD_MAX_CHUNK_Z)
+	if min_x > max_x or min_z > max_z:
+		return Rect2i()
+	return Rect2i(min_x, min_z, max_x - min_x + 1, max_z - min_z + 1)
 
 
 func _queue_stream_offset(offset: Vector2i, high_priority: bool) -> void:

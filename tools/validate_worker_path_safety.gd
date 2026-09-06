@@ -73,6 +73,8 @@ class DirectionalRampWorld:
 	extends RefCounted
 
 	var world_size_y := 4
+	var ramp_id := World.RAMP_NORTH_ID
+	var ramp_covered := false
 
 	func is_block_coord_valid(x: int, y: int, z: int) -> bool:
 		return x >= -2 and x <= 2 and z >= -2 and z <= 2 and y >= 0 and y < world_size_y
@@ -81,7 +83,9 @@ class DirectionalRampWorld:
 		if y == 0:
 			return World.BLOCK_ID_GRANITE
 		if Vector3i(x, y, z) == Vector3i(0, 1, 0):
-			return World.RAMP_NORTH_ID
+			return ramp_id
+		if ramp_covered and Vector3i(x, y, z) == Vector3i(0, 2, 0):
+			return World.BLOCK_ID_GRANITE
 		if Vector3i(x, y, z) == Vector3i(0, 1, -1):
 			return World.BLOCK_ID_GRANITE
 		return World.BLOCK_ID_AIR
@@ -91,6 +95,9 @@ class DirectionalRampWorld:
 
 	func is_ramp_block_id(block_id: int) -> bool:
 		return World.RAMP_BLOCK_IDS.has(block_id)
+
+	func trace_worker_event(_worker, _event: String, _task = null, _details: String = "") -> void:
+		pass
 
 
 class RescueWorld:
@@ -176,7 +183,43 @@ func _make_snapshot_index_contract() -> PathWorldSnapshot:
 	return snapshot
 
 
+func _ramp_clearance_contract() -> bool:
+	var world := DirectionalRampWorld.new()
+	var pathfinder := Pathfinder.new()
+	var lower := Vector3i(0, 1, 0)
+	var upper := Vector3i(0, 2, -1)
+	var worker := Worker.new()
+	var ok := true
+	for ramp_id in [World.RAMP_NORTH_ID, World.TERRAIN_SLOPE_NORTH_ID]:
+		world.ramp_id = ramp_id
+		world.ramp_covered = false
+		ok = ok and pathfinder.can_traverse(world, lower, upper) \
+			and pathfinder.can_traverse(world, upper, lower)
+		ok = ok and pathfinder.get_neighbors(world, lower).has(upper) \
+			and pathfinder.get_neighbors(world, upper).has(lower)
+		# A path accepted while open must be rejected if the stair is covered
+		# before the worker commits its next segment.
+		world.ramp_covered = true
+		ok = ok and not pathfinder.can_traverse(world, lower, upper) \
+			and not pathfinder.can_traverse(world, upper, lower)
+		ok = ok and not pathfinder.get_neighbors(world, lower).has(upper) \
+			and not pathfinder.get_neighbors(world, upper).has(lower)
+		ok = ok and pathfinder.find_path(world, upper, lower, false).is_empty()
+		for endpoints in [[upper, lower], [lower, upper]]:
+			worker.position = Vector3(endpoints[0])
+			worker.path = endpoints.duplicate()
+			worker.path_index = 1
+			ok = ok and not worker._validate_next_path_node(world, TaskQueue.new(), pathfinder)
+			ok = ok and worker.path.is_empty()
+	worker.free()
+	return ok
+
+
 func _init() -> void:
+	if not _ramp_clearance_contract():
+		push_error("Covered player stairs or terrain slopes allowed a level transition")
+		quit(1)
+		return
 	var world := FakeWorld.new()
 	var pathfinder := Pathfinder.new()
 	var support_pos := Vector3i(1, 0, 0)

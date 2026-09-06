@@ -9,6 +9,7 @@ const WorldMetadataSaveLoadScript = preload("res://scripts/world_metadata_save_l
 const WorldBulkChunkSaveLoadScript = preload("res://scripts/world_bulk_chunk_save_load.gd")
 const WorldMeshCacheSaveLoadScript = preload("res://scripts/world_mesh_cache_save_load.gd")
 const WorldWorkerSaveLoadScript = preload("res://scripts/world_worker_save_load.gd")
+const WorldSaveTransactionScript = preload("res://scripts/world_save_transaction.gd")
 const WorldGenerationSharedScript = preload("res://scripts/world/world_generation_shared.gd")
 const WorldTerrainHeightSamplerScript = preload("res://scripts/world/world_terrain_height_sampler.gd")
 const WorldRampRulesScript = preload("res://scripts/world/world_ramp_rules.gd")
@@ -36,6 +37,7 @@ var metadata_save_load = WorldMetadataSaveLoadScript.new()
 var bulk_chunk_save_load = WorldBulkChunkSaveLoadScript.new()
 var mesh_cache_save_load = WorldMeshCacheSaveLoadScript.new()
 var worker_save_load = WorldWorkerSaveLoadScript.new()
+var save_transaction = WorldSaveTransactionScript.new()
 var legacy_terrain_slope_migration: bool = false
 #endregion
 
@@ -56,33 +58,41 @@ func clear_world_dir() -> void:
 
 func save_world(path: String) -> bool:
 	var world_dir := _world_dir_from_path(path)
-	current_world_dir = world_dir
-	var chunk_dir := _chunk_dir_path(world_dir)
-	var dir_ok := DirAccess.make_dir_recursive_absolute(chunk_dir)
-	if dir_ok != OK:
+	if not save_transaction.begin(world_dir):
 		push_error("World save failed: %s" % world_dir)
 		return false
-	if not _write_world_meta(world_dir):
+	var previous_bulk_state := bulk_chunk_save_load.snapshot_state()
+	var previous_mesh_state := mesh_cache_save_load.snapshot_state()
+	var stage_dir: String = save_transaction.stage_dir
+	var ok := DirAccess.make_dir_recursive_absolute(_chunk_dir_path(stage_dir)) == OK \
+		and _write_world_meta(stage_dir) and _collect_legacy_chunks() and _save_bulk_chunks(stage_dir)
+	if ok:
+		if not _save_mesh_cache(stage_dir):
+			# Cache data is optional, but a partial or stale cache must not be promoted.
+			var cache_path := stage_dir.path_join(WorldMeshCacheSaveLoadScript.MESH_CACHE_FILE_NAME)
+			if FileAccess.file_exists(cache_path):
+				ok = DirAccess.remove_absolute(cache_path) == OK
+			mesh_cache_save_load.restore_state(previous_mesh_state)
+		ok = ok and _save_items_and_stockpiles(stage_dir) and _save_workers(stage_dir)
+	if not ok or not save_transaction.promote():
+		bulk_chunk_save_load.restore_state(previous_bulk_state)
+		mesh_cache_save_load.restore_state(previous_mesh_state)
+		save_transaction.abort()
 		return false
-	if not _save_bulk_chunks(world_dir):
-		return false
-	_save_mesh_cache(world_dir)
+	current_world_dir = world_dir
 	for chunk in world.chunks.values():
 		var entry: ChunkData = chunk
 		entry.dirty = false
-	if not _save_items_and_stockpiles(world_dir):
-		return false
-	return _save_workers(world_dir)
+	return true
 #endregion
 
 
 #region Load
 func load_world(path: String) -> bool:
-	last_load_metrics.clear()
-	legacy_terrain_slope_migration = false
-	_reset_mesh_cache_stats()
 	var load_start_usec: int = Time.get_ticks_usec()
 	var world_dir := _world_dir_from_path(path)
+	if not save_transaction.recover(world_dir):
+		return false
 	var meta_start_usec: int = Time.get_ticks_usec()
 	var meta_snapshot := metadata_save_load.read_world_meta_snapshot(
 		world,
@@ -94,25 +104,34 @@ func load_world(path: String) -> bool:
 	)
 	if not bool(meta_snapshot.get("ok", false)):
 		return false
-	last_load_metrics["meta_ms"] = _elapsed_ms(meta_start_usec)
+	if int(meta_snapshot["save_version"]) == SAVE_VERSION \
+		and not FileAccess.file_exists(world_dir.path_join(WorldBulkChunkSaveLoadScript.BULK_CHUNKS_FILE_NAME)) \
+		and not _has_valid_chunk_save(world_dir):
+		push_warning("World load failed: missing terrain data in %s" % world_dir)
+		return false
+	var load_metrics := {"meta_ms": _elapsed_ms(meta_start_usec)}
 	var item_start_usec: int = Time.get_ticks_usec()
 	var item_snapshot := item_stockpile_save_load.read_snapshot(world_dir)
 	if not bool(item_snapshot.get("ok", false)):
 		return false
-	last_load_metrics["items_stockpiles_ms"] = _elapsed_ms(item_start_usec)
+	load_metrics["items_stockpiles_ms"] = _elapsed_ms(item_start_usec)
 	var worker_start_usec: int = Time.get_ticks_usec()
 	var worker_snapshot := worker_save_load.read_snapshot(world_dir)
 	if not bool(worker_snapshot.get("ok", false)):
 		return false
-	last_load_metrics["worker_roles_ms"] = _elapsed_ms(worker_start_usec)
+	load_metrics["worker_roles_ms"] = _elapsed_ms(worker_start_usec)
 	var previous_bulk_state := bulk_chunk_save_load.snapshot_state()
 	var bulk_start_usec: int = Time.get_ticks_usec()
-	legacy_terrain_slope_migration = int(meta_snapshot.get("save_version", SAVE_VERSION)) == LEGACY_SAVE_VERSION \
+	var migrate_legacy_slopes := int(meta_snapshot.get("save_version", SAVE_VERSION)) == LEGACY_SAVE_VERSION \
 		and bool(meta_snapshot.get("legacy_block_table", false))
-	if not _load_bulk_chunks(world_dir, legacy_terrain_slope_migration):
+	if not _load_bulk_chunks(world_dir, migrate_legacy_slopes):
 		bulk_chunk_save_load.restore_state(previous_bulk_state)
-		legacy_terrain_slope_migration = false
 		return false
+	last_load_metrics = load_metrics
+	var bulk_stats := bulk_chunk_save_load.get_last_load_stats()
+	if not bulk_stats.is_empty():
+		last_load_metrics["bulk_block_format"] = bulk_stats
+	legacy_terrain_slope_migration = migrate_legacy_slopes
 	if legacy_terrain_slope_migration:
 		var migrated_slopes := _migrate_legacy_terrain_slopes(int(meta_snapshot.get("world_seed", 0)))
 		last_load_metrics["migrated_terrain_slopes"] = migrated_slopes
@@ -122,6 +141,9 @@ func load_world(path: String) -> bool:
 	_load_mesh_cache(world_dir)
 	last_load_metrics["mesh_cache_ms"] = _elapsed_ms(mesh_cache_start_usec)
 	metadata_save_load.apply_world_meta(world, meta_snapshot)
+	# Runtime identity changes at the successful load commit, even on the same node.
+	if world.live_diagnostics != null:
+		world.live_diagnostics.begin_world("load_committed")
 	world.chunks.clear()
 	world.chunk_access_tick = 0
 	world.reset_streaming_state()
@@ -161,7 +183,7 @@ func load_chunk_into(coord: Vector3i, chunk: ChunkData) -> bool:
 	var file := FileAccess.open(path, FileAccess.READ)
 	if file == null:
 		return false
-	var header := _read_chunk_header(file, coord)
+	var header := _read_chunk_header(file, coord, legacy_terrain_slope_migration)
 	if header.is_empty():
 		return false
 	var data_len: int = int(header["data_len"])
@@ -211,17 +233,64 @@ func _save_bulk_chunks(world_dir: String) -> bool:
 
 
 func _load_bulk_chunks(world_dir: String, allow_legacy_block_table_hash: bool = false) -> bool:
-	var ok := bulk_chunk_save_load.load_bulk_chunks(
+	return bulk_chunk_save_load.load_bulk_chunks(
 		world,
 		world_dir,
 		_get_block_table_hash(),
 		allow_legacy_block_table_hash
 	)
-	if ok:
-		var stats := bulk_chunk_save_load.get_last_load_stats()
-		if not stats.is_empty():
-			last_load_metrics["bulk_block_format"] = stats
-	return ok
+
+
+func _has_valid_chunk_save(world_dir: String) -> bool:
+	var dir := DirAccess.open(_chunk_dir_path(world_dir))
+	if dir == null:
+		return false
+	for name in dir.get_files():
+		if not name.ends_with(CHUNK_FILE_EXT):
+			continue
+		var parts := name.get_basename().split("_")
+		if parts.size() != 3 or not parts[0].is_valid_int() \
+			or not parts[1].is_valid_int() or not parts[2].is_valid_int():
+			continue
+		var coord := Vector3i(int(parts[0]), int(parts[1]), int(parts[2]))
+		var file := FileAccess.open(_chunk_path(world_dir, coord), FileAccess.READ)
+		if file == null:
+			continue
+		# Current metadata must never inherit the live world's legacy hash exemption.
+		var header := _read_chunk_header(file, coord, false)
+		if int(header.get("data_len", 0)) == World.CHUNK_VOLUME \
+			and file.get_length() - file.get_position() == World.CHUNK_VOLUME:
+			return true
+	return false
+
+
+func _collect_legacy_chunks() -> bool:
+	if bulk_chunk_save_load.is_loaded() or current_world_dir.is_empty():
+		return true
+	var dir := DirAccess.open(_chunk_dir_path(current_world_dir))
+	if dir == null:
+		return not DirAccess.dir_exists_absolute(_chunk_dir_path(current_world_dir))
+	for name in dir.get_files():
+		if not name.ends_with(CHUNK_FILE_EXT):
+			continue
+		var parts := name.get_basename().split("_")
+		if parts.size() != 3 or not parts[0].is_valid_int() \
+			or not parts[1].is_valid_int() or not parts[2].is_valid_int():
+			continue
+		var coord := Vector3i(int(parts[0]), int(parts[1]), int(parts[2]))
+		if not world.is_chunk_coord_valid(coord) or bulk_chunk_save_load.has_chunk(coord):
+			continue
+		var file := FileAccess.open(_chunk_path(current_world_dir, coord), FileAccess.READ)
+		if file == null:
+			return false
+		var header := _read_chunk_header(file, coord, legacy_terrain_slope_migration)
+		if int(header.get("data_len", 0)) != World.CHUNK_VOLUME:
+			return false
+		var blocks := file.get_buffer(World.CHUNK_VOLUME)
+		if blocks.size() != World.CHUNK_VOLUME or file.get_error() != OK:
+			return false
+		bulk_chunk_save_load.replace_chunk_blocks(coord, blocks)
+	return true
 
 
 func _remember_bulk_chunk(coord: Vector3i, chunk: ChunkData) -> void:
@@ -281,7 +350,7 @@ func _write_chunk_header(file: FileAccess, coord: Vector3i, data_len: int, block
 	file.store_32(block_hash)
 
 
-func _read_chunk_header(file: FileAccess, coord: Vector3i) -> Dictionary:
+func _read_chunk_header(file: FileAccess, coord: Vector3i, allow_legacy_hash: bool = false) -> Dictionary:
 	var magic: int = file.get_32()
 	if magic != CHUNK_MAGIC:
 		return {}
@@ -303,7 +372,7 @@ func _read_chunk_header(file: FileAccess, coord: Vector3i) -> Dictionary:
 	if compression != COMPRESSION_NONE:
 		return {}
 	var block_hash: int = file.get_32()
-	if block_hash != _get_block_table_hash() and not legacy_terrain_slope_migration:
+	if block_hash != _get_block_table_hash() and not allow_legacy_hash:
 		return {}
 	return {"data_len": data_len}
 

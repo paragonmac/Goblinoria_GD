@@ -4,10 +4,14 @@ extends Node3D
 #region Preloads
 const MainCameraControllerScript = preload("res://scripts/main_camera_controller.gd")
 const MainSelectionControllerScript = preload("res://scripts/main_selection_controller.gd")
+const MainContextMenuControllerScript = preload("res://scripts/main_context_menu_controller.gd")
+const MainToolCatalogScript = preload("res://scripts/main_tool_catalog.gd")
 const MainHudControllerScript = preload("res://scripts/main_hud_controller.gd")
 const MainWorkerWindowControllerScript = preload("res://scripts/main_worker_window_controller.gd")
 const MainLoadingControllerScript = preload("res://scripts/main_loading_controller.gd")
 const MainRenderLevelControllerScript = preload("res://scripts/main_render_level_controller.gd")
+const MainPerformanceControllerScript = preload("res://scripts/main_performance_controller.gd")
+const MainDiagnosticsControllerScript = preload("res://scripts/main_diagnostics_controller.gd")
 #endregion
 
 #region Constants - Engine & General
@@ -53,10 +57,13 @@ var full_map_generation_check_box: CheckBox
 #region Controllers
 var camera_controller: MainCameraController
 var selection_controller: MainSelectionController
+var context_menu_controller
 var hud_controller: MainHudController
 var worker_window_controller
 var loading_controller: MainLoadingController
 var render_level_controller: MainRenderLevelController
+var performance_controller
+var diagnostics_controller
 #endregion
 
 #region Input State
@@ -66,7 +73,15 @@ var key_state: Dictionary = {}
 #region Game State
 var debug_overlay: DebugOverlay
 var menu_open := false
-var loading_active := false
+var loading_active := false:
+	set(value):
+		loading_active = value
+		if value:
+			_cancel_context_input(true)
+		else:
+			_sync_context_key_state()
+		if performance_controller != null:
+			performance_controller.sync_segment()
 var world_started := false
 var default_bg_mode: int = -1
 var default_bg_color: Color = Color.BLACK
@@ -82,8 +97,11 @@ func _ready() -> void:
 	_initialize_controllers()
 	_setup_camera()
 	_setup_hud()
+	_setup_context_menu()
 	_setup_debug_overlay()
+	_setup_performance_capture()
 	_setup_menu()
+	_setup_live_diagnostics()
 	_setup_loading_screen()
 	_cache_environment_defaults()
 	_set_world_draw_enabled(false)
@@ -91,35 +109,149 @@ func _ready() -> void:
 
 
 func _process(dt: float) -> void:
+	if diagnostics_controller != null:
+		diagnostics_controller.service.tick()
+	if performance_controller != null:
+		performance_controller.begin_frame(dt)
+	var measured: bool = performance_controller != null and performance_controller.recorder.enabled
+	var collection_start: int = performance_controller.recorder.get_collection_usec() if measured else 0
+	var update_start := Time.get_ticks_usec() if measured else 0
+	_process_game_frame(dt)
+	# One visibility pump also services pending results behind menus/loading.
+	# It is measured before profiling finalization, never inside prewarm loops.
+	if world != null and world.renderer != null:
+		world.renderer.observe_visibility_view(camera)
+		world.renderer.pump_visibility()
+	if debug_overlay != null:
+		debug_overlay.finish_timed_frame()
+	if performance_controller != null:
+		var collection_delta: int = performance_controller.recorder.get_collection_usec() - collection_start if measured else 0
+		var update_ms := float(maxi(0, Time.get_ticks_usec() - update_start - collection_delta)) / 1000.0 if measured else 0.0
+		performance_controller.end_frame(update_ms)
+	if diagnostics_controller != null:
+		diagnostics_controller.process_frame()
+
+
+func _process_game_frame(dt: float) -> void:
 	_handle_global_input()
 	if loading_active:
+		_sync_context_key_state()
 		return
 	if menu_open:
 		return
 	_handle_gameplay_input()
 	_run_frame_updates(dt)
-	if debug_overlay != null:
-		debug_overlay.run_timed(
+	if render_level_controller != null:
+		world.run_performance_timed(
 			"Main.pump_directional_y_prewarm",
 			Callable(render_level_controller, "pump_directional_prewarm").bind(world_started)
 		)
-		debug_overlay.run_timed(
+		world.run_performance_timed(
 			"Main.pump_background_level_warmup",
 			Callable(render_level_controller, "pump_background_warmup").bind(world_started)
 		)
-	elif render_level_controller != null:
-		render_level_controller.pump_directional_prewarm(world_started)
-		render_level_controller.pump_background_warmup(world_started)
 
 
 func _input(event: InputEvent) -> void:
+	if selection_controller != null:
+		selection_controller.observe_input(event)
+	if context_menu_controller != null and context_menu_controller.observe_input(event):
+		get_viewport().set_input_as_handled()
+		return
 	if menu_open or loading_active:
 		return
-	_handle_zoom_input(event)
+	if not _context_blocks_world_input():
+		_handle_zoom_input(event)
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	if diagnostics_controller != null and diagnostics_controller.handle_unhandled_input(event):
+		get_viewport().set_input_as_handled()
+		return
+	if performance_controller != null and performance_controller.handle_unhandled_input(event):
+		get_viewport().set_input_as_handled()
+		return
+	if menu_open or loading_active or selection_controller == null:
+		return
+	if context_menu_controller != null and context_menu_controller.handle_unhandled_input(event):
+		get_viewport().set_input_as_handled()
+		return
+	if _context_blocks_world_input():
+		get_viewport().set_input_as_handled()
+		return
+	if selection_controller.handle_unhandled_input(event):
+		get_viewport().set_input_as_handled()
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_APPLICATION_FOCUS_OUT:
+		if diagnostics_controller != null:
+			diagnostics_controller.set_focused(false)
+		_cancel_context_input()
+		if performance_controller != null:
+			performance_controller.set_focused(false)
+	elif what == NOTIFICATION_APPLICATION_FOCUS_IN:
+		if diagnostics_controller != null:
+			diagnostics_controller.set_focused(true)
+		if performance_controller != null:
+			performance_controller.set_focused(true)
+
+
+func _exit_tree() -> void:
+	if diagnostics_controller != null:
+		diagnostics_controller.shutdown()
+	if performance_controller != null:
+		performance_controller.shutdown()
+
+
+func _setup_performance_capture() -> void:
+	performance_controller = MainPerformanceControllerScript.new()
+	performance_controller.initialize(self)
+
+
+func _setup_live_diagnostics() -> void:
+	diagnostics_controller = MainDiagnosticsControllerScript.new()
+	diagnostics_controller.initialize(self)
 #endregion
 
 
 #region Controllers
+func _setup_context_menu() -> void:
+	context_menu_controller = MainContextMenuControllerScript.new()
+	context_menu_controller.initialize(world, camera, get_viewport(), hud_layer,
+		selection_controller, camera_controller, worker_window_controller)
+	context_menu_controller.input_barrier_changed.connect(_sync_context_key_state)
+	if not get_viewport().size_changed.is_connected(_on_context_viewport_resized):
+		get_viewport().size_changed.connect(_on_context_viewport_resized)
+
+
+func _on_context_viewport_resized() -> void:
+	_cancel_context_input()
+
+
+func _cancel_context_input(clear_snapshot: bool = false) -> void:
+	if context_menu_controller != null:
+		context_menu_controller.cancel(clear_snapshot)
+	if selection_controller != null:
+		selection_controller.cancel_drag_and_clear_preview()
+	if camera_controller != null:
+		camera_controller.reset_mouse_state()
+	_sync_context_key_state()
+
+
+func _context_blocks_world_input() -> bool:
+	return context_menu_controller != null and context_menu_controller.blocks_world_input()
+
+
+func _sync_context_key_state() -> void:
+	# Popup windows receive keys before Main. Absorb their current state so a
+	# shortcut (especially Escape/W) cannot replay after the popup disappears.
+	for key in [KEY_ESCAPE, KEY_W, KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6, KEY_7,
+		KEY_COMMA, KEY_PERIOD, KEY_BRACKETLEFT, KEY_BRACKETRIGHT, KEY_F2, KEY_F3,
+		KEY_F4, KEY_F5, KEY_F6, KEY_F7, KEY_F8, KEY_F9, KEY_F10, KEY_F11]:
+		key_state[key] = Input.is_key_pressed(key)
+
+
 func _initialize_controllers() -> void:
 	var viewport := get_viewport()
 	camera_controller = MainCameraControllerScript.new()
@@ -153,7 +285,7 @@ func _setup_camera() -> void:
 
 
 func update_camera(dt: float) -> void:
-	if camera_controller != null:
+	if camera_controller != null and not _context_blocks_world_input():
 		camera_controller.update_camera(dt)
 
 
@@ -178,6 +310,9 @@ func get_stream_target() -> Vector3:
 
 #region Input Handling
 func _handle_global_input() -> void:
+	if _context_blocks_world_input():
+		_sync_context_key_state()
+		return
 	if loading_active:
 		return
 	if is_key_just_pressed(KEY_ESCAPE):
@@ -185,6 +320,9 @@ func _handle_global_input() -> void:
 
 
 func _handle_gameplay_input() -> void:
+	if _context_blocks_world_input():
+		_sync_context_key_state()
+		return
 	_handle_worker_window_toggle()
 	_handle_mode_selection()
 	_handle_camera_rotation()
@@ -200,20 +338,12 @@ func _handle_worker_window_toggle() -> void:
 
 
 func _handle_mode_selection() -> void:
-	if is_key_just_pressed(KEY_1):
-		world.set_player_mode(World.PlayerMode.INFORMATION)
-	elif is_key_just_pressed(KEY_2):
-		world.set_player_mode(World.PlayerMode.DIG)
-	elif is_key_just_pressed(KEY_3):
-		world.set_player_mode(World.PlayerMode.PLACE)
-	elif is_key_just_pressed(KEY_4):
-		world.set_player_mode(World.PlayerMode.UP_STAIRS)
-	elif is_key_just_pressed(KEY_5):
-		world.set_player_mode(World.PlayerMode.DOWN_STAIRS)
-	elif is_key_just_pressed(KEY_6):
-		world.set_player_mode(World.PlayerMode.ERASE)
-	elif is_key_just_pressed(KEY_7):
-		world.set_player_mode(World.PlayerMode.STOCKPILE)
+	var next_mode := -1
+	for tool: Dictionary in MainToolCatalogScript.TOOLS:
+		if is_key_just_pressed(tool["key"]) and next_mode < 0:
+			next_mode = int(tool["mode"])
+	if next_mode >= 0:
+		world.set_player_mode(next_mode)
 
 
 func _handle_camera_rotation() -> void:
@@ -290,29 +420,30 @@ func _run_frame_updates(dt: float) -> void:
 
 
 func _run_timed_updates(dt: float) -> void:
-	debug_overlay.run_timed("Main.update_camera", Callable(self, "update_camera").bind(dt))
-	var view_rect: Rect2 = get_stream_view_rect()
-	var plane_y: float = float(world.top_render_y)
-	debug_overlay.run_timed("World.update_streaming", Callable(world, "update_streaming").bind(view_rect, plane_y, dt, camera))
-	debug_overlay.run_timed("Main.handle_mouse", Callable(self, "handle_mouse"))
-	debug_overlay.run_timed("Main.update_hover_preview", Callable(self, "update_hover_preview"))
-	debug_overlay.run_timed("Main.update_info_hover", Callable(self, "update_info_hover"))
-	debug_overlay.update_draw_burden()
-	debug_overlay.update_streaming_stats()
-	debug_overlay.update_streaming_capture(dt)
-	debug_overlay.step_world(dt)
-	_update_depth_limit_background()
+	_run_shared_updates(dt)
 
 
 func _run_direct_updates(dt: float) -> void:
-	update_camera(dt)
+	_run_shared_updates(dt)
+
+
+func _run_shared_updates(dt: float) -> void:
+	world.run_performance_timed("Main.update_camera", Callable(self, "update_camera").bind(dt))
 	var view_rect: Rect2 = get_stream_view_rect()
 	var plane_y: float = float(world.top_render_y)
-	world.update_streaming(view_rect, plane_y, dt, camera)
-	handle_mouse()
-	update_hover_preview()
-	update_info_hover()
-	world.update_world(dt)
+	var render_band_rects: Dictionary = render_level_controller.get_render_band_view_rects(world.top_render_y) \
+		if render_level_controller != null else {}
+	world.run_performance_timed("World.update_streaming", Callable(world, "update_streaming").bind(view_rect, plane_y, dt, camera, render_band_rects))
+	world.run_performance_timed("Main.handle_mouse", Callable(self, "handle_mouse"))
+	world.run_performance_timed("Main.update_hover_preview", Callable(self, "update_hover_preview"))
+	world.run_performance_timed("Main.update_info_hover", Callable(self, "update_info_hover"))
+	if debug_overlay != null:
+		debug_overlay.update_draw_burden()
+		debug_overlay.update_streaming_stats()
+		debug_overlay.update_streaming_capture(dt)
+		debug_overlay.step_world(dt)
+	else:
+		world.update_world(dt)
 	_update_depth_limit_background()
 #endregion
 
@@ -340,17 +471,17 @@ func _update_depth_limit_background() -> void:
 
 #region Mouse Interaction
 func handle_mouse() -> void:
-	if selection_controller != null:
+	if selection_controller != null and not _context_blocks_world_input():
 		selection_controller.handle_mouse()
 
 
 func update_hover_preview() -> void:
-	if selection_controller != null:
+	if selection_controller != null and not _context_blocks_world_input():
 		selection_controller.update_hover_preview()
 
 
 func update_info_hover() -> void:
-	if selection_controller != null:
+	if selection_controller != null and not _context_blocks_world_input():
 		var previous_id := selection_controller.info_block_id
 		var previous_pos := selection_controller.info_block_pos
 		selection_controller.update_info_hover()
@@ -405,7 +536,12 @@ func toggle_menu() -> void:
 
 
 func open_menu() -> void:
+	_cancel_context_input()
 	menu_open = true
+	if diagnostics_controller != null:
+		diagnostics_controller.service.mark_event("menu_opened")
+	if performance_controller != null:
+		performance_controller.sync_segment()
 	if menu_layer:
 		menu_layer.visible = true
 	_refresh_menu_buttons()
@@ -425,6 +561,10 @@ func close_menu() -> void:
 	if not world_started:
 		return
 	menu_open = false
+	if diagnostics_controller != null:
+		diagnostics_controller.service.mark_event("menu_closed")
+	if performance_controller != null:
+		performance_controller.sync_segment()
 	if menu_layer:
 		menu_layer.visible = false
 
@@ -450,7 +590,15 @@ func _on_save_pressed() -> void:
 		_set_menu_status("Save folder error.")
 		return
 
+	if performance_controller != null:
+		performance_controller.begin_operation("saving")
+	if diagnostics_controller != null:
+		diagnostics_controller.set_operation("saving")
 	var ok := world.save_world(SAVE_PATH)
+	if diagnostics_controller != null:
+		diagnostics_controller.set_operation("")
+	if performance_controller != null:
+		performance_controller.finish_operation("saving", ok)
 	_set_menu_status("Saved." if ok else "Save failed.")
 	_refresh_menu_buttons()
 
@@ -555,9 +703,15 @@ func _finish_world_start_or_load(status_prefix: String, schedule_full_map_warmup
 
 func _start_new_world_with_loading() -> void:
 	var load_start_usec: int = Time.get_ticks_usec()
+	if diagnostics_controller != null:
+		diagnostics_controller.begin_operation("loading")
+	if performance_controller != null:
+		performance_controller.begin_operation("loading")
 	_show_loading_screen("Starting new world...")
 	await get_tree().process_frame
 	world.start_new_world()
+	if performance_controller != null:
+		performance_controller.world_replaced("new_world")
 	if render_level_controller != null:
 		render_level_controller.reset_loading_state()
 	if generate_full_map_on_startup:
@@ -573,12 +727,18 @@ func _start_new_world_with_loading() -> void:
 	await get_tree().process_frame
 	await _finish_world_start_or_load("Generating startup view", generate_full_map_on_startup)
 	_report_load_metrics("New world", load_start_usec)
+	if diagnostics_controller != null:
+		diagnostics_controller.finish_operation("loading", true)
 	_hide_loading_screen()
 	close_menu()
+	if performance_controller != null:
+		performance_controller.finish_operation("loading", true)
 
 
 func _load_world_with_loading() -> void:
 	var load_start_usec: int = Time.get_ticks_usec()
+	if performance_controller != null:
+		performance_controller.begin_operation("loading")
 	var reveal_previous_world := world_started
 	_show_loading_screen("Loading world...")
 	await get_tree().process_frame
@@ -588,7 +748,11 @@ func _load_world_with_loading() -> void:
 		_set_world_draw_enabled(reveal_previous_world)
 		_set_menu_status("Load failed.")
 		_refresh_menu_buttons()
+		if performance_controller != null:
+			performance_controller.finish_operation("loading", false)
 		return
+	if performance_controller != null:
+		performance_controller.world_replaced("load")
 	if render_level_controller != null:
 		render_level_controller.reset_loading_state()
 	if generate_full_map_on_startup:
@@ -599,6 +763,8 @@ func _load_world_with_loading() -> void:
 	_report_load_metrics("Load world", load_start_usec)
 	_hide_loading_screen()
 	close_menu()
+	if performance_controller != null:
+		performance_controller.finish_operation("loading", true)
 
 
 func _prepare_full_map_arena_cook(status_prefix: String) -> void:

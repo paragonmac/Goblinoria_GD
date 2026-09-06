@@ -6,6 +6,7 @@ class_name ChunkCache
 const MAX_POOLED_CHUNK_NODES := 128
 
 var chunk_nodes: Dictionary = {}
+var coordinate_slots = preload("res://scripts/rendering/stable_coord_slots.gd").new()
 var pooled_nodes: Array = []
 var created_node_count: int = 0
 var reused_node_count: int = 0
@@ -20,6 +21,7 @@ func clear() -> void:
 		mesh_instance.queue_free()
 		freed_node_count += 1
 	chunk_nodes.clear()
+	coordinate_slots.clear()
 	for node in pooled_nodes:
 		var mesh_instance: MeshInstance3D = node
 		mesh_instance.queue_free()
@@ -40,6 +42,7 @@ func ensure_chunk(coord: Vector3i, chunk_size: int) -> MeshInstance3D:
 	mesh_instance.position = Vector3(coord.x * chunk_size, coord.y * chunk_size, coord.z * chunk_size)
 	add_child(mesh_instance)
 	chunk_nodes[coord] = mesh_instance
+	coordinate_slots.add(coord)
 	return mesh_instance
 
 
@@ -48,6 +51,7 @@ func remove_chunk(coord: Vector3i) -> void:
 		return
 	var mesh_instance: MeshInstance3D = chunk_nodes[coord]
 	chunk_nodes.erase(coord)
+	coordinate_slots.erase(coord)
 	_pool_or_free_node(mesh_instance)
 #endregion
 

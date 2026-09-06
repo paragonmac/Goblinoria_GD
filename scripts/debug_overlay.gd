@@ -33,7 +33,7 @@ var streaming_stats_label: Label
 #endregion
 
 #region Constants
-const DEBUG_TIMING_LINES := 12
+const DEBUG_TIMING_LINES := 24
 const STREAMING_CAPTURE_INTERVAL := 0.25
 const DEBUG_POLL_INTERVAL_SEC := 0.25
 const DEBUG_TIMINGS_LOG_INTERVAL_SEC := 0.5
@@ -210,10 +210,8 @@ func toggle_streaming_capture() -> void:
 
 #region Timed Execution
 func run_timed(label: String, callable: Callable) -> void:
-	if show_debug_timings and debug_profiler != null and debug_profiler.enabled:
-		debug_profiler.begin(label)
-		callable.call()
-		debug_profiler.end(label)
+	if world != null:
+		world.run_performance_timed(label, callable)
 	else:
 		callable.call()
 #endregion
@@ -224,43 +222,14 @@ func step_world(dt: float) -> void:
 	if world == null:
 		return
 	_record_frame_timing(dt)
-	if show_debug_timings and debug_profiler != null and debug_profiler.enabled:
-		debug_profiler.begin("World.process_generation_results")
-		world.process_generation_results()
-		debug_profiler.end("World.process_generation_results")
+	world.update_world(dt)
 
-		debug_profiler.begin("World.update_render_height_queue")
-		world.update_render_height_queue()
-		debug_profiler.end("World.update_render_height_queue")
 
-		debug_profiler.begin("World.update_task_assignments")
-		world.update_task_assignments()
-		debug_profiler.end("World.update_task_assignments")
-
-		debug_profiler.begin("World.update_workers")
-		world.update_workers(dt)
-		debug_profiler.end("World.update_workers")
-
-		debug_profiler.begin("World.update_task_queue")
-		world.update_task_queue()
-		debug_profiler.end("World.update_task_queue")
-
-		debug_profiler.begin("World.update_task_accessibility")
-		world.update_task_accessibility()
-		debug_profiler.end("World.update_task_accessibility")
-
-		debug_profiler.begin("World.update_reassign_tasks")
-		world.update_reassign_tasks(dt)
-		debug_profiler.end("World.update_reassign_tasks")
-
-		debug_profiler.begin("World.update_task_overlays")
-		world.update_task_overlays_phase()
-		debug_profiler.end("World.update_task_overlays")
-
+## Main calls this once, after prewarm and all timed Main updates.
+func finish_timed_frame() -> void:
+	if debug_profiler != null:
 		debug_profiler.finish_frame()
-		update_debug_timings_label()
-	else:
-		world.update_world(dt)
+	update_debug_timings_label()
 #endregion
 
 

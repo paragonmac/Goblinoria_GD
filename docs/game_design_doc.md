@@ -1,6 +1,8 @@
-# Goblinoria Game Design Document v0.2
+# Goblinoria Game Design Document v0.3
 
-Current prototype: Godot 4.6.x / GDScript.
+Current prototype: Godot 4.7.x / GDScript (`project.godot` is authoritative).
+
+Documentation checkpoint: 2026-09-05. This is the intended game design, not a completed-feature inventory. See [Prototype Checkpoint](prototype_checkpoint.md) for implemented/partial/planned/deferred systems, evidence, persistence limits, and the next playable validation gate; see [Current Architecture](current_architecture.md) for runtime structure. V0.3 reconciles documentation with the prototype; it does not approve new gameplay systems.
 
 This document describes the major design pillars and systems for Goblinoria. It is inspired by Dwarf Fortress-style colony simulation, but the goal is not to clone a specific game. The goal is to capture the core fantasy: a living settlement carved into a reactive voxel world, where simple systems combine into surprising outcomes.
 
@@ -98,6 +100,8 @@ World generation should support identity and replayability:
 - Water or fluid features once visually and mechanically readable.
 
 The current priority is stable, readable generation over maximum variety.
+
+Prototype boundary: full-map generation implements layered climate/biomes, geology, caves, ores, slopes, and flowers. Limited streamed generation is a simpler fallback, not content-identical generation. The static underground water pass is disabled pending presentation work; generated water would not itself constitute fluid simulation.
 
 ## Colony Model
 
@@ -317,6 +321,8 @@ Fluid simulation should be simple enough to reason about and visual enough to pl
 
 ## User Interface And Player Tools
 
+Prototype boundary: seven shared tools, a right-click context menu, cell snapshots, worker details/idle role selection, task/item/stockpile overlays, and diagnostics exist. The stockpile filter HUD currently edits only the first stockpile. Broader management surfaces below remain design targets; automated input coverage is not graphical usability sign-off.
+
 The UI should help the player plan and diagnose, not hide the simulation.
 
 Major UI surfaces:
@@ -341,6 +347,8 @@ Important UI principles:
 ## Save, Load, And Persistence
 
 Persistence is core because colony games create long-running stories.
+
+Current V6 behavior is narrower than the target requirements below: edited terrain, world metadata, physical item stacks, stockpile zones/filters, and worker role assignments persist. Workers respawn on load; queued designations, active tasks, worker positions, and work progress are not restored. Carried items become loose at the saving worker's position and transient reservations are cleared. Optional mesh caches accelerate rendering. Transactional slot replacement protects the previous save on failure. Full colony-session continuity remains future design/implementation work, not a completed capability.
 
 Major persistence requirements:
 
@@ -389,9 +397,9 @@ Suggested milestone track:
 | [M9](https://github.com/paragonmac/Goblinoria_GD/milestone/10) | [#24](https://github.com/paragonmac/Goblinoria_GD/issues/24) | World Depth | Biomes, caves, ores, and underground features create map identity. |
 | [M10](https://github.com/paragonmac/Goblinoria_GD/milestone/11) | [#25](https://github.com/paragonmac/Goblinoria_GD/issues/25) | Emergent Systems | Traps, flooding, production, combat roles, learned abilities, morale, and failures interact. |
 
-Current development should focus on M0 and M1 until the core loop is reliable.
+The 2026-09-05 checkpoint finds implemented foundations spanning M0-M2, partial construction in M3, and early tooling/world-generation work from M8/M9. This does not certify those milestones complete. The next recommended gate is a repeatable dig -> haul -> stockpile -> build -> save/reload playtest under the current persistence contract, including resolution of the open worker-disappearance blocker. Do not advance broad feature scope merely because individual headless contracts pass. See [Prototype Checkpoint](prototype_checkpoint.md).
 
-The current planning timeline is documented in `docs/project_management.md` and mirrored in the `Goblinoria Roadmap` GitHub Project through `Start Date` and `Target Date` fields.
+Original planning windows are retained in [Project Management](project_management.md). Live issue status and project fields remain authoritative; dates and unchecked tracker lists are not evidence that a local feature is absent or complete.
 
 ## First Playable Slice
 
@@ -411,6 +419,8 @@ This slice proves:
 - Basic diagnostics.
 
 Everything else builds on this.
+
+This remains the foundation slice definition. The next checkpoint extends validation across the already implemented physical-item/stockpile loop and basic placement, without claiming that rooms, construction-site delivery, production, or needs exist.
 
 ## Deferred Detail
 

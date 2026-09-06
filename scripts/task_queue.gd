@@ -65,6 +65,7 @@ class Task:
 	var retry_due_msec: int = 0
 	var unreachable_workers: Dictionary = {}
 	var data: Dictionary = {}
+	var diagnostics_world: WeakRef
 
 	func _init(task_id: int, task_pos: Vector3i, task_type: int, task_material: int) -> void:
 		id = task_id
@@ -114,6 +115,9 @@ class Task:
 #region State
 var tasks: Array = []
 var next_id: int = 1
+var diagnostics_membership_revision := 0
+# Weak ownership: the manager supplies World; its service may be replaced.
+var diagnostics_world: WeakRef
 var _tasks_by_id: Dictionary = {}      # int -> Task
 var _tasks_by_pos: Dictionary = {}     # Vector3i -> Array[Task]
 var _assist_waiters: Array = []
@@ -130,12 +134,16 @@ func add_task(pos: Vector3i, task_type: int, material: int) -> int:
 	var task_id = next_id
 	next_id += 1
 	var task := Task.new(task_id, pos, task_type, material)
+	task.diagnostics_world = diagnostics_world
 	task.visual_state_changed.connect(_on_task_visual_state_changed.bind(task))
 	tasks.append(task)
 	_tasks_by_id[task_id] = task
 	if not _tasks_by_pos.has(pos):
 		_tasks_by_pos[pos] = []
 	_tasks_by_pos[pos].append(task)
+	diagnostics_membership_revision += 1
+	if _diagnostics_enabled():
+		_diagnostics_service().observe("task", str(task.id), "task_added", {"type": task.type, "pos": task.pos})
 	active_count_changed.emit(tasks.size())
 	task_added.emit(task)
 	task_visual_state_changed.emit(task.id)
@@ -207,6 +215,9 @@ func remove_pending_tasks_at(pos: Vector3i, task_types: Array = []) -> Array:
 		_tasks_by_id.erase(task.id)
 		pos_tasks.erase(task)
 		tasks.erase(task)
+		diagnostics_membership_revision += 1
+		if _diagnostics_enabled():
+			_diagnostics_service().invalidate("task", str(task.id), "task_removed")
 		removed.append(task)
 		task_removed.emit(task.id)
 		task_visual_state_changed.emit(task.id)
@@ -232,6 +243,9 @@ func remove_task(task) -> bool:
 	else:
 		_tasks_by_pos[task.pos] = pos_tasks
 	tasks.erase(task)
+	diagnostics_membership_revision += 1
+	if _diagnostics_enabled():
+		_diagnostics_service().invalidate("task", str(task.id), "task_removed")
 	active_count_changed.emit(tasks.size())
 	task_removed.emit(task.id)
 	task_visual_state_changed.emit(task.id)
@@ -346,6 +360,10 @@ func _prune_invalid_assist_waiters() -> void:
 
 #region Task Maintenance
 func clear() -> void:
+	diagnostics_membership_revision += 1
+	if _diagnostics_enabled():
+		for task_id in _tasks_by_id:
+			_diagnostics_service().invalidate("task", str(task_id), "queue_cleared")
 	var had_tasks := not tasks.is_empty()
 	var removed_ids: Array = _tasks_by_id.keys()
 	tasks.clear()
@@ -381,7 +399,19 @@ func tasks_near(
 
 func _on_task_visual_state_changed(task) -> void:
 	if task != null and _tasks_by_id.has(task.id):
+		if _diagnostics_enabled():
+			_diagnostics_service().invalidate("task", str(task.id), "task_state_changed")
 		task_visual_state_changed.emit(task.id)
+
+
+func _diagnostics_service():
+	var world = diagnostics_world.get_ref() if diagnostics_world != null else null
+	return world.live_diagnostics if world != null else null
+
+
+func _diagnostics_enabled() -> bool:
+	var service = _diagnostics_service()
+	return service != null and service.enabled
 
 
 func count_active_by_type_and_material(task_type: int, material: int) -> int:

@@ -54,12 +54,14 @@ func _init(world_ref: World, queue_ref: TaskQueue) -> void:
 	world = world_ref
 	task_queue = queue_ref
 	if world != null:
+		task_queue.diagnostics_world = weakref(world)
 		world.item_store.haul_state_changed.connect(request_haul_rebuild)
 		world.stockpile_store.haul_state_changed.connect(request_haul_rebuild)
 	task_queue.task_added.connect(_on_task_added)
 	task_queue.task_removed.connect(_on_task_removed)
 	task_queue.task_visual_state_changed.connect(_on_task_visual_state_changed)
 	for task in task_queue.tasks:
+		task.diagnostics_world = task_queue.diagnostics_world
 		request_accessibility_check(task.id, "manager_initialized")
 	_setup_path_retry_timer()
 	path_search_scheduler.start()
@@ -133,6 +135,8 @@ func request_accessibility_check(task_id: int, _reason: String = "unspecified") 
 		return
 	pending_accessibility_set[task_id] = true
 	pending_accessibility_ids.append(task_id)
+	if _diagnostics_enabled():
+		world.live_diagnostics.invalidate("task", str(task_id), _reason)
 
 
 func update_task_accessibility() -> void:
@@ -167,6 +171,8 @@ func _classify_task_accessibility(task) -> void:
 			now_msec,
 			TaskQueue.TaskBlockReason.NO_WORK_POSITION
 		)
+		if _diagnostics_enabled():
+			world.live_diagnostics.observe("task", str(task.id), "no_work_position", {"type": task.type, "pos": task.pos})
 		return
 	if not _has_eligible_worker(task):
 		_clear_path_retry(task.id)
@@ -175,12 +181,16 @@ func _classify_task_accessibility(task) -> void:
 			now_msec,
 			TaskQueue.TaskBlockReason.NO_ELIGIBLE_WORKER
 		)
+		if _diagnostics_enabled():
+			world.live_diagnostics.observe("task", str(task.id), "no_eligible_worker", {"type": task.type, "worker_count": world.workers.size()})
 		return
 	_clear_path_retry(task.id)
 	task.unreachable_workers.clear()
 	# A work position is necessary but not sufficient. Keep the task green until
 	# a revision-checked worker path bid proves it is currently reachable.
 	task.set_accessibility(TaskQueue.TaskAccessibility.UNKNOWN, now_msec)
+	if _diagnostics_enabled():
+		world.live_diagnostics.observe("task", str(task.id), "awaiting_worker_path", {"has_work_position": has_work_position, "eligible_role_present": true})
 
 
 func _mark_task_path_blocked(task, now_msec: int) -> void:
@@ -193,6 +203,8 @@ func _mark_task_path_blocked(task, now_msec: int) -> void:
 	)
 	path_retry_due_by_task[task.id] = retry_due
 	_schedule_path_retry_timer()
+	if _diagnostics_enabled():
+		world.live_diagnostics.observe("task", str(task.id), "no_worker_path", {"retry_due_msec": retry_due})
 
 
 func _clear_path_retry(task_id: int) -> void:
@@ -236,6 +248,8 @@ func process_due_path_retries(now_msec: int) -> void:
 		task.unreachable_workers.clear()
 		task.set_accessibility(TaskQueue.TaskAccessibility.UNKNOWN, now_msec)
 		request_accessibility_check(task.id, "path_retry_due")
+		if _diagnostics_enabled():
+			world.live_diagnostics.observe("task", str(task.id), "path_retry_due", {"now_msec": now_msec})
 	_schedule_path_retry_timer(now_msec)
 
 
@@ -251,6 +265,8 @@ func notify_worker_availability_changed() -> void:
 		task.unreachable_workers.clear()
 		task.set_accessibility(TaskQueue.TaskAccessibility.UNKNOWN, now_msec)
 		request_accessibility_check(task.id, "worker_availability_changed")
+		if _diagnostics_enabled():
+			world.live_diagnostics.invalidate("task", str(task.id), "worker_availability_changed")
 	_schedule_path_retry_timer(now_msec)
 
 
@@ -281,11 +297,15 @@ func update_task_assignments() -> void:
 		_queue_worker_bid(task, worker)
 		return
 	if not assignment_pending_jobs.is_empty():
+		if _diagnostics_enabled():
+			world.live_diagnostics.observe("task", str(task.id), "auction_waiting_for_bids", {"auction_id": assignment_auction_id, "pending_jobs": assignment_pending_jobs.size(), "received_bids": assignment_bids.size()})
 		return
 
 	var best_bid := _best_available_assignment_bid()
 	if not best_bid.is_empty():
 		var best_worker: Worker = best_bid["worker"]
+		if _diagnostics_enabled():
+			world.live_diagnostics.observe("task", str(task.id), "auction_winner", {"auction_id": assignment_auction_id, "worker_id": best_worker.worker_id, "path_length": int(best_bid["path_length"]), "bid_count": assignment_bids.size(), "tie_break": "shortest_path_then_worker_id"})
 		best_worker.assign_task_with_path(
 			world,
 			task_queue,
@@ -344,9 +364,13 @@ func rebuild_haul_tasks() -> void:
 		if item_id < 0:
 			continue
 		if int(item.get("reserved_by_task_id", -1)) >= 0:
+			if _diagnostics_enabled():
+				world.live_diagnostics.observe("item", str(item_id), "haul_already_reserved", {"task_id": int(item["reserved_by_task_id"])})
 			continue
 		var destination: Dictionary = world.find_stockpile_destination_for_item(item)
 		if destination.is_empty():
+			if _diagnostics_enabled():
+				world.live_diagnostics.observe("item", str(item_id), "haul_no_destination", {"material_id": int(item.get("material_id", 0))})
 			world.trace_system_event(
 				"haul_not_queued",
 				"item_id=%d material=%d reason=no_accepting_stockpile" % [
@@ -363,6 +387,8 @@ func rebuild_haul_tasks() -> void:
 			destination.get("pos", Vector3i.ZERO)
 		)
 		if world.item_store.reserve_item(item_id, task_id):
+			if _diagnostics_enabled():
+				world.live_diagnostics.observe("item", str(item_id), "haul_queued", {"task_id": task_id, "stockpile_id": int(destination.get("stockpile_id", -1)), "destination": destination.get("pos", Vector3i.ZERO)})
 			var task = task_queue.get_task(task_id)
 			world.trace_task_event(task, "haul_queued", "item_id=%d stockpile=%d destination=%s" % [
 				item_id,
@@ -394,6 +420,8 @@ func _prune_invalid_haul_tasks() -> void:
 		if task.id == assignment_task_id:
 			_reset_assignment_auction()
 		world.trace_task_event(task, "haul_cancelled", "reason=invalid_reservation_or_destination")
+		if _diagnostics_enabled():
+			world.live_diagnostics.observe("item", str(item_id), "haul_cancelled", {"task_id": task.id, "cause": "invalid_reservation_or_destination"})
 
 
 func _is_haul_task_valid(task) -> bool:
@@ -470,6 +498,8 @@ func request_assist_path(worker: Worker, candidates: Array) -> bool:
 	}
 	assist_requests_by_worker[worker.worker_id] = request
 	assist_requests_by_id[request_id] = request
+	if _diagnostics_enabled():
+		world.live_diagnostics.observe("worker", str(worker.worker_id), "assist_path_queued", {"request_id": request_id, "job_id": job_id, "goal_count": goals.size()})
 	world.trace_worker_event(worker, "assist_path_queued", null, "job_id=%d goals=%d" % [job_id, goals.size()])
 	return true
 
@@ -498,6 +528,8 @@ func request_haul_delivery_path(worker: Worker, task, destination: Vector3i) -> 
 	}
 	haul_path_requests_by_worker[worker.worker_id] = request
 	haul_path_requests_by_id[request_id] = request
+	if _diagnostics_enabled():
+		world.live_diagnostics.observe("worker", str(worker.worker_id), "haul_delivery_path_queued", {"task_id": task.id, "request_id": request_id, "job_id": job_id, "destination": destination})
 	world.trace_worker_event(worker, "haul_delivery_path_queued", task, "job_id=%d destination=%s" % [job_id, destination])
 	return true
 
@@ -535,6 +567,8 @@ func _start_assignment_auction(task) -> void:
 	for worker: Worker in world.workers:
 		if worker.can_accept_task(task) and _is_worker_available(worker):
 			assignment_workers.append(worker)
+		elif _diagnostics_enabled():
+			world.live_diagnostics.observe("worker", str(worker.worker_id), "auction_candidate_excluded", {"task_id": task.id, "role_id": worker.role_id, "state": worker.state, "current_task_id": worker.current_task_id, "assist_request_pending": assist_requests_by_worker.has(worker.worker_id)})
 	assignment_workers.sort_custom(func(a: Worker, b: Worker):
 		return a.worker_id < b.worker_id
 	)
@@ -545,13 +579,19 @@ func _start_assignment_auction(task) -> void:
 	assignment_bids.clear()
 	assignment_pending_jobs.clear()
 	world.trace_task_event(task, "assignment_auction_started", "candidate_workers=%s" % _worker_ids(assignment_workers))
+	if _diagnostics_enabled():
+		world.live_diagnostics.observe("task", str(task.id), "auction_started", {"auction_id": assignment_auction_id, "candidate_count": assignment_workers.size()})
 
 
 func _queue_worker_bid(task, worker: Worker) -> void:
 	if not worker.can_accept_task(task) or not _is_worker_available(worker):
+		if _diagnostics_enabled():
+			world.live_diagnostics.observe("worker", str(worker.worker_id), "bid_ineligible", {"task_id": task.id, "role_id": worker.role_id, "state": worker.state, "current_task_id": worker.current_task_id})
 		return
 	var now_msec := Time.get_ticks_msec()
 	if task.is_worker_unreachable(worker.worker_id, now_msec):
+		if _diagnostics_enabled():
+			world.live_diagnostics.observe("worker", str(worker.worker_id), "bid_excluded_until_retry", {"task_id": task.id, "marked_msec": int(task.unreachable_workers[worker.worker_id]), "ttl_msec": TaskQueue.WORKER_UNREACHABLE_TTL_MSEC})
 		return
 	var job_id: int = path_search_scheduler.enqueue(
 		world,
@@ -561,6 +601,8 @@ func _queue_worker_bid(task, worker: Worker) -> void:
 		Worker.WORKER_PATH_SEARCH_MAX_ITERATIONS
 	)
 	assignment_pending_jobs[job_id] = worker
+	if _diagnostics_enabled():
+		world.live_diagnostics.observe("worker", str(worker.worker_id), "assignment_bid_queued", {"task_id": task.id, "auction_id": assignment_auction_id, "job_id": job_id})
 	world.trace_worker_event(worker, "assignment_bid_queued", task, "job_id=%d" % job_id)
 
 
@@ -571,6 +613,7 @@ func _process_path_results() -> void:
 		if result.is_empty():
 			break
 		var kind := String(result.get("kind", "assignment"))
+		_record_path_performance(result)
 		if kind == "goals":
 			_process_assist_result(result)
 			continue
@@ -578,47 +621,88 @@ func _process_path_results() -> void:
 			_process_haul_delivery_result(result)
 			continue
 		if int(result.get("auction_id", -1)) != assignment_auction_id:
+			_observe_path_result(result, "assignment_result_cancelled", "auction_replaced")
+			_record_path_disposition("assignment", "cancelled")
 			continue
 		var job_id: int = int(result.get("job_id", -1))
 		var worker: Worker = assignment_pending_jobs.get(job_id, null)
 		assignment_pending_jobs.erase(job_id)
 		var task = task_queue.get_task(int(result.get("task_id", -1)))
 		if worker == null or task == null:
+			_observe_path_result(result, "assignment_result_cancelled", "worker_or_task_missing")
+			_record_path_disposition("assignment", "cancelled")
 			continue
 		var snapshot = result.get("snapshot", null)
 		if snapshot == null or not snapshot.revisions_match(world):
+			_observe_path_result(result, "assignment_bid_stale", "snapshot_revision_mismatch")
+			_record_path_disposition("assignment", "stale")
 			world.trace_worker_event(worker, "assignment_bid_stale", task, "job_id=%d" % job_id)
 			restart_auction = true
 			continue
+		_record_path_disposition("assignment", "accepted")
+		_observe_path_result(result, "assignment_result_accepted", "revisions_match")
 		_collect_worker_bid_result(task, worker, result)
 	if restart_auction:
 		_reset_assignment_auction()
+
+
+## Exactly once per popped result, before any request/lifetime rejection.
+## These are completed-job costs, not additional main-thread frame cost.
+func _record_path_performance(result: Dictionary) -> void:
+	if world.performance_recorder == null or not world.performance_recorder.enabled:
+		return
+	var recorder = world.performance_recorder
+	var kind := String(result.get("kind", "assignment"))
+	if kind not in ["assignment", "goals", "haul_delivery"]:
+		kind = "other"
+	recorder.add_counter("Path.results")
+	recorder.add_counter("Path." + kind + ".results")
+	var path: Array = result.get("path", [])
+	recorder.add_counter("Path.found" if not path.is_empty() else "Path.not_found")
+	for metric in ["snapshot_ms", "queue_wait_ms", "search_ms"]:
+		if result.has(metric):
+			recorder.add_timing("Path.completed." + metric, float(result[metric]))
+
+
+func _record_path_disposition(kind: String, disposition: String) -> void:
+	if world.performance_recorder != null and world.performance_recorder.enabled:
+		world.performance_recorder.add_counter("Path." + kind + "." + disposition)
 
 
 func _process_haul_delivery_result(result: Dictionary) -> void:
 	var request_id := int(result.get("request_id", -1))
 	var request: Dictionary = haul_path_requests_by_id.get(request_id, {})
 	if request.is_empty():
+		_record_path_disposition("haul_delivery", "cancelled")
+		_observe_path_result(result, "haul_delivery_path_cancelled", "request_missing")
 		return
 	haul_path_requests_by_id.erase(request_id)
 	var worker: Worker = request.get("worker", null)
 	if worker != null:
 		haul_path_requests_by_worker.erase(worker.worker_id)
 	if worker == null or not is_instance_valid(worker):
+		_record_path_disposition("haul_delivery", "cancelled")
+		_observe_path_result(result, "haul_delivery_path_cancelled", "worker_missing")
 		return
 	var task = task_queue.get_task(int(request.get("task_id", -1)))
 	if task == null \
 			or task.status != TaskQueue.TaskStatus.IN_PROGRESS \
 			or task.assigned_worker != worker \
 			or worker.current_task_id != task.id:
+		_record_path_disposition("haul_delivery", "cancelled")
+		_observe_path_result(result, "haul_delivery_path_cancelled", "task_owner_changed", int(request.get("task_id", -1)))
 		return
 	var snapshot = result.get("snapshot", null)
 	if snapshot == null or not snapshot.revisions_match(world):
 		world.trace_worker_event(worker, "haul_delivery_path_stale", task, "request_id=%d" % request_id)
+		_observe_path_result(result, "haul_delivery_path_stale", "snapshot_revision_mismatch", task.id)
+		_record_path_disposition("haul_delivery", "stale")
 		request_haul_delivery_path(worker, task, request.get("destination", Vector3i.ZERO))
 		return
+	_record_path_disposition("haul_delivery", "accepted")
 	var found_path: Array = result.get("path", [])
 	if found_path.is_empty():
+		_observe_path_result(result, "haul_delivery_path_failed", "empty_path", task.id)
 		var stats: Dictionary = result.get("search_stats", {})
 		worker.fail_haul_delivery_path(
 			world,
@@ -656,21 +740,30 @@ func _process_assist_result(result: Dictionary) -> void:
 	var request_id: int = int(result.get("request_id", -1))
 	var request: Dictionary = assist_requests_by_id.get(request_id, {})
 	if request.is_empty():
+		_record_path_disposition("goals", "cancelled")
+		_observe_path_result(result, "assist_path_cancelled", "request_missing")
 		return
 	assist_requests_by_id.erase(request_id)
 	var worker: Worker = request["worker"]
 	if not is_instance_valid(worker):
+		_record_path_disposition("goals", "cancelled")
 		return
 	assist_requests_by_worker.erase(worker.worker_id)
 	var snapshot = result.get("snapshot", null)
 	if snapshot == null or not snapshot.revisions_match(world):
 		world.trace_worker_event(worker, "assist_path_stale", null, "request_id=%d" % request_id)
+		_observe_path_result(result, "assist_path_stale", "snapshot_revision_mismatch")
+		_record_path_disposition("goals", "stale")
 		worker.task_search_timer = 0.0
 		return
 	if worker.current_task_id >= 0 or worker.state != Worker.WorkerState.IDLE:
+		_record_path_disposition("goals", "cancelled")
+		_observe_path_result(result, "assist_path_cancelled", "worker_unavailable")
 		return
 	var path: Array = result.get("path", [])
 	if path.is_empty():
+		_observe_path_result(result, "assist_path_failed", "empty_path")
+		_record_path_disposition("goals", "accepted")
 		var stats: Dictionary = result.get("search_stats", {})
 		world.trace_worker_event(worker, "assist_path_failed", null, "snapshot_ms=%.3f queue_wait_ms=%.3f search_ms=%.3f reason=%s iterations=%d/%d" % [
 			float(result.get("snapshot_ms", 0.0)),
@@ -689,8 +782,10 @@ func _process_assist_result(result: Dictionary) -> void:
 		or task.status != TaskQueue.TaskStatus.IN_PROGRESS \
 		or task.assigned_worker == null \
 		or task.assigned_worker == worker:
+		_record_path_disposition("goals", "cancelled")
 		worker.task_search_timer = 0.0
 		return
+	_record_path_disposition("goals", "accepted")
 	worker.start_assist_path(
 		world,
 		task,
@@ -707,6 +802,7 @@ func _collect_worker_bid_result(task, worker: Worker, result: Dictionary) -> voi
 	var search_ms: float = float(result.get("search_ms", 0.0))
 	var stats: Dictionary = result.get("search_stats", {})
 	if maybe_path.is_empty():
+		_observe_path_result(result, "assignment_bid_failed", "empty_path")
 		world.trace_worker_event(worker, "assignment_bid_failed", task, "snapshot_ms=%.3f queue_wait_ms=%.3f search_ms=%.3f reason=%s iterations=%d/%d hit_iteration_cap=%s" % [
 			float(result.get("snapshot_ms", 0.0)),
 			float(result.get("queue_wait_ms", 0.0)),
@@ -725,6 +821,8 @@ func _collect_worker_bid_result(task, worker: Worker, result: Dictionary) -> voi
 		search_ms,
 	])
 	task.set_accessibility(TaskQueue.TaskAccessibility.REACHABLE, Time.get_ticks_msec())
+	if _diagnostics_enabled():
+		world.live_diagnostics.observe("task", str(task.id), "assignment_bid_received", {"worker_id": worker.worker_id, "path_length": maybe_path.size(), "search_ms": search_ms})
 	assignment_bids.append({
 		"worker": worker,
 		"path": maybe_path,
@@ -779,6 +877,10 @@ func _has_eligible_worker(task) -> bool:
 
 
 func _reset_assignment_auction() -> void:
+	if _diagnostics_enabled() and assignment_task_id >= 0:
+		var task = task_queue.get_task(assignment_task_id)
+		if task != null and task.status == TaskQueue.TaskStatus.PENDING:
+			world.live_diagnostics.invalidate("task", str(assignment_task_id), "auction_reset")
 	assignment_task_id = -1
 	assignment_auction_id = 0
 	assignment_workers.clear()
@@ -845,6 +947,8 @@ func cancel_pending_task_requests_at(pos: Vector3i) -> Array:
 	if removed.is_empty():
 		return removed
 	for task in removed:
+		if task.type == TaskQueue.TaskType.HAUL:
+			world.item_store.release_reservation(int(task.data.get("item_id", -1)), task.id)
 		world.trace_task_event(task, "task_cancelled", "reason=player_erase")
 		if task.id == assignment_task_id:
 			_reset_assignment_auction()
@@ -877,6 +981,8 @@ func invalidate_task_accessibility(changed_pos: Vector3i) -> void:
 		_clear_path_retry(task.id)
 		task.set_accessibility(TaskQueue.TaskAccessibility.UNKNOWN, Time.get_ticks_msec())
 		request_accessibility_check(task.id, "nearby_terrain_changed")
+		if _diagnostics_enabled():
+			world.live_diagnostics.invalidate("task", str(task.id), "nearby_terrain_changed")
 
 
 func mark_worker_unreachable_for_task(task, worker: Worker) -> void:
@@ -884,6 +990,8 @@ func mark_worker_unreachable_for_task(task, worker: Worker) -> void:
 		return
 	var now_msec := Time.get_ticks_msec()
 	task.mark_worker_unreachable(worker.worker_id, now_msec)
+	if _diagnostics_enabled():
+		world.live_diagnostics.observe("worker", str(worker.worker_id), "task_worker_unreachable", {"task_id": task.id, "marked_msec": now_msec, "ttl_msec": TaskQueue.WORKER_UNREACHABLE_TTL_MSEC})
 	world.trace_worker_event(worker, "task_worker_unreachable", task, "worker excluded from task assignment")
 	for candidate: Worker in world.workers:
 		if not task.is_worker_unreachable(candidate.worker_id, now_msec):
@@ -894,4 +1002,26 @@ func mark_worker_unreachable_for_task(task, worker: Worker) -> void:
 
 func is_task_already_queued(task_type: int, pos: Vector3i) -> bool:
 	return task_queue.has_active_task_at(pos, task_type)
+
+
+func _diagnostics_enabled() -> bool:
+	return world != null and world.live_diagnostics != null and world.live_diagnostics.enabled
+
+
+func _observe_path_result(result: Dictionary, reason: String, cause: String, task_id: int = -1) -> void:
+	if not _diagnostics_enabled():
+		return
+	var stats: Dictionary = result.get("search_stats", {})
+	world.live_diagnostics.observe("worker", str(int(result.get("worker_id", -1))), reason, {
+		"task_id": task_id if task_id >= 0 else int(result.get("task_id", -1)),
+		"job_id": int(result.get("job_id", -1)),
+		"request_id": int(result.get("request_id", -1)),
+		"auction_id": int(result.get("auction_id", -1)),
+		"cause": cause,
+		"path_length": result.get("path", []).size(),
+		"search_reason": str(stats.get("reason", "unknown")).left(128),
+		"iterations_used": int(stats.get("iterations_used", 0)),
+		"max_iterations": int(stats.get("max_iterations", 0)),
+		"hit_iteration_cap": bool(stats.get("hit_iteration_cap", false)),
+	})
 #endregion

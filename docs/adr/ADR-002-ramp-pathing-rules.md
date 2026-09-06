@@ -11,6 +11,8 @@ Workers previously moved through ramp geometry or fell while crossing valid ramp
 
 Ramp traversal is directional. Same-level movement may enter or leave only through a ramp's low edge. Level changes require the high edge of the ramp to line up with the movement direction. Workers standing on an interpolated segment are allowed to continue if the committed path segment is still valid.
 
+Ascending and descending both require clearance in the cell directly above the ramp. The shared traversal rule checks this during path search and before a worker commits a new segment, including when a previously open stair has been covered since the path was planned.
+
 Ramps are not generic empty air and they are not generic solid cubes for worker movement. They are special walk surfaces with directional edge rules.
 
 ## Consequences
@@ -23,4 +25,4 @@ Ramps are not generic empty air and they are not generic solid cubes for worker 
 
 - Code pointer: `scripts/pathfinder.gd`, `can_move_same_level()`, `can_change_level()`, and ramp edge helpers.
 - Code pointer: `scripts/worker.gd`, `_has_supported_path_segment()` and `_validate_next_path_node()`.
-- Contract: `tools/validate_worker_path_safety.gd` checks directional ramp traversal, blocked ramp faces, legal ramp descent interpolation, and same-level ramp support.
+- Contract: `tools/validate_worker_path_safety.gd` checks directional ramp traversal, blocked ramp faces, legal ramp descent interpolation, same-level ramp support, and covered player-stair/terrain-slope rejection in both directions.

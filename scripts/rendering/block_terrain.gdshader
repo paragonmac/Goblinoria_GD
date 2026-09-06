@@ -23,9 +23,6 @@ void fragment() {
 	if (UV2.x > top_render_y) {
 		discard;
 	}
-	if (covered_from_above && NORMAL.y < 0.5) {
-		discard;
-	}
 	bool greedy_uv = encoded_uv2_y >= GREEDY_UV2_FLAG;
 	float top_flag = encoded_uv2_y;
 	float tile_index = 0.0;

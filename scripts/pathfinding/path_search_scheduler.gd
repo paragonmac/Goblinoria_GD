@@ -15,6 +15,8 @@ var job_semaphore := Semaphore.new()
 var result_queue: Array = []
 var result_mutex := Mutex.new()
 var next_job_id := 1
+# Protected by job_mutex; excludes queued jobs and completed pending results.
+var executing_jobs := 0
 
 
 func start() -> void:
@@ -156,6 +158,20 @@ func pop_result() -> Dictionary:
 	return result
 
 
+func get_performance_snapshot() -> Dictionary:
+	# Lock ordering matches result publication; bounded, no queue scans.
+	job_mutex.lock()
+	result_mutex.lock()
+	var snapshot := {
+		"queued": job_queue.size(),
+		"executing": executing_jobs,
+		"results_pending": result_queue.size(),
+	}
+	result_mutex.unlock()
+	job_mutex.unlock()
+	return snapshot
+
+
 func _search_worker_loop() -> void:
 	while thread_running:
 		job_semaphore.wait()
@@ -165,13 +181,17 @@ func _search_worker_loop() -> void:
 		job_mutex.lock()
 		if not job_queue.is_empty():
 			job = job_queue.pop_front()
+			executing_jobs += 1
 		job_mutex.unlock()
 		if job.is_empty():
 			continue
 		var result := _run_search(job)
+		job_mutex.lock()
 		result_mutex.lock()
 		result_queue.append(result)
+		executing_jobs -= 1
 		result_mutex.unlock()
+		job_mutex.unlock()
 
 
 func _run_search(job: Dictionary) -> Dictionary:

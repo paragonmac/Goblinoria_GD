@@ -19,6 +19,8 @@ The global `world.inventory` dictionary is now a derived compatibility view over
 
 Haul assignment and delivery paths run through the threaded path scheduler. If carrying is interrupted, the item becomes loose at the worker position, the old haul task is removed, and dirty-driven hauling creates a new task at that position. Queued task coordinates are immutable so task indexes remain coherent.
 
+Invalidating the next delivery-path segment uses the same interruption cleanup. Cancelling a pending haul releases its item reservation so later haul reconstruction cannot leave the item attached to a deleted task.
+
 ## Consequences
 
 - Mining creates visible loose items instead of invisible global counts.

@@ -2,6 +2,8 @@ extends RefCounted
 class_name MainHudController
 ## HUD label setup and event-driven HUD updates.
 
+const ToolCatalog = preload("res://scripts/main_tool_catalog.gd")
+
 #region State
 var y_level_label: Label
 var gen_status_label: Label
@@ -103,37 +105,14 @@ func update_generation_status(world: World) -> void:
 
 
 func _get_mode_display_name(world: World) -> String:
-	match world.player_mode:
-		World.PlayerMode.INFORMATION:
-			return "Info"
-		World.PlayerMode.DIG:
-			return "Dig"
-		World.PlayerMode.PLACE:
-			return "Place"
-		World.PlayerMode.UP_STAIRS:
-			return "Up Stairs"
-		World.PlayerMode.DOWN_STAIRS:
-			return "Down Stairs"
-		World.PlayerMode.ERASE:
-			return "Erase"
-		World.PlayerMode.STOCKPILE:
-			return "Stockpile"
-		_:
-			return "?"
+	return ToolCatalog.mode_label(world.player_mode)
 
 
 func _get_info_display_text(world: World, info_block_id: int, info_block_pos: Vector3i) -> String:
 	if world.player_mode != World.PlayerMode.INFORMATION or info_block_id < 0:
 		return ""
 
-	var block_name := world.get_block_name(info_block_id)
-	return " | %s (%d) @ %d,%d,%d" % [
-		block_name,
-		info_block_id,
-		info_block_pos.x,
-		info_block_pos.y,
-		info_block_pos.z,
-	]
+	return " | " + ToolCatalog.format_block_info(world, info_block_id, info_block_pos)
 
 
 func update_inventory(world: World) -> void:

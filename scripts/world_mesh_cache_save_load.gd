@@ -3,6 +3,7 @@ class_name WorldMeshCacheSaveLoad
 ## Handles optional persistent raw mesh-cache acceleration data.
 
 const WorldChunkSpaceScript = preload("res://scripts/world/world_chunk_space.gd")
+const WorldSaveTransactionScript = preload("res://scripts/world_save_transaction.gd")
 
 #region Constants
 const MESH_CACHE_MAGIC := 0x474D4553
@@ -36,6 +37,18 @@ func get_stats() -> Dictionary:
 	return mesh_cache_stats.duplicate()
 
 
+func snapshot_state() -> Dictionary:
+	return {
+		"entries": pending_mesh_cache_entries.duplicate(true),
+		"stats": mesh_cache_stats.duplicate(true),
+	}
+
+
+func restore_state(snapshot: Dictionary) -> void:
+	pending_mesh_cache_entries = snapshot.get("entries", {}).duplicate(true)
+	mesh_cache_stats = snapshot.get("stats", {}).duplicate(true)
+
+
 func save_mesh_cache(world: World, world_dir: String, bulk_chunk_blocks: Dictionary, block_table_hash: int) -> bool:
 	if world == null or world.renderer == null:
 		return true
@@ -44,16 +57,18 @@ func save_mesh_cache(world: World, world_dir: String, bulk_chunk_blocks: Diction
 	if file == null:
 		push_warning("Mesh cache save skipped: %s" % path)
 		return false
-	file.store_32(MESH_CACHE_MAGIC)
-	file.store_16(MESH_CACHE_VERSION)
-	file.store_16(WorldRenderer.MESHER_CACHE_VERSION)
-	file.store_16(World.CHUNK_SIZE)
-	file.store_16(World.WORLD_CHUNKS_X)
-	file.store_16(World.WORLD_CHUNKS_Y)
-	file.store_16(World.WORLD_CHUNKS_Z)
-	file.store_32(block_table_hash)
+	if not (file.store_32(MESH_CACHE_MAGIC) \
+		and file.store_16(MESH_CACHE_VERSION) \
+		and file.store_16(WorldRenderer.MESHER_CACHE_VERSION) \
+		and file.store_16(World.CHUNK_SIZE) \
+		and file.store_16(World.WORLD_CHUNKS_X) \
+		and file.store_16(World.WORLD_CHUNKS_Y) \
+		and file.store_16(World.WORLD_CHUNKS_Z) \
+		and file.store_32(block_table_hash)):
+		return false
 	var count_pos: int = file.get_position()
-	file.store_32(0)
+	if not file.store_32(0):
+		return false
 	var entries_written := 0
 	for coord in _build_persistent_mesh_cache_coords(world):
 		var blocks: PackedByteArray = _get_blocks_for_coord(world, bulk_chunk_blocks, coord)
@@ -62,13 +77,16 @@ func save_mesh_cache(world: World, world_dir: String, bulk_chunk_blocks: Diction
 		var mesh_entry: Dictionary = _persistent_mesh_cache_entry_for_coord(world, bulk_chunk_blocks, coord, blocks)
 		if mesh_entry.is_empty():
 			continue
-		file.store_var(mesh_entry, false)
+		if not file.store_var(mesh_entry, false):
+			return false
 		entries_written += 1
 	var end_pos: int = file.get_position()
 	file.seek(count_pos)
-	file.store_32(entries_written)
+	if not file.store_32(entries_written):
+		return false
 	file.seek(end_pos)
-	file.flush()
+	if not WorldSaveTransactionScript.finish_write(file):
+		return false
 	mesh_cache_stats["entries_saved"] = entries_written
 	return true
 

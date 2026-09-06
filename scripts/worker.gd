@@ -100,21 +100,33 @@ func _ready() -> void:
 
 
 #region State Management
-func set_state(new_state: WorkerState) -> void:
+func set_state(new_state: WorkerState, world = null) -> void:
 	if state == new_state:
 		return
+	var previous_state := state
 	state = new_state
 	_apply_visual_state(true)
+	if world == null:
+		world = get_parent()
+	if _diagnostics_enabled(world):
+		world.live_diagnostics.invalidate("worker", str(worker_id), "worker_state_changed")
+		world.live_diagnostics.observe("worker", str(worker_id), "worker_state_changed", {"from_state": previous_state, "to_state": state, "task_id": current_task_id, "movement_intent": movement_intent})
 
 
 func get_block_coord() -> Vector3i:
 	return Vector3i(int(round(position.x)), int(floor(position.y)), int(round(position.z)))
 
 
-func set_role(new_role_id: int) -> bool:
+func set_role(new_role_id: int, world = null) -> bool:
 	if not WorkerRolesScript.is_valid(new_role_id) or role_id == new_role_id:
 		return false
+	var previous_role := role_id
 	role_id = new_role_id
+	if world == null:
+		world = get_parent()
+	if _diagnostics_enabled(world):
+		world.live_diagnostics.invalidate("worker", str(worker_id), "worker_role_changed")
+		world.live_diagnostics.observe("worker", str(worker_id), "worker_role_changed", {"from_role": previous_role, "to_role": role_id})
 	return true
 
 
@@ -174,7 +186,7 @@ func _update_falling(dt: float, world, task_queue) -> bool:
 		return false
 	if position.y <= fall_target_y + FALL_TARGET_EPSILON:
 		position.y = fall_target_y
-		_finish_fall()
+		_finish_fall(world)
 		_trace(world, "fall_completed", null, "landed_y=%d" % get_block_coord().y)
 		return false
 	position.y = maxf(fall_target_y, position.y - FALL_SPEED * dt)
@@ -194,10 +206,10 @@ func _begin_fall(world, task_queue) -> void:
 	assist_task_id = -1
 	idle_timer = 0.0
 	waiting_repath_timer = 0.0
-	set_state(WorkerState.FALLING)
+	set_state(WorkerState.FALLING, world)
 
 
-func _finish_fall() -> void:
+func _finish_fall(world = null) -> void:
 	path.clear()
 	path_index = 0
 	path_segment_validated = false
@@ -207,7 +219,7 @@ func _finish_fall() -> void:
 	wander_wait = rng.randf_range(WANDER_WAIT_MIN, WANDER_WAIT_MAX)
 	task_search_timer = 0.0
 	idle_timer = IDLE_PAUSE
-	set_state(WorkerState.IDLE)
+	set_state(WorkerState.IDLE, world)
 
 
 func _recover_to_surface(world, task_queue, reason: String) -> bool:
@@ -237,7 +249,7 @@ func _recover_to_surface(world, task_queue, reason: String) -> bool:
 	task_search_timer = 0.0
 	waiting_repath_timer = 0.0
 	idle_timer = IDLE_PAUSE
-	set_state(WorkerState.IDLE)
+	set_state(WorkerState.IDLE, world)
 	_trace(world, "worker_rescued", null, "reason=%s from=%s to=%s" % [
 		reason,
 		old_coord,
@@ -336,14 +348,20 @@ func update_idle(dt: float, world, task_queue, pathfinder) -> void:
 		if world != null \
 			and world.task_manager != null \
 			and world.task_manager.has_assignable_pending_task_for_worker(self):
+			if _diagnostics_enabled(world):
+				world.live_diagnostics.observe("worker", str(worker_id), "awaiting_assignment_auction", {"auction_task_id": world.task_manager.assignment_task_id, "pending_jobs": world.task_manager.assignment_pending_jobs.size()})
 			return
 		if _move_to_work_front(world, task_queue, pathfinder):
 			return
 		task_search_timer = FAILED_TASK_SEARCH_INTERVAL
+		if _diagnostics_enabled(world):
+			world.live_diagnostics.observe("worker", str(worker_id), "no_assignment_or_assist_path", {"role_id": role_id, "retry_seconds": task_search_timer})
 		return
 
 	if WorkerRolesScript.allows_idle_wander(role_id):
 		update_wander(dt, world, pathfinder)
+	elif _diagnostics_enabled(world):
+		world.live_diagnostics.observe("worker", str(worker_id), "role_reserve_idle", {"role_id": role_id})
 #endregion
 
 
@@ -358,6 +376,8 @@ func assign_task_with_path(
 	trace_details: String = ""
 ) -> void:
 	if not can_accept_task(task):
+		if _diagnostics_enabled(world):
+			world.live_diagnostics.observe("worker", str(worker_id), "assignment_role_rejected", {"task_id": task.id if task != null else -1, "role_id": role_id})
 		return
 	task.status = TaskQueue.TaskStatus.IN_PROGRESS
 	task.accessibility = TaskQueue.TaskAccessibility.REACHABLE
@@ -371,7 +391,7 @@ func assign_task_with_path(
 	task_search_timer = 0.0
 	waiting_repath_timer = 0.0
 	set_target_from_path(world)
-	set_state(WorkerState.MOVING)
+	set_state(WorkerState.MOVING, world)
 	var details := "path_length=%d search_ms=%.3f" % [
 		path.size(),
 		search_ms,
@@ -379,6 +399,9 @@ func assign_task_with_path(
 	if not trace_details.is_empty():
 		details += " " + trace_details
 	_trace(world, trace_event, task, details)
+	if _diagnostics_enabled(world):
+		world.live_diagnostics.observe("worker", str(worker_id), trace_event, {"task_id": task.id, "path_length": path.size(), "search_ms": search_ms, "role_id": role_id})
+		world.live_diagnostics.observe("task", str(task.id), trace_event, {"worker_id": worker_id, "path_length": path.size()})
 
 
 func release_task_for_transfer(task, world) -> bool:
@@ -396,8 +419,11 @@ func release_task_for_transfer(task, world) -> bool:
 		path_segment_validated = false
 		target_pos = position
 		movement_intent = MovementIntent.NONE
-		set_state(WorkerState.IDLE)
+		set_state(WorkerState.IDLE, world)
 	_trace(world, "task_transferred_out", task)
+	if _diagnostics_enabled(world):
+		world.live_diagnostics.invalidate("worker", str(worker_id), "task_transferred_out")
+		world.live_diagnostics.observe("worker", str(worker_id), "task_transferred_out", {"task_id": task.id, "movement_intent": movement_intent})
 	return true
 #endregion
 
@@ -477,7 +503,7 @@ func start_assist_path(
 	task_search_timer = FAILED_TASK_SEARCH_INTERVAL
 	waiting_repath_timer = 0.0
 	set_target_from_path(world)
-	set_state(WorkerState.MOVING)
+	set_state(WorkerState.MOVING, world)
 	_trace(world, "assist_started", task, "goal=%s path_length=%d snapshot_ms=%.3f queue_wait_ms=%.3f search_ms=%.3f" % [
 		goal,
 		path.size(),
@@ -485,6 +511,8 @@ func start_assist_path(
 		queue_wait_ms,
 		search_ms,
 	])
+	if _diagnostics_enabled(world):
+		world.live_diagnostics.observe("worker", str(worker_id), "assist_started", {"task_id": task.id, "goal": goal, "path_length": path.size(), "search_ms": search_ms})
 
 
 func can_work_task(task, world = null, pathfinder = null) -> bool:
@@ -544,22 +572,26 @@ func update_moving(dt: float, world, task_queue, pathfinder) -> void:
 				if task != null and can_work_task(task, world, pathfinder):
 					movement_intent = MovementIntent.NONE
 					active_work_anim = _get_work_anim_for_task(task)
-					set_state(WorkerState.WORKING)
+					set_state(WorkerState.WORKING, world)
 					work_timer = _get_work_duration(world, task)
 					_trace_work_duration_resolved(world, task, work_timer)
 					_trace(world, "work_started", task, "duration_sec=%.2f" % work_timer)
+					if _diagnostics_enabled(world):
+						world.live_diagnostics.observe("worker", str(worker_id), "work_started", {"task_id": task.id, "type": task.type, "duration_seconds": work_timer})
 				else:
 					movement_intent = MovementIntent.NONE
-					set_state(WorkerState.WAITING)
+					set_state(WorkerState.WAITING, world)
 					idle_timer = IDLE_PAUSE
 					waiting_repath_timer = WAITING_REPATH_INTERVAL
 					_trace(world, "task_waiting", task, "work position invalid")
+					if _diagnostics_enabled(world):
+						world.live_diagnostics.observe("worker", str(worker_id), "work_position_invalid", {"task_id": current_task_id, "retry_seconds": waiting_repath_timer})
 			elif movement_intent == MovementIntent.ASSIST:
 				var assist_task = _assist_task(task_queue)
 				var goal := assist_goal
 				movement_intent = MovementIntent.NONE
 				assist_task_id = -1
-				set_state(WorkerState.IDLE)
+				set_state(WorkerState.IDLE, world)
 				wander_wait = 0.0
 				task_search_timer = 0.0
 				if world != null \
@@ -576,7 +608,7 @@ func update_moving(dt: float, world, task_queue, pathfinder) -> void:
 					task_queue.clear_assist_waiter(self)
 			else:
 				movement_intent = MovementIntent.NONE
-				set_state(WorkerState.IDLE)
+				set_state(WorkerState.IDLE, world)
 				wander_wait = rng.randf_range(WANDER_WAIT_MIN, WANDER_WAIT_MAX)
 				_trace(world, "wander_completed")
 			return
@@ -726,6 +758,8 @@ func update_working(dt: float, world, task_queue, pathfinder) -> void:
 				var blocking_workers: Array = world.get_workers_blocking_dig(task.pos)
 				if not blocking_workers.is_empty():
 					work_timer = DIG_OCCUPIED_RETRY_INTERVAL
+					if _diagnostics_enabled(world):
+						world.live_diagnostics.observe("worker", str(worker_id), "dig_deferred_occupied", {"task_id": task.id, "blocking_worker_count": blocking_workers.size(), "retry_seconds": work_timer})
 					_trace(world, "dig_deferred_occupied", task, "blocking_workers=%s" % _worker_ids(blocking_workers))
 					return
 			match task.type:
@@ -735,6 +769,8 @@ func update_working(dt: float, world, task_queue, pathfinder) -> void:
 					world.spawn_mining_drops(old_block, task.pos)
 				TaskQueue.TaskType.PLACE:
 					if not world.remove_from_inventory(task.material):
+						if _diagnostics_enabled(world):
+							world.live_diagnostics.observe("task", str(task.id), "material_unavailable", {"worker_id": worker_id, "material_id": task.material})
 						_trace(world, "task_deferred", task, "material unavailable")
 						task.status = TaskQueue.TaskStatus.PENDING
 						task.accessibility = TaskQueue.TaskAccessibility.UNKNOWN
@@ -742,7 +778,7 @@ func update_working(dt: float, world, task_queue, pathfinder) -> void:
 						current_task_id = -1
 						active_work_anim = &""
 						idle_timer = IDLE_PAUSE
-						set_state(WorkerState.IDLE)
+						set_state(WorkerState.IDLE, world)
 						return
 					world.set_block(task.pos.x, task.pos.y, task.pos.z, task.material)
 				TaskQueue.TaskType.STAIRS:
@@ -752,12 +788,14 @@ func update_working(dt: float, world, task_queue, pathfinder) -> void:
 						return
 			task_queue.complete_task(task)
 			_trace(world, "task_completed", task)
+			if _diagnostics_enabled(world):
+				world.live_diagnostics.observe("task", str(task.id), "task_completed", {"worker_id": worker_id, "type": task.type})
 			if task.type == TaskQueue.TaskType.DIG:
 				world.reassess_waiting_tasks()
 
 	current_task_id = -1
 	active_work_anim = &""
-	set_state(WorkerState.IDLE)
+	set_state(WorkerState.IDLE, world)
 	idle_timer = IDLE_PAUSE
 #endregion
 
@@ -768,22 +806,31 @@ func _advance_haul_task(world, task_queue, task) -> bool:
 	if stage == "pickup":
 		var item: Dictionary = world.item_store.get_item(item_id)
 		if item.is_empty():
+			if _diagnostics_enabled(world):
+				world.live_diagnostics.observe("worker", str(worker_id), "haul_item_missing", {"task_id": task.id, "item_id": item_id})
 			_trace(world, "haul_failed", task, "reason=item_missing")
 			return true
 		if int(item.get("reserved_by_task_id", -1)) != task.id:
+			if _diagnostics_enabled(world):
+				world.live_diagnostics.observe("worker", str(worker_id), "haul_reservation_lost", {"task_id": task.id, "item_id": item_id, "reserved_by_task_id": int(item.get("reserved_by_task_id", -1))})
 			_trace(world, "haul_failed", task, "reason=item_reservation_lost")
 			return true
 		carried_material_id = int(item.get("material_id", 0))
 		carried_count = int(item.get("count", 0))
 		carried_source_item_id = item_id
 		if not world.item_store.mark_carried(item_id):
+			if _diagnostics_enabled(world):
+				world.live_diagnostics.observe("worker", str(worker_id), "haul_pickup_state_invalid", {"task_id": task.id, "item_id": item_id})
 			_trace(world, "haul_failed", task, "reason=item_pickup_state_invalid")
 			_release_carried_item(world, task)
 			return true
 		var destination: Vector3i = task.data.get("destination", Vector3i.ZERO)
 		task.data["stage"] = "delivery_path_pending"
+		if _diagnostics_enabled(world):
+			world.live_diagnostics.invalidate("task", str(task.id), "haul_stage_changed")
+			world.live_diagnostics.observe("item", str(item_id), "item_picked_up", {"worker_id": worker_id, "task_id": task.id, "count": carried_count, "destination": destination})
 		active_work_anim = &""
-		set_state(WorkerState.WAITING_FOR_PATH)
+		set_state(WorkerState.WAITING_FOR_PATH, world)
 		_trace(world, "item_picked_up", task, "item_id=%d material=%d count=%d destination=%s" % [
 			item_id,
 			carried_material_id,
@@ -801,6 +848,8 @@ func _advance_haul_task(world, task_queue, task) -> bool:
 		fail_haul_delivery_path(world, task_queue, task, "reason=deposit_rejected")
 		return false
 	_trace(world, "item_deposited", task, "item_id=%d stockpile=%d" % [item_id, destination_stockpile])
+	if _diagnostics_enabled(world):
+		world.live_diagnostics.observe("worker", str(worker_id), "item_deposited", {"task_id": task.id, "item_id": item_id, "stockpile_id": destination_stockpile, "destination": destination_pos})
 	carried_material_id = 0
 	carried_count = 0
 	carried_source_item_id = -1
@@ -818,21 +867,27 @@ func start_haul_delivery_path(
 	if task == null or found_path.is_empty():
 		return
 	task.data["stage"] = "deposit"
+	if _diagnostics_enabled(world):
+		world.live_diagnostics.invalidate("task", str(task.id), "haul_stage_changed")
 	path = found_path.duplicate()
 	path_index = 0
 	movement_intent = MovementIntent.TASK
 	path_segment_validated = false
 	set_target_from_path(world)
-	set_state(WorkerState.MOVING)
+	set_state(WorkerState.MOVING, world)
 	_trace(world, "haul_delivery_path_started", task, "path_length=%d snapshot_ms=%.3f queue_wait_ms=%.3f search_ms=%.3f" % [
 		path.size(),
 		snapshot_ms,
 		queue_wait_ms,
 		search_ms,
 	])
+	if _diagnostics_enabled(world):
+		world.live_diagnostics.observe("worker", str(worker_id), "haul_delivery_path_started", {"task_id": task.id, "item_id": carried_source_item_id, "path_length": path.size(), "search_ms": search_ms})
 
 
 func fail_haul_delivery_path(world, task_queue, task, details: String) -> void:
+	if _diagnostics_enabled(world):
+		world.live_diagnostics.observe("worker", str(worker_id), "haul_delivery_deferred", {"task_id": task.id if task != null else -1, "item_id": carried_source_item_id})
 	_trace(world, "haul_deferred", task, details)
 	_drop_carried_item(world, task)
 	if task_queue != null:
@@ -844,7 +899,7 @@ func fail_haul_delivery_path(world, task_queue, task, details: String) -> void:
 	path_segment_validated = false
 	movement_intent = MovementIntent.NONE
 	idle_timer = IDLE_PAUSE
-	set_state(WorkerState.IDLE)
+	set_state(WorkerState.IDLE, world)
 
 
 func _release_carried_item(world, task) -> void:
@@ -859,6 +914,8 @@ func _drop_carried_item(world, task) -> void:
 	if carried_source_item_id < 0 or world == null:
 		return
 	world.item_store.mark_loose(carried_source_item_id, get_block_coord())
+	if _diagnostics_enabled(world):
+		world.live_diagnostics.observe("item", str(carried_source_item_id), "item_dropped", {"worker_id": worker_id, "task_id": task.id if task != null else -1, "pos": get_block_coord()})
 	_trace(world, "item_dropped", task, "item_id=%d pos=%s" % [carried_source_item_id, get_block_coord()])
 	carried_material_id = 0
 	carried_count = 0
@@ -877,13 +934,13 @@ func _cancel_interrupted_haul(world, task_queue, task) -> void:
 #region Waiting State
 func update_waiting(_dt: float, world, task_queue, _pathfinder) -> void:
 	if current_task_id < 0:
-		set_state(WorkerState.IDLE)
+		set_state(WorkerState.IDLE, world)
 		return
 
 	var task = task_queue.get_task(current_task_id)
 	if task == null or task.status == TaskQueue.TaskStatus.COMPLETED:
 		current_task_id = -1
-		set_state(WorkerState.IDLE)
+		set_state(WorkerState.IDLE, world)
 		return
 	if waiting_repath_timer > 0.0:
 		return
@@ -891,6 +948,8 @@ func update_waiting(_dt: float, world, task_queue, _pathfinder) -> void:
 
 	# SEE-ADR-005: Waiting workers release tasks so the changed world can be re-auctioned.
 	_trace(world, "task_released_for_repath", task, "retry through assignment auction")
+	if _diagnostics_enabled(world):
+		world.live_diagnostics.observe("worker", str(worker_id), "task_released_for_repath", {"task_id": task.id, "retry_seconds": waiting_repath_timer})
 	task.status = TaskQueue.TaskStatus.PENDING
 	task.accessibility = TaskQueue.TaskAccessibility.UNKNOWN
 	task.unreachable_workers.clear()
@@ -902,7 +961,7 @@ func update_waiting(_dt: float, world, task_queue, _pathfinder) -> void:
 	movement_intent = MovementIntent.NONE
 	assist_task_id = -1
 	idle_timer = IDLE_PAUSE
-	set_state(WorkerState.IDLE)
+	set_state(WorkerState.IDLE, world)
 #endregion
 
 
@@ -923,7 +982,7 @@ func update_wander(dt: float, world, pathfinder) -> void:
 		movement_intent = MovementIntent.WANDER
 		assist_task_id = -1
 		set_target_from_path(world)
-		set_state(WorkerState.MOVING)
+		set_state(WorkerState.MOVING, world)
 		_trace(world, "wander_started", null, "target=%s path_length=%d mode=local_step candidates=%d" % [
 			goal,
 			path.size(),
@@ -1061,6 +1120,9 @@ func _validate_next_path_node(world, task_queue, pathfinder) -> bool:
 
 	var task = _current_task(task_queue)
 	var movement_task = _current_movement_task(task_queue)
+	if _diagnostics_enabled(world):
+		world.live_diagnostics.invalidate("worker", str(worker_id), "path_invalidated")
+		world.live_diagnostics.observe("worker", str(worker_id), "path_invalidated", {"task_id": movement_task.id if movement_task != null else -1, "from": current_node, "next_node": next_node, "movement_intent": movement_intent})
 	_trace(world, "path_invalidated", movement_task, "%s from=%s next_node=%s" % [
 		_movement_intent_name(),
 		current_node,
@@ -1070,15 +1132,19 @@ func _validate_next_path_node(world, task_queue, pathfinder) -> bool:
 	path_index = 0
 	path_segment_validated = false
 	if task != null:
-		task.status = TaskQueue.TaskStatus.PENDING
-		task.accessibility = TaskQueue.TaskAccessibility.UNKNOWN
-		task.unreachable_workers.clear()
-		task.assigned_worker = null
+		if task.type == TaskQueue.TaskType.HAUL:
+			# SEE-ADR-008: Interrupted hauling drops locally and replaces the pickup task.
+			_interrupt_current_task(task_queue, world)
+		else:
+			task.status = TaskQueue.TaskStatus.PENDING
+			task.accessibility = TaskQueue.TaskAccessibility.UNKNOWN
+			task.unreachable_workers.clear()
+			task.assigned_worker = null
 		current_task_id = -1
 		movement_intent = MovementIntent.NONE
 		assist_task_id = -1
 		task_search_timer = IDLE_TASK_SEARCH_INTERVAL
-		set_state(WorkerState.IDLE)
+		set_state(WorkerState.IDLE, world)
 	else:
 		if movement_intent == MovementIntent.ASSIST:
 			_trace(world, "assist_interrupted", movement_task, "path invalidated")
@@ -1086,7 +1152,7 @@ func _validate_next_path_node(world, task_queue, pathfinder) -> bool:
 		assist_task_id = -1
 		wander_wait = 0.0
 		task_search_timer = 0.0
-		set_state(WorkerState.IDLE)
+		set_state(WorkerState.IDLE, world)
 	return false
 
 
@@ -1100,3 +1166,7 @@ func _worker_ids(worker_list: Array) -> String:
 func _trace(world, event: String, task = null, details: String = "") -> void:
 	if world != null:
 		world.trace_worker_event(self, event, task, details)
+
+
+func _diagnostics_enabled(world) -> bool:
+	return world != null and world.get("live_diagnostics") != null and world.live_diagnostics.enabled

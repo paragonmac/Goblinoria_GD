@@ -2,6 +2,9 @@ extends SceneTree
 
 
 func _init() -> void:
+	var cancellation_ok := _validate_cancelled_haul()
+	var blocked_pickup_ok := _validate_blocked_haul(false)
+	var blocked_delivery_ok := _validate_blocked_haul(true)
 	var world := World.new()
 	world._init_ramp_lookup()
 	world.block_registry.load_from_csv(World.BLOCK_DATA_PATH)
@@ -168,8 +171,132 @@ func _init() -> void:
 		quit(1)
 		return
 
-	print("Stockpile hauling contract OK")
+	if not cancellation_ok or not blocked_pickup_ok or not blocked_delivery_ok:
+		quit(1)
+		return
+	print("Stockpile hauling contract OK (including erased reservations and blocked pickup/delivery)")
 	quit(0)
+
+
+func _validate_cancelled_haul() -> bool:
+	var world := _haul_test_world()
+	var source := Vector3i(10, 1, 0)
+	var item_id := world.item_store.add_stack(World.BLOCK_ID_DIRT, 1, source)
+	world.task_manager.update_task_queue()
+	var task = _haul_task_for_item(world.task_queue, item_id)
+	var old_id: int = task.id
+	world.task_manager._start_assignment_auction(task)
+	var before := world.task_manager.haul_rebuild_count
+	var removed := world.cancel_pending_task_requests_at(source)
+	var released_ok: bool = removed.size() == 1 \
+		and world.task_queue.get_task(old_id) == null \
+		and not world.task_queue.has_active_task_at(source, TaskQueue.TaskType.HAUL) \
+		and int(world.item_store.get_item(item_id).get("reserved_by_task_id", -1)) == -1 \
+		and world.task_manager.assignment_task_id == -1
+	# No explicit dirty request: releasing the reservation must request the rebuild.
+	world.task_manager.update_task_queue()
+	var replacement = _haul_task_for_item(world.task_queue, item_id)
+	var rebuilt_ok: bool = replacement != null and replacement.id != old_id \
+		and replacement.pos == source \
+		and world.item_store.get_item(item_id)["reserved_by_task_id"] == replacement.id \
+		and world.task_manager.haul_rebuild_count == before + 1
+	for _i in range(10):
+		world.task_manager.update_task_queue()
+	rebuilt_ok = rebuilt_ok and world.task_manager.haul_rebuild_count == before + 1
+	# Erasing a cell must not cancel a haul already owned by a worker.
+	if replacement != null:
+		replacement.status = TaskQueue.TaskStatus.IN_PROGRESS
+		rebuilt_ok = rebuilt_ok and world.cancel_pending_task_requests_at(source).is_empty() \
+			and world.item_store.get_item(item_id)["reserved_by_task_id"] == replacement.id
+	world.task_manager.shutdown()
+	world.free()
+	if not released_ok or not rebuilt_ok:
+		push_error("Erasing pending HAUL must release its reservation and coalesce a replacement; active HAUL must remain")
+	return released_ok and rebuilt_ok
+
+
+func _validate_blocked_haul(carrying: bool) -> bool:
+	var world := _haul_test_world()
+	var source := Vector3i(10, 1, 0)
+	var worker_pos := Vector3i(11, 1, 0)
+	var blocked_pos := Vector3i(12, 1, 0)
+	var destination := Vector3i(14, 1, 0)
+	var item_id := world.item_store.add_stack(World.BLOCK_ID_DIRT, 3, source)
+	world.task_manager.update_task_queue()
+	var task = _haul_task_for_item(world.task_queue, item_id)
+	var old_id: int = task.id
+	var worker := Worker.new()
+	worker.worker_id = 3
+	worker.role_id = WorkerRoles.Role.HAULER
+	worker.position = Vector3(worker_pos)
+	worker.assign_task_with_path(world, world.task_queue, task, [worker_pos, blocked_pos], 0.0)
+	worker.path_index = 1
+	worker.set_target_from_path(world)
+	if carrying:
+		worker.carried_material_id = World.BLOCK_ID_DIRT
+		worker.carried_count = 3
+		worker.carried_source_item_id = item_id
+		world.item_store.mark_carried(item_id)
+		task.data["stage"] = "deposit"
+	world.set_block_raw(blocked_pos.x, blocked_pos.y, blocked_pos.z, World.BLOCK_ID_GRANITE, true)
+	# Exercise production movement, not just the interruption helper.
+	worker.update_moving(1.0, world, world.task_queue, world.pathfinder)
+	var expected_source := worker_pos if carrying else source
+	var item := world.item_store.get_item(item_id)
+	var cleanup_ok: bool = world.task_queue.get_task(old_id) == null \
+		and not world.task_queue.has_active_task_at(source, TaskQueue.TaskType.HAUL) \
+		and task.pos == source \
+		and item["pos"] == expected_source and item["count"] == 3 \
+		and item["reserved_by_task_id"] == -1 and not item["is_carried"] \
+		and item["stored_stockpile_id"] == -1 \
+		and worker.get_block_coord() == worker_pos \
+		and worker.current_task_id == -1 and worker.carried_source_item_id == -1 \
+		and worker.carried_material_id == 0 and worker.carried_count == 0 \
+		and worker.path.is_empty() and worker.state == Worker.WorkerState.IDLE \
+		and worker.movement_intent == Worker.MovementIntent.NONE \
+		and world.get_inventory_count(World.BLOCK_ID_DIRT) == 0
+	world.task_manager.update_task_queue()
+	var replacement = _haul_task_for_item(world.task_queue, item_id)
+	var requeue_ok: bool = replacement != null and replacement.id != old_id \
+		and replacement.pos == expected_source and replacement.data["stage"] == "pickup" \
+		and world.item_store.get_item(item_id)["reserved_by_task_id"] == replacement.id
+	# Reassignment must first pick up locally, then physically follow delivery.
+	if requeue_ok:
+		worker.assign_task_with_path(world, world.task_queue, replacement, [worker_pos, expected_source], 0.0)
+		worker.update_moving(1.0, world, world.task_queue, world.pathfinder)
+		worker.update_moving(1.0, world, world.task_queue, world.pathfinder)
+		var completed := worker._advance_haul_task(world, world.task_queue, replacement)
+		requeue_ok = not completed and replacement.data["stage"] == "delivery_path_pending" \
+			and worker.get_block_coord() == expected_source \
+			and world.get_inventory_count(World.BLOCK_ID_DIRT) == 0
+		world.set_block_raw(blocked_pos.x, blocked_pos.y, blocked_pos.z, World.BLOCK_ID_AIR, true)
+		var delivery_path: Array = []
+		for x in range(expected_source.x, destination.x + 1):
+			delivery_path.append(Vector3i(x, 1, 0))
+		worker.start_haul_delivery_path(world, replacement, delivery_path, 0.0, 0.0, 0.0)
+		for _i in range(delivery_path.size()):
+			worker.update_moving(1.0, world, world.task_queue, world.pathfinder)
+		requeue_ok = requeue_ok and worker.get_block_coord() == destination \
+			and worker._advance_haul_task(world, world.task_queue, replacement) \
+			and world.get_inventory_count(World.BLOCK_ID_DIRT) == 3 \
+			and worker.carried_source_item_id == -1
+	world.task_manager.shutdown()
+	worker.free()
+	world.free()
+	if not cleanup_ok or not requeue_ok:
+		push_error("Blocked HAUL must clean up and reassign from the physical item position (carrying=%s)" % carrying)
+	return cleanup_ok and requeue_ok
+
+
+func _haul_test_world() -> World:
+	var world := World.new()
+	world._init_ramp_lookup()
+	world.block_registry.load_from_csv(World.BLOCK_DATA_PATH)
+	world.task_manager = TaskManager.new(world, world.task_queue)
+	for x in range(10, 15):
+		world.set_block_raw(x, 0, 0, World.BLOCK_ID_GRANITE, true)
+	world.create_stockpile([Vector3i(14, 1, 0)])
+	return world
 
 
 func _fixed_rng() -> RandomNumberGenerator:

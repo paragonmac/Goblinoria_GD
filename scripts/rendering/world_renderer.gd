@@ -13,6 +13,7 @@ const OverlayRendererScript = preload("res://scripts/rendering/overlay_renderer.
 const FrustumCullerScript = preload("res://scripts/rendering/frustum_culler.gd")
 const ChunkMeshJobBuilderScript = preload("res://scripts/rendering/chunk_mesh_job_builder.gd")
 const WorldRendererMeshCacheStoreScript = preload("res://scripts/rendering/world_renderer_mesh_cache_store.gd")
+const VisibilityScript = preload("res://scripts/rendering/world_renderer_visibility.gd")
 #endregion
 
 #region Constants
@@ -43,7 +44,10 @@ var frustum_culler = FrustumCullerScript.new()
 var mesh_job_builder = ChunkMeshJobBuilderScript.new()
 var mesh_cache_store = WorldRendererMeshCacheStoreScript.new()
 var use_async_meshing: bool = true
-var render_zone_visible: Dictionary = {}
+var visibility_state = VisibilityScript.new()
+var visibility_scheduler = visibility_state.scheduler
+var render_zone_visible: Dictionary = visibility_state.eligible.members
+var diagnostics_render_bounds: Dictionary = {}
 var block_solid_table := PackedByteArray()
 var block_color_table := PackedColorArray()
 var block_ramp_table := PackedByteArray()
@@ -56,6 +60,7 @@ var neighbor_remesh_queued_total: int = 0
 #region Initialization
 func initialize(world_ref: World) -> void:
 	world = world_ref
+	visibility_state.configure(self)
 	if chunk_cache.get_parent() == null:
 		add_child(chunk_cache)
 	if overlay_renderer.get_parent() == null:
@@ -72,6 +77,13 @@ func initialize(world_ref: World) -> void:
 
 func _exit_tree() -> void:
 	_stop_mesh_worker()
+	visibility_state.stop()
+
+
+func _notification(what: int) -> void:
+	# Isolated headless fixtures can free a renderer that never entered a tree.
+	if what == NOTIFICATION_PREDELETE:
+		visibility_state.stop()
 
 
 #region Reset and Clear
@@ -83,13 +95,14 @@ func reset_stats() -> void:
 	overlay_renderer.clear_task_overlays()
 
 func clear_chunks() -> void:
+	visibility_state.clear()
+	diagnostics_render_bounds = {}
 	chunk_cache.clear()
 	_clear_all_chunk_render_stats()
 	pending_neighbor_remesh.clear()
 	chunk_missing_neighbors.clear()
 	render_level_helper.clear()
 	mesh_cache_store.clear()
-	render_zone_visible.clear()
 	_clear_mesh_jobs()
 	overlay_renderer.clear_item_and_stockpile_overlays()
 	if world == null:
@@ -101,6 +114,7 @@ func clear_chunks() -> void:
 
 
 func clear_chunk(coord: Vector3i) -> void:
+	visibility_state.remove_node(coord)
 	_cancel_chunk_jobs(coord)
 	render_level_helper.remove_coord(coord)
 	_clear_chunk_render_stats(coord)
@@ -238,15 +252,20 @@ func regenerate_chunk(cx: int, cy: int, cz: int) -> void:
 	var profiler: DebugProfiler = world.debug_profiler
 	var build_start := 0
 	var log_build_time := profiler != null and profiler.enabled
-	if log_build_time:
-		profiler.begin("Renderer.build_chunk_mesh")
+	var recording := _performance_recording()
+	if log_build_time or recording:
 		build_start = Time.get_ticks_usec()
 	var result: Dictionary = mesher.build_chunk_mesh(world, cx, cy, cz)
-	if log_build_time:
-		profiler.end("Renderer.build_chunk_mesh")
+	if log_build_time or recording:
 		var build_ms := float(Time.get_ticks_usec() - build_start) / 1000.0
-		if build_ms >= MESH_BUILD_LOG_THRESHOLD_MS:
+		if log_build_time:
+			profiler.add_sample("Renderer.build_chunk_mesh", build_ms)
+		if recording:
+			world.performance_recorder.add_timing("Mesh.sync_build_ms", build_ms)
+			world.performance_recorder.add_counter("Mesh.sync_built")
+		if log_build_time and build_ms >= MESH_BUILD_LOG_THRESHOLD_MS:
 			print("Chunk mesh build %d,%d,%d: %.2f ms" % [cx, cy, cz, build_ms])
+	var apply_start_usec := Time.get_ticks_usec() if recording else 0
 	var mesh: ArrayMesh = result["mesh"]
 	var vertices: PackedVector3Array = result.get("vertices", PackedVector3Array())
 	var normals: PackedVector3Array = result.get("normals", PackedVector3Array())
@@ -261,18 +280,21 @@ func regenerate_chunk(cx: int, cy: int, cz: int) -> void:
 
 	_record_chunk_render_stats(key, visible_faces, occluded_faces, mesh_metrics)
 	mesh_instance.mesh = mesh
-	mesh_instance.visible = has_geometry and _is_chunk_in_current_render_zone(key)
+	visibility_state.set_node_visibility(key, has_geometry and _is_chunk_in_current_render_zone(key))
 	if has_geometry:
 		mesh_instance.material_override = get_block_material()
 	var chunk: ChunkData = world.get_chunk(key)
 	if chunk != null:
 		chunk.mesh_state = ChunkData.MESH_STATE_READY
+		mesh_instance.set_meta("diagnostics_mesh_revision", chunk.mesh_revision)
 		chunk.dirty = false
-		var local_top := world.top_render_y - key.y * chunk_size
-		if local_top >= 0:
-			local_top = min(local_top, chunk_size - 1)
-			_store_mesh_cache_from_arrays(key, local_top, vertices, normals, colors, uvs, uv2s, visible_faces, occluded_faces, has_geometry, chunk.mesh_revision, mesh_metrics, missing_neighbors)
+		_store_mesh_cache_from_arrays(key, chunk_size - 1, vertices, normals, colors, uvs, uv2s, visible_faces, occluded_faces, has_geometry, chunk.mesh_revision, mesh_metrics, missing_neighbors)
 	_update_neighbor_remesh_dependencies(key, missing_neighbors)
+	if world.live_diagnostics != null and world.live_diagnostics.enabled:
+		world.live_diagnostics.observe("chunk", key, "sync_applied", {"revision": chunk.mesh_revision if chunk != null else null, "has_geometry": has_geometry})
+	if recording:
+		world.performance_recorder.add_timing("Mesh.apply_ms", float(Time.get_ticks_usec() - apply_start_usec) / 1000.0)
+		world.performance_recorder.add_counter("Mesh.scene_applied")
 #endregion
 
 
@@ -287,9 +309,6 @@ func queue_chunk_mesh_build(coord: Vector3i, top_render_y: int = -1, respect_top
 	if chunk == null or not chunk.generated:
 		return
 	var requested_local_top: int = _mesh_request_local_top(coord, top_render_y)
-	if requested_local_top < 0:
-		_apply_empty_mesh(coord)
-		return
 	if _apply_cached_mesh(coord, requested_local_top):
 		_cancel_chunk_jobs(coord)
 		return
@@ -300,7 +319,7 @@ func queue_chunk_mesh_build(coord: Vector3i, top_render_y: int = -1, respect_top
 		_start_mesh_worker()
 	var revision: int = chunk.mesh_revision
 	var queued_rev: int = mesh_scheduler.get_job_revision(coord)
-	if queued_rev >= revision and chunk.mesh_state == ChunkData.MESH_STATE_PENDING and not respect_top:
+	if queued_rev >= revision and chunk.mesh_state == ChunkData.MESH_STATE_PENDING:
 		if high_priority:
 			_reprioritize_mesh_job(coord)
 		return
@@ -309,9 +328,11 @@ func queue_chunk_mesh_build(coord: Vector3i, top_render_y: int = -1, respect_top
 	chunk.mesh_state = ChunkData.MESH_STATE_PENDING
 	var job := _build_mesh_job(coord, revision, top_render_y, false, respect_top)
 	if job.is_empty():
-		_apply_empty_mesh(coord)
+		chunk.mesh_state = ChunkData.MESH_STATE_NONE
 		return
 	mesh_scheduler.enqueue_visible_job(job, revision, high_priority)
+	if world.live_diagnostics != null and world.live_diagnostics.enabled:
+		world.live_diagnostics.observe("chunk", coord, "mesh_queued", {"revision": revision, "high_priority": high_priority})
 
 
 func _reprioritize_mesh_job(coord: Vector3i) -> void:
@@ -455,6 +476,23 @@ func flush_mesh_jobs(include_prefetch: bool = true, max_ms: float = -1.0) -> voi
 func _apply_mesh_result(result: Dictionary) -> bool:
 	if world == null:
 		return false
+	# Returned builds are charged once even when rejected below. Completed-job
+	# wall time must not be summed into Main's measured update cost.
+	var recording := _performance_recording()
+	if recording:
+		world.performance_recorder.add_counter("Mesh.results")
+		# Real scheduler results carry a capture epoch. Old pending/in-flight
+		# builds must not leak costs into a newly started capture/world segment.
+		# Unstamped direct results remain supported by synchronous test callers.
+		var capture_current: bool = not result.has("performance_capture_epoch") or mesh_scheduler.is_result_in_performance_capture(result)
+		if result.has("build_ms") and capture_current:
+			world.performance_recorder.add_counter("Mesh.built")
+			world.performance_recorder.add_timing("Mesh.completed.build_ms", float(result["build_ms"]))
+	# Check lifetime before touching readiness, caches, or replacement job records.
+	if not mesh_scheduler.is_result_current(result):
+		_diagnostics_mesh(result, "stale_epoch")
+		_record_mesh_counter("Mesh.stale")
+		return false
 	var apply_start_usec: int = Time.get_ticks_usec()
 	var coord: Vector3i = result["coord"]
 	var chunk: ChunkData = world.get_chunk(coord)
@@ -464,12 +502,16 @@ func _apply_mesh_result(result: Dictionary) -> bool:
 	var respect_top: bool = bool(result.get("respect_top", false))
 	var cache_only: bool = bool(result.get("cache_only", false))
 	if chunk == null:
+		_record_mesh_counter("Mesh.discarded")
+		_diagnostics_mesh(result, "chunk_unloaded")
 		if prefetch:
 			_clear_prefetch_job_record(coord, local_top, revision)
 		else:
 			_clear_mesh_job_record(coord, revision)
 		return false
 	if revision != chunk.mesh_revision:
+		_diagnostics_mesh(result, "stale_revision")
+		_record_mesh_counter("Mesh.stale")
 		if chunk.mesh_state == ChunkData.MESH_STATE_PENDING:
 			chunk.mesh_state = ChunkData.MESH_STATE_NONE
 		if prefetch:
@@ -496,7 +538,8 @@ func _apply_mesh_result(result: Dictionary) -> bool:
 	else:
 		current_local_top = -1
 	var should_apply := not prefetch and not cache_only
-	if not cache_only and (prefetch or respect_top):
+	# Full-chunk geometry remains valid when a queued slice request changes.
+	if not cache_only and (prefetch or (respect_top and local_top != chunk_size - 1)):
 		should_apply = current_local_top == local_top
 	if should_apply:
 		var mesh := ArrayMesh.new()
@@ -512,7 +555,8 @@ func _apply_mesh_result(result: Dictionary) -> bool:
 		var mesh_instance: MeshInstance3D = chunk_cache.ensure_chunk(coord, chunk_size)
 		_record_chunk_render_stats(coord, visible_faces, occluded_faces, mesh_metrics)
 		mesh_instance.mesh = mesh
-		mesh_instance.visible = has_geometry and _is_chunk_in_current_render_zone(coord)
+		mesh_instance.set_meta("diagnostics_mesh_revision", revision)
+		visibility_state.set_node_visibility(coord, has_geometry and _is_chunk_in_current_render_zone(coord))
 		if has_geometry:
 			mesh_instance.material_override = get_block_material()
 		chunk.mesh_state = ChunkData.MESH_STATE_READY
@@ -521,6 +565,7 @@ func _apply_mesh_result(result: Dictionary) -> bool:
 	_update_neighbor_remesh_dependencies(coord, missing_neighbors)
 	if should_apply:
 		_queue_prefetch_layers(coord, local_top)
+	_diagnostics_mesh(result, "applied" if should_apply else "cached_only")
 
 	var build_ms := float(result.get("build_ms", 0.0))
 	mesh_cache_store.record_build_ms(build_ms)
@@ -529,11 +574,67 @@ func _apply_mesh_result(result: Dictionary) -> bool:
 		if build_ms >= MESH_BUILD_LOG_THRESHOLD_MS:
 			print("Chunk mesh build %d,%d,%d: %.2f ms" % [coord.x, coord.y, coord.z, build_ms])
 	mesh_cache_store.record_upload_ms(float(Time.get_ticks_usec() - apply_start_usec) / 1000.0)
+	if recording:
+		world.performance_recorder.add_timing("Mesh.apply_ms", float(Time.get_ticks_usec() - apply_start_usec) / 1000.0)
+		world.performance_recorder.add_counter("Mesh.results_applied")
+		world.performance_recorder.add_counter("Mesh.scene_applied" if should_apply else "Mesh.cache_only_applied")
 	if prefetch:
 		_clear_prefetch_job_record(coord, local_top, revision)
 	else:
 		_clear_mesh_job_record(coord, revision)
 	return true
+
+
+func _performance_recording() -> bool:
+	return world != null and world.performance_recorder != null and world.performance_recorder.enabled
+
+
+## Main-thread only. Call after recorder.start(), and BEFORE recorder.stop()
+## or begin_world(). Repeated true resets the epoch for a new world boundary.
+## Atomic reset returns any final old totals, which are emitted before return.
+func set_performance_capture_enabled(enabled: bool) -> void:
+	_emit_performance_capture_totals(mesh_scheduler.set_performance_capture_enabled(enabled))
+	_emit_visibility_capture_totals(visibility_scheduler.set_performance_capture(enabled))
+
+
+## Explicit main-thread drain, once per frame before recorder.end_frame().
+## Snapshot getters never drain. Bounded: four categories, never per lost job.
+func drain_performance_capture() -> void:
+	_emit_performance_capture_totals(mesh_scheduler.drain_performance_capture())
+	_emit_visibility_capture_totals(visibility_scheduler.drain_performance_capture())
+
+
+func _emit_visibility_capture_totals(totals: Dictionary) -> void:
+	if not _performance_recording():
+		return
+	for kind in ["completed", "cancelled", "replaced_result", "replaced_pending"]:
+		var count := int(totals.get(kind + "_count", 0))
+		if count > 0:
+			world.performance_recorder.add_counter("RenderZone.scheduler." + kind, count)
+	for kind in ["completed", "cancelled"]:
+		if int(totals.get(kind + "_count", 0)) > 0:
+			world.performance_recorder.add_timing("RenderZone.completed." + kind + "_ms_sum", float(totals.get(kind + "_ms", 0.0)))
+	if int(totals.get("completed_count", 0)) > 0:
+		world.performance_recorder.add_timing("RenderZone.completed.queue_wait_ms_sum", float(totals.get("queue_wait_ms", 0.0)))
+
+
+func _emit_performance_capture_totals(totals: Dictionary) -> void:
+	if not _performance_recording():
+		return
+	for kind in ["completed", "delivered", "lost_before_publication", "discarded_pending"]:
+		var count := int(totals.get(kind + "_count", 0))
+		if count <= 0:
+			continue
+		world.performance_recorder.add_counter("Mesh.scheduler." + kind, count)
+		# One observation is a drain's elapsed SUM, not an individual build.
+		# The paired counter is the denominator; these lifecycle categories
+		# overlap (completed includes delivered/lost), and are not additive.
+		world.performance_recorder.add_timing("Mesh.scheduler." + kind + "_build_ms_sum", float(totals.get(kind + "_ms", 0.0)))
+
+
+func _record_mesh_counter(label: String) -> void:
+	if _performance_recording():
+		world.performance_recorder.add_counter(label)
 
 
 func _clear_mesh_job_record(coord: Vector3i, revision: int) -> void:
@@ -557,7 +658,7 @@ func _prefetch_key(coord: Vector3i, local_top: int) -> String:
 
 
 func _build_mesh_job(coord: Vector3i, revision: int, top_render_y: int, prefetch: bool, respect_top: bool) -> Dictionary:
-	return mesh_job_builder.build_mesh_job(
+	var job: Dictionary = mesh_job_builder.build_mesh_job(
 		coord,
 		revision,
 		top_render_y,
@@ -567,12 +668,17 @@ func _build_mesh_job(coord: Vector3i, revision: int, top_render_y: int, prefetch
 		block_ramp_table,
 		block_color_table
 	)
+	if not job.is_empty():
+		mesh_scheduler.stamp_job(job)
+	return job
 
 
 func _build_mesh_result_on_worker(job: Dictionary) -> Dictionary:
 	var build_start := Time.get_ticks_usec()
 	var result: Dictionary = mesher_thread.build_chunk_arrays_from_data(job)
 	result["coord"] = job["coord"]
+	result["mesh_epoch"] = job.get("mesh_epoch", -1)
+	result["coord_epoch"] = job.get("coord_epoch", -1)
 	result["mesh_revision"] = job.get("mesh_revision", -1)
 	result["local_top"] = job.get("local_top", -1)
 	result["prefetch"] = job.get("prefetch", false)
@@ -744,7 +850,13 @@ func _apply_cached_mesh(coord: Vector3i, local_top: int) -> bool:
 	var chunk: ChunkData = world.get_chunk(coord)
 	if chunk == null:
 		return false
+	var recording := _performance_recording()
+	var apply_start_usec := Time.get_ticks_usec() if recording else 0
 	_apply_mesh_entry(coord, entry, chunk)
+	if recording:
+		world.performance_recorder.add_timing("Mesh.apply_ms", float(Time.get_ticks_usec() - apply_start_usec) / 1000.0)
+		world.performance_recorder.add_counter("Mesh.cache_applied")
+		world.performance_recorder.add_counter("Mesh.scene_applied")
 	_queue_prefetch_layers(coord, cache_local_top)
 	return true
 
@@ -754,7 +866,8 @@ func _mesh_request_local_top(coord: Vector3i, top_render_y: int) -> int:
 		top_render_y = world.top_render_y
 	var local_top: int = top_render_y - coord.y * World.CHUNK_SIZE
 	if local_top < 0:
-		return -1
+		# Above-slice requests still need a real full mesh before becoming READY.
+		return World.CHUNK_SIZE - 1
 	return mini(local_top, World.CHUNK_SIZE - 1)
 
 
@@ -767,30 +880,30 @@ func _apply_mesh_entry(coord: Vector3i, entry: Dictionary, chunk: ChunkData) -> 
 	var mesh_instance: MeshInstance3D = chunk_cache.ensure_chunk(coord, World.CHUNK_SIZE)
 	_record_chunk_render_stats(coord, visible_faces, occluded_faces, _mesh_metrics_from_entry(entry, null))
 	mesh_instance.mesh = mesh if has_geometry else null
-	mesh_instance.visible = has_geometry and _is_chunk_in_current_render_zone(coord)
+	mesh_instance.set_meta("diagnostics_mesh_revision", chunk.mesh_revision)
+	visibility_state.set_node_visibility(coord, has_geometry and _is_chunk_in_current_render_zone(coord))
 	if has_geometry:
 		mesh_instance.material_override = get_block_material()
 	chunk.mesh_state = ChunkData.MESH_STATE_READY
 	chunk.dirty = false
 	_update_neighbor_remesh_dependencies(coord, missing_neighbors)
+	if world.live_diagnostics != null and world.live_diagnostics.enabled:
+		world.live_diagnostics.observe("chunk", coord, "cache_applied", {"revision": entry.get("revision"), "has_geometry": has_geometry})
 
 func _apply_empty_mesh(coord: Vector3i) -> void:
-	var mesh_instance: MeshInstance3D = chunk_cache.get_chunk(coord)
-	_clear_chunk_render_stats(coord)
-	_clear_neighbor_remesh_dependencies(coord)
-	if mesh_instance != null:
-		mesh_instance.mesh = null
-		mesh_instance.visible = false
-	var chunk: ChunkData = world.get_chunk(coord)
-	if chunk != null:
-		chunk.mesh_state = ChunkData.MESH_STATE_READY
-		chunk.dirty = false
+	# Legacy render-height callers must retain full geometry, including the
+	# upper-band player stairs visible one level below their cells (SEE-ADR-011).
+	queue_chunk_mesh_build(coord)
 
 
 func _hide_chunk_mesh(coord: Vector3i) -> void:
 	var mesh_instance: MeshInstance3D = chunk_cache.get_chunk(coord)
 	if mesh_instance != null:
-		mesh_instance.visible = false
+		visibility_state.set_node_visibility(coord, false)
+		# Legacy render-height hides can affect a coordinate that remains in
+		# the accepted set. Reconcile it on the next refresh as before.
+		if not visibility_state.initialized or render_zone_visible.has(coord):
+			visibility_state.reconcile[coord] = true
 	var chunk: ChunkData = world.get_chunk(coord)
 	if chunk != null:
 		chunk.mesh_state = ChunkData.MESH_STATE_NONE
@@ -798,6 +911,30 @@ func _hide_chunk_mesh(coord: Vector3i) -> void:
 
 
 #region Render Zone
+## A small value snapshot, never a scan of chunks or mesh data. Check it at
+## the existing refresh cadence, not for every candidate or mesh arrival.
+func _render_zone_key(min_cx: int, max_cx: int, min_cz: int, max_cz: int, min_cy: int, max_cy: int, camera: Camera3D) -> Array:
+	var key: Array = [min_cx, max_cx, min_cz, max_cz, min_cy, max_cy, world.top_render_y]
+	if camera != null:
+		key.append_array([camera.get_instance_id(), camera.global_transform,
+			camera.get_camera_transform(), camera.get_camera_projection(),
+			camera.get_viewport().get_instance_id(), camera.get_viewport().get_visible_rect()])
+	return key
+
+
+func needs_render_zone_update(min_cx: int, max_cx: int, min_cz: int, max_cz: int, min_cy: int, max_cy: int, camera: Camera3D = null) -> bool:
+	visibility_state.observe(camera)
+	return visibility_state.needs_request(_render_zone_key(min_cx, max_cx, min_cz, max_cz, min_cy, max_cy, camera))
+
+
+func invalidate_render_zone() -> void:
+	visibility_state.invalidate()
+
+
+func is_render_zone_initialized() -> bool:
+	return visibility_state.initialized
+
+
 func update_render_zone(
 	min_cx: int,
 	max_cx: int,
@@ -807,43 +944,38 @@ func update_render_zone(
 	max_cy: int,
 	camera: Camera3D = null
 ) -> void:
-	var new_visible: Dictionary = {}
-	var frustum_planes: Array = []
-	var frustum_padding := RENDER_FRUSTUM_PADDING_CHUNKS * float(World.CHUNK_SIZE)
-	if camera != null:
-		frustum_planes = frustum_culler.build_planes(camera, NEAR_SAMPLE_OFFSET, NEAR_SAMPLE_MIN)
-	if min_cx <= max_cx and min_cz <= max_cz and min_cy <= max_cy:
-		for cy: int in range(min_cy, max_cy + 1):
-			for cx: int in range(min_cx, max_cx + 1):
-				for cz: int in range(min_cz, max_cz + 1):
-					var coord := Vector3i(cx, cy, cz)
-					if camera != null and not frustum_culler.is_chunk_in_view(frustum_planes, coord, World.CHUNK_SIZE, frustum_padding):
-						continue
-					new_visible[coord] = true
-					_set_chunk_visibility(coord, true)
-	for key in chunk_cache.get_keys():
-		if not new_visible.has(key):
-			_set_chunk_visibility(key, false)
-	render_zone_visible = new_visible
+	var key := _render_zone_key(min_cx, max_cx, min_cz, max_cz, min_cy, max_cy, camera)
+	# Intersect rather than clamp: an entirely outside request must stay empty.
+	var minimum := Vector3i(maxi(min_cx, world.WORLD_MIN_CHUNK_X), maxi(min_cy, 0), maxi(min_cz, world.WORLD_MIN_CHUNK_Z))
+	var maximum := Vector3i(mini(max_cx, world.WORLD_MAX_CHUNK_X), mini(max_cy, ceili(float(world.world_size_y) / World.CHUNK_SIZE) - 1), mini(max_cz, world.WORLD_MAX_CHUNK_Z))
+	visibility_state.request(minimum, maximum, camera, key)
+
+
+func pump_visibility(max_ms: float = 1.0, max_steps: int = 256) -> int:
+	return visibility_state.pump(max_ms, max_steps)
+
+
+func observe_visibility_view(camera: Camera3D) -> void:
+	visibility_state.observe(camera)
+
+
+func get_visibility_snapshot() -> Dictionary:
+	return visibility_state.snapshot()
 
 
 func _is_chunk_in_current_render_zone(coord: Vector3i) -> bool:
-	if render_zone_visible.is_empty():
-		return true
-	return render_zone_visible.has(coord)
+	return visibility_state.is_eligible(coord)
 
 
 func _set_chunk_visibility(coord: Vector3i, is_visible: bool) -> void:
-	var mesh_instance: MeshInstance3D = chunk_cache.get_chunk(coord)
-	if mesh_instance == null:
-		return
-	if not is_visible:
-		mesh_instance.visible = false
-		return
-	if mesh_instance.mesh == null:
-		mesh_instance.visible = false
-		return
-	mesh_instance.visible = true
+	visibility_state.set_node_visibility(coord, is_visible)
+
+
+func _diagnostics_mesh(result: Dictionary, reason: String) -> void:
+	if world.live_diagnostics != null and world.live_diagnostics.enabled:
+		world.live_diagnostics.observe("chunk", result.get("coord", Vector3i.ZERO), reason,
+			{"revision": result.get("mesh_revision"), "build_ms": result.get("build_ms"),
+			"completed_job": true, "local_top": result.get("local_top"), "has_geometry": result.get("has_geometry")})
 #endregion
 
 
@@ -924,6 +1056,20 @@ func get_mesh_work_stats() -> Dictionary:
 	stats["pending_neighbor_remesh_dependents"] = _count_pending_neighbor_remesh_dependents()
 	stats["neighbor_remesh_queued"] = neighbor_remesh_queued_total
 	return stats
+
+
+## O(1) main-thread snapshot; do not use get_mesh_work_stats(), which scans
+## neighbor-remesh dependencies. Record counts are not executing job counts.
+func get_performance_snapshot() -> Dictionary:
+	var snapshot := mesh_scheduler.get_performance_snapshot()
+	var metrics := mesh_cache_store.get_metrics()
+	snapshot["cache_hits_total"] = metrics.get("hits")
+	snapshot["cache_misses_total"] = metrics.get("misses")
+	snapshot["cache_imports_total"] = metrics.get("imports")
+	snapshot["build_ms_total"] = metrics.get("mesh_build_ms")
+	snapshot["upload_ms_total"] = metrics.get("mesh_upload_ms")
+	snapshot["pending_neighbor_remesh_chunks"] = pending_neighbor_remesh.size()
+	return snapshot
 
 
 func get_camera_tris_rendered(camera: Camera3D) -> Dictionary:

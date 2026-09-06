@@ -20,7 +20,7 @@ func _init(world_ref: World) -> void:
 
 
 #region Raycasting
-func raycast_block(ray_origin: Vector3, ray_dir: Vector3, max_distance: float) -> Dictionary:
+func raycast_block(ray_origin: Vector3, ray_dir: Vector3, max_distance: float, generate_missing: bool = true) -> Dictionary:
 	# SEE-ADR-006: Click selection raycasts visible world voxels at or below top_render_y.
 	var pos := ray_origin
 	var dir := ray_dir
@@ -48,8 +48,10 @@ func raycast_block(ray_origin: Vector3, ray_dir: Vector3, max_distance: float) -
 	var distance := 0.0
 
 	while distance < max_distance:
-		if world.is_block_coord_valid(voxel.x, voxel.y, voxel.z):
-			if voxel.y <= world.top_render_y and not world.is_block_empty_id(world.get_block(voxel.x, voxel.y, voxel.z)):
+		if world.is_block_coord_valid(voxel.x, voxel.y, voxel.z) and voxel.y <= world.top_render_y:
+			var block_id := world.get_block(voxel.x, voxel.y, voxel.z) if generate_missing \
+				else world.get_block_no_generate(voxel.x, voxel.y, voxel.z)
+			if not world.is_block_empty_id(block_id):
 				return {"hit": true, "pos": voxel}
 
 		if t_max_x < t_max_y:

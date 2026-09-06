@@ -18,7 +18,7 @@ var camera_controller: MainCameraController
 #endregion
 
 #region State
-var prev_mouse_down := false
+var released_drag_event_id := 0
 
 var is_dragging := false
 var drag_start: Vector2
@@ -38,26 +38,47 @@ func initialize(world_ref: World, camera_ref: Camera3D, viewport_ref: Viewport, 
 
 func cancel_drag_and_clear_preview() -> void:
 	is_dragging = false
-	prev_mouse_down = false
+	released_drag_event_id = 0
 	if world != null:
 		world.clear_drag_preview()
 
 
-func handle_mouse() -> void:
+func observe_input(event: InputEvent) -> void:
+	# End ownership before GUI dispatch. Only this same release reaching
+	# unhandled input may commit; a consumed release leaves no active drag.
+	released_drag_event_id = 0
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT \
+			and not event.pressed and is_dragging:
+		released_drag_event_id = event.get_instance_id()
+		is_dragging = false
+		world.clear_drag_preview()
+
+
+func handle_unhandled_input(event: InputEvent) -> bool:
 	if world == null or camera == null or viewport == null:
-		return
-	var mouse_down := Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
-	var just_pressed := mouse_down and not prev_mouse_down
-	var just_released := not mouse_down and prev_mouse_down
-	prev_mouse_down = mouse_down
+		return false
+	if not event is InputEventMouseButton or event.button_index != MOUSE_BUTTON_LEFT:
+		return false
+	# Controls need not consume a release whose press began outside the GUI.
+	if viewport.gui_get_hovered_control() != null:
+		cancel_drag_and_clear_preview()
+		return false
+	# Embedded popups can dismiss after the parent receives the outside press.
+	for popup: Window in viewport.get_embedded_subwindows():
+		if popup.visible and popup.popup_window:
+			cancel_drag_and_clear_preview()
+			return false
+	if event.pressed:
+		_start_drag(event.position)
+	elif released_drag_event_id == event.get_instance_id():
+		released_drag_event_id = 0
+		_end_drag(event.position)
+	else:
+		return false
+	return true
 
-	if just_pressed and not is_dragging:
-		_start_drag()
 
-	if just_released and is_dragging:
-		_end_drag()
-		return
-
+func handle_mouse() -> void:
 	if is_dragging:
 		_update_drag_preview()
 
@@ -90,7 +111,7 @@ func update_hover_preview() -> void:
 		valid = _can_create_stockpile_at(pos)
 	else:
 		pos = _erase_target_from_hit(hit_pos)
-		valid = world.has_pending_task_request_at(pos)
+		valid = _can_erase_at(pos)
 	if not valid:
 		world.clear_drag_preview()
 		return
@@ -116,18 +137,17 @@ func update_info_hover() -> void:
 	info_block_pos = pos
 
 
-func _start_drag() -> void:
+func _start_drag(mouse_pos: Vector2) -> void:
 	if viewport == null:
 		return
-	drag_start = viewport.get_mouse_position()
+	drag_start = mouse_pos
 	is_dragging = true
 	drag_plane_y = _get_drag_plane_y(drag_start)
 
 
-func _end_drag() -> void:
+func _end_drag(drag_end: Vector2) -> void:
 	if viewport == null or world == null:
 		return
-	var drag_end := viewport.get_mouse_position()
 	var drag_rect := _get_drag_rect(drag_start, drag_end, drag_plane_y)
 	_commit_selection(drag_start, drag_end, drag_rect)
 	is_dragging = false
@@ -407,7 +427,7 @@ func _build_erase_preview_entries(rect: Dictionary) -> Array[Dictionary]:
 	for pos: Vector3i in _rect_positions(rect):
 		entries.append({
 			"pos": pos,
-			"valid": world.has_pending_task_request_at(pos),
+			"valid": _can_erase_at(pos),
 		})
 	return entries
 
@@ -509,12 +529,16 @@ func _can_place_down_stairs_at(pos: Vector3i) -> bool:
 func _erase_target_from_hit(hit_pos: Vector3i) -> Vector3i:
 	if world == null:
 		return hit_pos
-	if world.has_pending_task_request_at(hit_pos):
+	if _can_erase_at(hit_pos):
 		return hit_pos
 	var above := Vector3i(hit_pos.x, hit_pos.y + 1, hit_pos.z)
-	if world.has_pending_task_request_at(above):
+	if _can_erase_at(above):
 		return above
 	return hit_pos
+
+
+func _can_erase_at(pos: Vector3i) -> bool:
+	return world != null and (world.has_pending_task_request_at(pos) or world.is_stockpile_cell(pos))
 
 
 func _stockpile_target_from_hit(hit_pos: Vector3i) -> Vector3i:

@@ -1,6 +1,8 @@
 extends RefCounted
 class_name WorldMetadataSaveLoad
 
+const WorldSaveTransactionScript = preload("res://scripts/world_save_transaction.gd")
+
 const META_MAGIC := 0x474D4554
 const META_FILE_NAME := "world_meta.dat"
 
@@ -13,21 +15,20 @@ func write_world_meta(world: World, world_dir: String, save_version: int, block_
 	if file == null:
 		push_warning("World meta save failed: %s" % path)
 		return false
-	file.store_32(META_MAGIC)
-	file.store_16(save_version)
-	file.store_16(World.CHUNK_SIZE)
-	file.store_16(World.WORLD_CHUNKS_X)
-	file.store_16(World.WORLD_CHUNKS_Y)
-	file.store_16(World.WORLD_CHUNKS_Z)
-	file.store_32(world.world_size_y)
-	file.store_64(world.world_seed)
-	file.store_32(world.spawn_coord.x)
-	file.store_32(world.spawn_coord.y)
-	file.store_32(world.spawn_coord.z)
-	file.store_32(world.top_render_y)
-	file.store_32(block_table_hash)
-	file.flush()
-	return true
+	var ok := file.store_32(META_MAGIC) \
+		and file.store_16(save_version) \
+		and file.store_16(World.CHUNK_SIZE) \
+		and file.store_16(World.WORLD_CHUNKS_X) \
+		and file.store_16(World.WORLD_CHUNKS_Y) \
+		and file.store_16(World.WORLD_CHUNKS_Z) \
+		and file.store_32(world.world_size_y) \
+		and file.store_64(world.world_seed) \
+		and file.store_32(world.spawn_coord.x) \
+		and file.store_32(world.spawn_coord.y) \
+		and file.store_32(world.spawn_coord.z) \
+		and file.store_32(world.top_render_y) \
+		and file.store_32(block_table_hash)
+	return WorldSaveTransactionScript.finish_write(file) and ok
 
 
 func read_world_meta(world: World, world_dir: String, save_version: int, expected_block_table_hash: int) -> bool:

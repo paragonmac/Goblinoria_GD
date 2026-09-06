@@ -89,7 +89,7 @@ func can_move_same_level(world, from: Vector3i, to: Vector3i) -> bool:
 
 
 func can_change_level(world, from: Vector3i, to: Vector3i) -> bool:
-	# SEE-ADR-002: Level changes must line up with the ramp's high edge.
+	# SEE-ADR-002: Both directions need the high edge and clearance above the ramp.
 	if from.y == to.y:
 		return true
 	if not world.is_block_coord_valid(from.x, from.y, from.z):
@@ -100,8 +100,12 @@ func can_change_level(world, from: Vector3i, to: Vector3i) -> bool:
 	var to_block: int = world.get_block_no_generate(to.x, to.y, to.z)
 	var dir := Vector2i(to.x - from.x, to.z - from.z)
 	if to.y == from.y + LEVEL_STEP:
+		if is_blocking(world, world.get_block_no_generate(from.x, to.y, from.z)):
+			return false
 		return world.is_ramp_block_id(from_block) and _ramp_edge_has_high(from_block, dir)
 	if to.y == from.y - LEVEL_STEP:
+		if is_blocking(world, world.get_block_no_generate(to.x, from.y, to.z)):
+			return false
 		return world.is_ramp_block_id(to_block) and _ramp_edge_has_high(to_block, -dir)
 	return false
 
@@ -186,9 +190,8 @@ func get_neighbors(world, pos: Vector3i) -> Array:
 		var nz: int = z + dir.y
 		var ny: int = y + LEVEL_STEP
 		if ny < world.world_size_y:
-			var head_block: int = world.get_block_no_generate(x, y + 1, z)
 			var candidate := Vector3i(nx, ny, nz)
-			if is_walkable(world, nx, ny, nz) and not is_blocking(world, head_block) and can_change_level(world, pos, candidate):
+			if is_walkable(world, nx, ny, nz) and can_change_level(world, pos, candidate):
 				neighbors.append(candidate)
 
 	# Down level

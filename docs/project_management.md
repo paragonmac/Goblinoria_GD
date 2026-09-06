@@ -2,6 +2,14 @@
 
 GitHub Issues and GitHub Projects are the source of truth for active Goblinoria work. TODO files in the repo should only point here and should not carry active task lists.
 
+## Prototype Checkpoint
+
+The [2026-09-05 checkpoint](prototype_checkpoint.md) separates current code, headless validation, unverified playtest outcomes, and future design. It is a dated evidence snapshot, not a parallel backlog. Tracker checklists must not be closed solely because code exists locally: recent fixes and tools are still uncommitted, and graphical sign-off remains outstanding.
+
+The next recommended outcome is to prove the current dig/haul/stockpile/basic-build/save loop before adding another major system. Keep its acceptance and execution status in GitHub; the local checkpoint records the rationale and validation protocol. Preserve M0-M10 milestone identities rather than introducing a competing numbering scheme.
+
+Tracking reconciliation is incomplete: live issues were readable, but creating the checkpoint validation issue returned GitHub 403 (`Resource not accessible by integration`). No issue, milestone, or Project field was changed. The checkpoint records the proposed ticket and affected trackers for a later authorized write; it is not an active local task board.
+
 ## GitHub Project
 
 The GitHub Project is [`Goblinoria Roadmap`](https://github.com/users/paragonmac/projects/7) under `paragonmac`.
@@ -67,9 +75,9 @@ Guidelines:
 - Do not split every design-doc bullet into an implementation issue until that milestone becomes active.
 - Treat dates as planning windows, not hard promises. Move them when scope or reality changes.
 
-## Timeline
+## Original Planning Windows
 
-Current planning timeline:
+These are the original planning windows, retained for history rather than treated as a current delivery commitment. Rebaseline GitHub Project dates after the checkpoint's remaining risks and acceptance results are known. The 2026-09-05 audit read live issues but could not verify the Project board's current field values; it did not reschedule those fields.
 
 | Milestone | Start Date | Target Date |
 |---|---:|---:|

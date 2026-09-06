@@ -142,12 +142,15 @@ func process_generation_results(budget: int) -> int:
 		var result := generation_queue.pop_result()
 		if result.is_empty():
 			break
+		_record_generation_counter("Generation.results")
 		var epoch: int = int(result.get("epoch", -1))
 		if epoch != generation_queue.get_epoch():
+			_record_generation_counter("Generation.stale")
 			continue
 		var coord: Vector3i = result.get("coord", Vector3i.ZERO)
 		var chunk: ChunkData = world.get_chunk(coord)
 		if chunk == null or chunk.generated:
+			_record_generation_counter("Generation.discarded")
 			_clear_generation_job(coord)
 			continue
 		var blocks: PackedByteArray = result.get("blocks", PackedByteArray())
@@ -166,7 +169,13 @@ func process_generation_results(budget: int) -> int:
 			world.renderer.queue_chunk_mesh_build(coord, -1, false, high_priority)
 		_clear_generation_job(coord)
 		applied += 1
+		_record_generation_counter("Generation.applied")
 	return applied
+
+
+func _record_generation_counter(label: String) -> void:
+	if world.performance_recorder != null and world.performance_recorder.enabled:
+		world.performance_recorder.add_counter(label)
 
 
 func get_generation_stats() -> Dictionary:

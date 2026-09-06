@@ -1,14 +1,20 @@
 extends RefCounted
 class_name ItemStackStore
 
+const LiveDecisionSnapshotScript = preload("res://scripts/diagnostics/live_decision_snapshot.gd")
+
 signal haul_state_changed(reason: String)
 signal visual_state_changed(reason: String)
 
 var items: Dictionary = {}
 var next_id := 1
+var live_diagnostics = null
 
 
 func clear() -> void:
+	if _diagnostics_enabled():
+		for item_id in items:
+			live_diagnostics.invalidate("item", str(item_id), "items_cleared")
 	var had_items := not items.is_empty()
 	items.clear()
 	next_id = 1
@@ -31,6 +37,7 @@ func add_stack(material_id: int, count: int, pos: Vector3i, stored_stockpile_id:
 		"stored_stockpile_id": stored_stockpile_id,
 		"is_carried": false,
 	}
+	_observe_item(item_id, "stack_added")
 	haul_state_changed.emit("stack_added")
 	visual_state_changed.emit("stack_added")
 	return item_id
@@ -50,6 +57,7 @@ func restore_stack(item: Dictionary) -> void:
 		"is_carried": false,
 	}
 	next_id = maxi(next_id, item_id + 1)
+	_observe_item(item_id, "stack_restored")
 	visual_state_changed.emit("stack_restored")
 
 
@@ -65,6 +73,8 @@ func remove_item(item_id: int) -> Dictionary:
 	var item: Dictionary = items.get(item_id, {})
 	if not item.is_empty():
 		items.erase(item_id)
+		if _diagnostics_enabled():
+			live_diagnostics.invalidate("item", str(item_id), "stack_removed")
 		haul_state_changed.emit("stack_removed")
 		visual_state_changed.emit("stack_removed")
 	return item
@@ -72,12 +82,17 @@ func remove_item(item_id: int) -> Dictionary:
 
 func reserve_item(item_id: int, task_id: int) -> bool:
 	if not items.has(item_id):
+		if _diagnostics_enabled():
+			live_diagnostics.observe("item", str(item_id), "reservation_item_missing", {"task_id": task_id})
 		return false
 	var item: Dictionary = items[item_id]
 	if int(item.get("reserved_by_task_id", -1)) >= 0:
+		if _diagnostics_enabled():
+			live_diagnostics.observe("item", str(item_id), "reservation_conflict", {"task_id": task_id, "reserved_by_task_id": int(item["reserved_by_task_id"])})
 		return false
 	item["reserved_by_task_id"] = task_id
 	items[item_id] = item
+	_observe_item(item_id, "item_reserved")
 	return true
 
 
@@ -86,11 +101,14 @@ func release_reservation(item_id: int, task_id: int = -1) -> void:
 		return
 	var item: Dictionary = items[item_id]
 	if task_id >= 0 and int(item.get("reserved_by_task_id", -1)) != task_id:
+		if _diagnostics_enabled():
+			live_diagnostics.observe("item", str(item_id), "reservation_release_rejected", {"task_id": task_id, "reserved_by_task_id": int(item.get("reserved_by_task_id", -1))})
 		return
 	item["reserved_by_task_id"] = -1
 	item["is_carried"] = false
 	items[item_id] = item
 	haul_state_changed.emit("reservation_released")
+	_observe_item(item_id, "reservation_released")
 	visual_state_changed.emit("reservation_released")
 
 
@@ -99,10 +117,13 @@ func mark_carried(item_id: int) -> bool:
 		return false
 	var item: Dictionary = items[item_id]
 	if int(item.get("reserved_by_task_id", -1)) < 0:
+		if _diagnostics_enabled():
+			live_diagnostics.observe("item", str(item_id), "pickup_unreserved", {"reserved_by_task_id": -1})
 		return false
 	item["is_carried"] = true
 	items[item_id] = item
 	visual_state_changed.emit("stack_carried")
+	_observe_item(item_id, "stack_carried")
 	return true
 
 
@@ -117,6 +138,7 @@ func mark_stored(item_id: int, stockpile_id: int, pos: Vector3i) -> bool:
 	items[item_id] = item
 	haul_state_changed.emit("stack_stored")
 	visual_state_changed.emit("stack_stored")
+	_observe_item(item_id, "stack_stored")
 	return true
 
 
@@ -131,6 +153,7 @@ func mark_loose(item_id: int, pos: Vector3i) -> bool:
 	items[item_id] = item
 	haul_state_changed.emit("stack_loose")
 	visual_state_changed.emit("stack_loose")
+	_observe_item(item_id, "stack_loose")
 	return true
 
 
@@ -171,9 +194,13 @@ func stored_items_at(pos: Vector3i) -> Array[Dictionary]:
 
 func deposit_into_cell(item_id: int, stockpile_id: int, pos: Vector3i, capacity: int) -> Dictionary:
 	if not items.has(item_id) or capacity <= 0:
+		if _diagnostics_enabled():
+			live_diagnostics.observe("item", str(item_id), "deposit_invalid_input", {"stockpile_id": stockpile_id, "capacity": capacity})
 		return {}
 	var source: Dictionary = items[item_id]
 	if int(source.get("stored_stockpile_id", -1)) >= 0:
+		if _diagnostics_enabled():
+			live_diagnostics.observe("item", str(item_id), "deposit_already_stored", {"stored_stockpile_id": int(source["stored_stockpile_id"])})
 		return {}
 	var material_id := int(source.get("material_id", 0))
 	var source_count := int(source.get("count", 0))
@@ -182,14 +209,20 @@ func deposit_into_cell(item_id: int, stockpile_id: int, pos: Vector3i, capacity:
 
 	var stored := stored_item_at(pos)
 	if not stored.is_empty() and int(stored.get("material_id", 0)) != material_id:
+		if _diagnostics_enabled():
+			live_diagnostics.observe("item", str(item_id), "deposit_material_conflict", {"stockpile_id": stockpile_id, "pos": pos, "material_id": material_id, "stored_material_id": int(stored.get("material_id", 0)), "stored_item_id": int(stored.get("id", -1))})
 		return {}
 	var stored_count := int(stored.get("count", 0))
 	var deposited := mini(source_count, capacity - stored_count)
 	if deposited <= 0:
+		if _diagnostics_enabled():
+			live_diagnostics.observe("item", str(item_id), "deposit_capacity_conflict", {"stockpile_id": stockpile_id, "pos": pos, "capacity": capacity, "stored_count": stored_count, "source_count": source_count})
 		return {}
 
 	if stored.is_empty() and deposited == source_count:
 		mark_stored(item_id, stockpile_id, pos)
+		if _diagnostics_enabled():
+			live_diagnostics.observe("item", str(item_id), "cell_deposit", {"stockpile_id": stockpile_id, "pos": pos, "deposited": deposited, "remaining": 0, "stored_item_id": item_id})
 		return {"deposited": deposited, "remaining": 0, "stored_item_id": item_id}
 
 	var stored_item_id := int(stored.get("id", -1))
@@ -209,6 +242,10 @@ func deposit_into_cell(item_id: int, stockpile_id: int, pos: Vector3i, capacity:
 		source["stored_stockpile_id"] = -1
 		source["is_carried"] = false
 		items[item_id] = source
+	if _diagnostics_enabled():
+		live_diagnostics.invalidate("item", str(item_id), "cell_deposit")
+		live_diagnostics.observe("item", str(item_id), "cell_deposit", {"stockpile_id": stockpile_id, "pos": pos, "deposited": deposited, "remaining": remaining, "stored_item_id": stored_item_id})
+	_observe_item(stored_item_id, "deposit_received")
 	haul_state_changed.emit("cell_deposit")
 	visual_state_changed.emit("cell_deposit")
 	return {
@@ -242,6 +279,7 @@ func normalize_stored_cells(stockpile_store: StockpileStore) -> void:
 			item["count"] = kept
 			items[item_id] = item
 			occupied[pos] = item_id
+			_observe_item(int(item_id), "storage_normalized")
 			if overflow > 0:
 				add_stack(material_id, overflow, pos)
 			continue
@@ -256,8 +294,11 @@ func normalize_stored_cells(stockpile_store: StockpileStore) -> void:
 		stored["count"] = int(stored.get("count", 0)) + moved
 		items[stored_item_id] = stored
 		var remaining := int(item.get("count", 0)) - moved
+		_observe_item(stored_item_id, "storage_normalized")
 		if remaining <= 0:
 			items.erase(item_id)
+			if _diagnostics_enabled():
+				live_diagnostics.invalidate("item", str(item_id), "storage_merged")
 		else:
 			item["count"] = remaining
 			items[item_id] = item
@@ -298,9 +339,12 @@ func remove_stored_material(material_id: int, count: int) -> bool:
 		remaining -= consumed
 		if item_count <= 0:
 			items.erase(item_id)
+			if _diagnostics_enabled():
+				live_diagnostics.invalidate("item", str(item_id), "material_consumed")
 		else:
 			item["count"] = item_count
 			items[item_id] = item
+			_observe_item(int(item_id), "material_consumed")
 	haul_state_changed.emit("stored_material_removed")
 	visual_state_changed.emit("stored_material_removed")
 	return true
@@ -311,3 +355,14 @@ func as_save_array() -> Array:
 	for item: Dictionary in items.values():
 		saved.append(item.duplicate(true))
 	return saved
+
+
+func _diagnostics_enabled() -> bool:
+	return live_diagnostics != null and live_diagnostics.enabled
+
+
+func _observe_item(item_id: int, reason: String) -> void:
+	if not _diagnostics_enabled():
+		return
+	live_diagnostics.invalidate("item", str(item_id), reason)
+	live_diagnostics.observe("item", str(item_id), reason, LiveDecisionSnapshotScript.item_snapshot(items.get(item_id, {})))
