@@ -253,7 +253,7 @@ func _test_failed_loads() -> void:
 
 
 func _test_legacy_chunks() -> void:
-	for version in [4, 5, WorldSaveLoad.SAVE_VERSION]:
+	for version in [4, 5, 6, 7, WorldSaveLoad.SAVE_VERSION]:
 		var world := _new_world()
 		var path := test_root.path_join("legacy_%d.save" % version)
 		var slot := path.get_basename()

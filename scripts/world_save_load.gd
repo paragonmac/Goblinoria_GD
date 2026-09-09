@@ -17,10 +17,12 @@ const WorldRampRulesScript = preload("res://scripts/world/world_ramp_rules.gd")
 
 #region Constants
 const CHUNK_MAGIC := 0x43484B53
-const SAVE_VERSION := 6
+const SAVE_VERSION := 8
 const LEGACY_SAVE_VERSION := 4
 const WORKER_ROLES_LEGACY_SAVE_VERSION := 5
-const LEGACY_SAVE_VERSIONS := [LEGACY_SAVE_VERSION, WORKER_ROLES_LEGACY_SAVE_VERSION]
+const NAMED_WORK_SETTINGS_LEGACY_SAVE_VERSION := 6
+const PREVIOUS_STAIR_FLIGHT_SAVE_VERSION := 7
+const LEGACY_SAVE_VERSIONS := [LEGACY_SAVE_VERSION, WORKER_ROLES_LEGACY_SAVE_VERSION, NAMED_WORK_SETTINGS_LEGACY_SAVE_VERSION, PREVIOUS_STAIR_FLIGHT_SAVE_VERSION]
 const CHUNK_DIR_NAME := "chunks"
 const CHUNK_FILE_EXT := ".chunk"
 const COMPRESSION_NONE := 0
@@ -100,11 +102,12 @@ func load_world(path: String) -> bool:
 		SAVE_VERSION,
 		_get_block_table_hash(),
 		LEGACY_SAVE_VERSIONS,
-		[LEGACY_SAVE_VERSION]
+		[LEGACY_SAVE_VERSION],
+		{5: _pre_flight_block_table_hashes(), 6: _pre_flight_block_table_hashes(), 7: _pre_flight_block_table_hashes()}
 	)
 	if not bool(meta_snapshot.get("ok", false)):
 		return false
-	if int(meta_snapshot["save_version"]) == SAVE_VERSION \
+	if int(meta_snapshot["save_version"]) >= NAMED_WORK_SETTINGS_LEGACY_SAVE_VERSION \
 		and not FileAccess.file_exists(world_dir.path_join(WorldBulkChunkSaveLoadScript.BULK_CHUNKS_FILE_NAME)) \
 		and not _has_valid_chunk_save(world_dir):
 		push_warning("World load failed: missing terrain data in %s" % world_dir)
@@ -124,7 +127,7 @@ func load_world(path: String) -> bool:
 	var bulk_start_usec: int = Time.get_ticks_usec()
 	var migrate_legacy_slopes := int(meta_snapshot.get("save_version", SAVE_VERSION)) == LEGACY_SAVE_VERSION \
 		and bool(meta_snapshot.get("legacy_block_table", false))
-	if not _load_bulk_chunks(world_dir, migrate_legacy_slopes):
+	if not _load_bulk_chunks(world_dir, migrate_legacy_slopes, int(meta_snapshot.get("block_table_hash", _get_block_table_hash()))):
 		bulk_chunk_save_load.restore_state(previous_bulk_state)
 		return false
 	last_load_metrics = load_metrics
@@ -142,6 +145,7 @@ func load_world(path: String) -> bool:
 	last_load_metrics["mesh_cache_ms"] = _elapsed_ms(mesh_cache_start_usec)
 	metadata_save_load.apply_world_meta(world, meta_snapshot)
 	# Runtime identity changes at the successful load commit, even on the same node.
+	world.runtime_epoch += 1
 	if world.live_diagnostics != null:
 		world.live_diagnostics.begin_world("load_committed")
 	world.chunks.clear()
@@ -232,11 +236,11 @@ func _save_bulk_chunks(world_dir: String) -> bool:
 	return bulk_chunk_save_load.save_bulk_chunks(world, world_dir, _get_block_table_hash())
 
 
-func _load_bulk_chunks(world_dir: String, allow_legacy_block_table_hash: bool = false) -> bool:
+func _load_bulk_chunks(world_dir: String, allow_legacy_block_table_hash: bool = false, expected_hash: int = -1) -> bool:
 	return bulk_chunk_save_load.load_bulk_chunks(
 		world,
 		world_dir,
-		_get_block_table_hash(),
+		_get_block_table_hash() if expected_hash < 0 else expected_hash,
 		allow_legacy_block_table_hash
 	)
 
@@ -372,7 +376,8 @@ func _read_chunk_header(file: FileAccess, coord: Vector3i, allow_legacy_hash: bo
 	if compression != COMPRESSION_NONE:
 		return {}
 	var block_hash: int = file.get_32()
-	if block_hash != _get_block_table_hash() and not allow_legacy_hash:
+	var known_pre_flight_hash := version in [5, 6, 7] and _pre_flight_block_table_hashes().has(block_hash)
+	if block_hash != _get_block_table_hash() and not allow_legacy_hash and not known_pre_flight_hash:
 		return {}
 	return {"data_len": data_len}
 
@@ -505,6 +510,18 @@ func _get_block_table_hash() -> int:
 		return 0
 	var content := file.get_as_text()
 	return int(content.hash() & 0xffffffff)
+
+
+func _pre_flight_block_table_hashes() -> Array[int]:
+	# The only V5-V7 table extension is the eight appended flight IDs. Preserve
+	# strict validation of all older rows, accepting the known LF/CRLF forms.
+	var text := FileAccess.get_file_as_string(World.BLOCK_DATA_PATH).replace("\r\n", "\n")
+	var prefix := ""
+	for line in text.split("\n"):
+		if line.begins_with("124,"):
+			break
+		prefix += line + "\n"
+	return [int(prefix.hash() & 0xffffffff), int(prefix.replace("\n", "\r\n").hash() & 0xffffffff)]
 
 
 func _save_inventory(world_dir: String) -> bool:

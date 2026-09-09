@@ -8,6 +8,49 @@ Local instructions for coding agents working in this repo.
 - Keep changes minimal and scoped to the request.
 - Avoid editing binary/asset files unless asked.
 
+## Subagent Delegation And Cost-First Routing
+
+- Use subagents by default for non-trivial work when independent workstreams help. Skip delegation for trivial/tightly coupled work or when coordination costs more than doing the work locally; briefly explain the exception.
+- Keep write scopes disjoint. Give each agent a bounded task, relevant interfaces and constraints, and a concrete validation expectation. The main agent owns integration and final verification.
+- The user authorizes choosing different available subagent models and reasoning efforts without asking for each allocation. Set both explicitly when supported; do not assume the inherited model is cheap.
+- Optimize expected total cost to a verified result, including retries, review, integration, delay and consequences of mistakes. A contained failed Luna attempt can be good value; a successful premium-model attempt can still be poor allocation.
+- Prefer Luna as the first candidate for bounded, recoverable work, including substantial implementation. Do not limit it to documentation or infer a capability ceiling from model-tier branding.
+
+### Concurrency Allowance
+
+- Allow up to six concurrently open subagents when all are `gpt-5.6-luna`, excluding the main agent. If any open subagent uses another model, limit the entire group to three subagents. These are ceilings, not launch targets; use fewer when independent work does not justify coordination overhead.
+- Choose each Luna agent's reasoning effort for its task; the expanded allowance does not require Max effort. Preserve the cost-first routing and reporting rules below.
+- Before introducing a non-Luna agent into a larger Luna group, wait for completion and close enough agents to leave at most two open before spawning it. Do not interrupt useful work just to make room, and do not evade limits through nested delegation.
+- `.codex/config.toml` sets the overall six-subagent ceiling and Luna default. The model-dependent three-agent ceiling is an instruction policy, not a per-model runtime quota. Respect any lower runtime limit and disclose it rather than promising unavailable concurrency.
+
+### Starting Model And Effort Choices
+
+- `gpt-5.6-luna`, `low`/`medium`: straightforward implementation, mechanical edits, targeted searches, and running/summarizing existing validators.
+- `gpt-5.6-luna`, `high`/`max`: substantial, well-specified implementation or focused debugging with clear interfaces and independently checkable results. Examples include UI editors, filtering/pagination, profiler aggregation, pure culling logic, and regression tests. Use the effort warranted by the reasoning, not automatically Max for everything.
+- `gpt-5.6-terra`, `medium`/`high`: bounded subsystem work needing more discovery or judgment, when Luna's likely retries or integration burden outweigh its savings.
+- `gpt-5.6-sol`, `high`: cross-system ambiguity, hard-to-detect correctness failures, or expensive consequences that justify starting above Luna/Terra. Examples include assignment/pathfinding/hauling interactions and save compatibility design.
+- `gpt-6-astra`, `high`/`xhigh`: especially difficult architectural, concurrency or unresolved integration problems. Give a concrete reason for the premium model and extra effort; do not use it automatically for every review.
+- `gpt-5.5`: an explicitly requested or evidence-backed alternative, not a mandatory escalation tier. Choose a supported effort explicitly.
+- These are starting heuristics, not benchmark-proven capability boundaries or a required escalation ladder. Availability and supported efforts come from the current tool; disclose unavailable choices and fallbacks rather than silently substituting.
+
+### Verification And Escalation
+
+- Route by clarity of requirements, component boundaries, available validation, and the cost of undetected mistakes, not merely task length or file count.
+- Prefer an inexpensive attempt when failure is cheap to detect and recover from. Allow a targeted correction when the cause is understood; reassess after it rather than repeatedly retrying the same unsuccessful approach.
+- Escalate effort or model when evidence shows reasoning gaps, overlooked dependencies, repeated invariant violations, or unexpected scope. Do not escalate just because a tool, permission or environment failed.
+- Use proportionate tests and integration checks. Do not automatically assign a premium reviewer to every Luna result; use stronger independent review where risk warrants it. Passing self-authored tests alone is not proof of correctness.
+- Keep failed attempts contained, preserve unrelated work, and retain authorization boundaries. Cheap tokens do not justify unsafe changes, corrupted data or unbounded cleanup.
+- Do not claim exact cost savings or cross-model equivalence without measurements. API token rates are not necessarily the user's product charges, and reasoning/retries can change total usage.
+
+### Subagent Labels And Reporting
+
+- Use `Model(Effort)-Number - Task` in launch announcements, progress updates and final allocation summaries. Examples: `Luna(Max)-1 - Priority editor`, `Luna(Max)-2 - Regression tests`, `Terra(High)-3 - Integration review`.
+- Assign numbers in spawn order, unique across all models within the current user task. Keep the number when continuing the same agent; a newly spawned replacement gets a new number and an explicit handoff from the previous label.
+- Before spawning, report the task, exact requested model ID, effort, and brief allocation reason. Put the reporting label in the subagent's task prompt and ask it to use that label in its summary.
+- After spawning, map the label to the returned app nickname (and retain the tool's agent ID for routing). These labels do not rename app-generated nicknames when the tool has no rename field.
+- If the model or effort is inherited and its resolved value is unavailable, say so. Use labels such as `Inherited(High)-3` or `Luna(Inherited)-3`; never guess the underlying setting. Announce any configuration change or fallback and update the label accurately.
+- In the final response, briefly report which labeled agents were used and their scopes. Distinguish requested configuration from independently confirmed runtime metadata when only the former is available.
+
 ## Project Tracking
 - GitHub Issues and the `Goblinoria Roadmap` GitHub Project are the source of truth for active work.
 - Use `docs/project_management.md` for ticket schema, priority/severity labels, project fields, and workflow.
@@ -24,7 +67,7 @@ Local instructions for coding agents working in this repo.
 - Streaming logic is in `scripts/world_streaming.gd` and renders via `scripts/rendering/world_renderer.gd`.
 
 ## Save/Load
-- Current V6 saves use bulk chunk data plus metadata, items/stockpiles, worker roles, and optional mesh caches, orchestrated by `scripts/world_save_load.gd`.
+- Current V8 saves use bulk chunk data (including two-cell stair identities) plus metadata, named stockpiles/items, worker role templates/work priorities, and optional mesh caches, orchestrated by `scripts/world_save_load.gd`. V4-V7 remain readable with legacy defaults.
 - If the format changes, bump `SAVE_VERSION` and add mismatch checks.
 
 ## Tests / Runs

@@ -12,6 +12,7 @@ const MainLoadingControllerScript = preload("res://scripts/main_loading_controll
 const MainRenderLevelControllerScript = preload("res://scripts/main_render_level_controller.gd")
 const MainPerformanceControllerScript = preload("res://scripts/main_performance_controller.gd")
 const MainDiagnosticsControllerScript = preload("res://scripts/main_diagnostics_controller.gd")
+const ColonyUIScript = preload("res://scripts/ui/colony_ui_controller.gd")
 #endregion
 
 #region Constants - Engine & General
@@ -64,6 +65,7 @@ var loading_controller: MainLoadingController
 var render_level_controller: MainRenderLevelController
 var performance_controller
 var diagnostics_controller
+var colony_ui
 #endregion
 
 #region Input State
@@ -78,6 +80,8 @@ var loading_active := false:
 		loading_active = value
 		if value:
 			_cancel_context_input(true)
+			if colony_ui != null:
+				colony_ui.reset_world()
 		else:
 			_sync_context_key_state()
 		if performance_controller != null:
@@ -103,6 +107,7 @@ func _ready() -> void:
 	_setup_menu()
 	_setup_live_diagnostics()
 	_setup_loading_screen()
+	_setup_colony_ui()
 	_cache_environment_defaults()
 	_set_world_draw_enabled(false)
 	open_menu()
@@ -117,6 +122,8 @@ func _process(dt: float) -> void:
 	var collection_start: int = performance_controller.recorder.get_collection_usec() if measured else 0
 	var update_start := Time.get_ticks_usec() if measured else 0
 	_process_game_frame(dt)
+	if colony_ui != null:
+		world.run_performance_timed("Main.colony_ui_ms", Callable(colony_ui, "tick").bind(dt))
 	# One visibility pump also services pending results behind menus/loading.
 	# It is measured before profiling finalization, never inside prewarm loops.
 	if world != null and world.renderer != null:
@@ -153,6 +160,17 @@ func _process_game_frame(dt: float) -> void:
 
 
 func _input(event: InputEvent) -> void:
+	if colony_ui != null and colony_ui.observe_input(event):
+		# The UI owns this gesture itself. Do not install context-popup guards
+		# whose release would never reach that controller.
+		if selection_controller != null:
+			selection_controller.cancel_drag_and_clear_preview()
+		if camera_controller != null:
+			camera_controller.reset_mouse_state()
+		return
+	if colony_ui != null and not menu_open and not loading_active and colony_ui.handle_escape(event):
+		get_viewport().set_input_as_handled()
+		return
 	if selection_controller != null:
 		selection_controller.observe_input(event)
 	if context_menu_controller != null and context_menu_controller.observe_input(event):
@@ -160,11 +178,15 @@ func _input(event: InputEvent) -> void:
 		return
 	if menu_open or loading_active:
 		return
-	if not _context_blocks_world_input():
+	if not selection_controller._is_stair_mode() and not _context_blocks_world_input() and (colony_ui == null or not colony_ui.pointer_owned()):
 		_handle_zoom_input(event)
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	if colony_ui != null and not menu_open and not loading_active and not (context_menu_controller != null and context_menu_controller.is_visible()):
+		if colony_ui.handle_unhandled_input(event):
+			get_viewport().set_input_as_handled()
+			return
 	if diagnostics_controller != null and diagnostics_controller.handle_unhandled_input(event):
 		get_viewport().set_input_as_handled()
 		return
@@ -185,6 +207,8 @@ func _unhandled_input(event: InputEvent) -> void:
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_APPLICATION_FOCUS_OUT:
+		if colony_ui != null:
+			colony_ui.cancel_popups()
 		if diagnostics_controller != null:
 			diagnostics_controller.set_focused(false)
 		_cancel_context_input()
@@ -198,6 +222,8 @@ func _notification(what: int) -> void:
 
 
 func _exit_tree() -> void:
+	if colony_ui != null:
+		colony_ui.shutdown()
 	if diagnostics_controller != null:
 		diagnostics_controller.shutdown()
 	if performance_controller != null:
@@ -212,6 +238,11 @@ func _setup_performance_capture() -> void:
 func _setup_live_diagnostics() -> void:
 	diagnostics_controller = MainDiagnosticsControllerScript.new()
 	diagnostics_controller.initialize(self)
+
+
+func _setup_colony_ui(configure_window: bool = true) -> void:
+	colony_ui = ColonyUIScript.new()
+	colony_ui.setup(self, configure_window)
 #endregion
 
 
@@ -226,6 +257,8 @@ func _setup_context_menu() -> void:
 
 
 func _on_context_viewport_resized() -> void:
+	if colony_ui != null:
+		colony_ui.cancel_popups()
 	_cancel_context_input()
 
 
@@ -240,7 +273,8 @@ func _cancel_context_input(clear_snapshot: bool = false) -> void:
 
 
 func _context_blocks_world_input() -> bool:
-	return context_menu_controller != null and context_menu_controller.blocks_world_input()
+	return (context_menu_controller != null and context_menu_controller.blocks_world_input()) \
+		or (colony_ui != null and (colony_ui.keyboard_owned() or not colony_ui._held_buttons.is_empty()))
 
 
 func _sync_context_key_state() -> void:
@@ -285,7 +319,7 @@ func _setup_camera() -> void:
 
 
 func update_camera(dt: float) -> void:
-	if camera_controller != null and not _context_blocks_world_input():
+	if camera_controller != null and not _context_blocks_world_input() and (colony_ui == null or not colony_ui.pointer_owned()):
 		camera_controller.update_camera(dt)
 
 
@@ -316,6 +350,8 @@ func _handle_global_input() -> void:
 	if loading_active:
 		return
 	if is_key_just_pressed(KEY_ESCAPE):
+		if colony_ui != null and not menu_open and colony_ui.close_latest():
+			return
 		toggle_menu()
 
 
@@ -471,16 +507,24 @@ func _update_depth_limit_background() -> void:
 
 #region Mouse Interaction
 func handle_mouse() -> void:
+	if colony_ui != null and colony_ui.pointer_owned():
+		world.clear_drag_preview()
+		return
 	if selection_controller != null and not _context_blocks_world_input():
 		selection_controller.handle_mouse()
 
 
 func update_hover_preview() -> void:
+	if colony_ui != null and colony_ui.pointer_owned():
+		world.clear_drag_preview()
+		return
 	if selection_controller != null and not _context_blocks_world_input():
 		selection_controller.update_hover_preview()
 
 
 func update_info_hover() -> void:
+	if colony_ui != null and colony_ui.pointer_owned():
+		return
 	if selection_controller != null and not _context_blocks_world_input():
 		var previous_id := selection_controller.info_block_id
 		var previous_pos := selection_controller.info_block_pos
@@ -536,6 +580,8 @@ func toggle_menu() -> void:
 
 
 func open_menu() -> void:
+	if colony_ui != null:
+		colony_ui.cancel_popups()
 	_cancel_context_input()
 	menu_open = true
 	if diagnostics_controller != null:
@@ -686,6 +732,8 @@ func _set_world_draw_enabled(enabled: bool) -> void:
 
 
 func _finish_world_start_or_load(status_prefix: String, schedule_full_map_warmup: bool) -> void:
+	if colony_ui != null:
+		colony_ui.reset_world()
 	_set_render_level_base()
 	if camera_controller != null:
 		camera_controller.setup_camera(world)

@@ -2,6 +2,9 @@ extends Node3D
 class_name OverlayRenderer
 ## Renders task overlays and drag preview boxes for block operations.
 
+const ChunkMesherScript = preload("res://scripts/rendering/chunk_mesher.gd")
+const StairFlightScript = preload("res://scripts/stair_flight.gd")
+
 #region Constants
 const TASK_OVERLAY_SIZE := Vector3(1.0, 1.0, 1.0)
 const DRAG_PREVIEW_SIZE := Vector3(1.0, 1.0, 1.0)
@@ -118,6 +121,7 @@ void fragment() {
 }
 """
 var overlay_shader: Shader = null
+var downstairs_overlay_shader: Shader = null
 var item_atlas_shader: Shader = null
 var all_overlay_materials: Array = []
 #endregion
@@ -125,6 +129,7 @@ var all_overlay_materials: Array = []
 #region State
 var world: World
 var task_overlays: Dictionary = {}
+var stair_task_overlays: Dictionary = {}
 var task_materials: Dictionary = {}
 var task_trace_records: Dictionary = {}
 var task_trace_enabled_last := false
@@ -136,6 +141,8 @@ var stockpile_overlays: Dictionary = {}
 var item_materials: Dictionary = {}
 var item_atlas_texture: Texture2D
 var stockpile_material: ShaderMaterial
+var stair_preview_mesher = ChunkMesherScript.new()
+var stair_preview_mesh_cache: Dictionary = {}
 #endregion
 
 
@@ -155,6 +162,12 @@ func _ensure_shader() -> void:
 	if item_atlas_shader == null:
 		item_atlas_shader = Shader.new()
 		item_atlas_shader.code = ITEM_ATLAS_SHADER_CODE
+	if downstairs_overlay_shader == null:
+		downstairs_overlay_shader = Shader.new()
+		downstairs_overlay_shader.code = OVERLAY_SHADER_CODE.replace(
+			"depth_draw_never;",
+			"depth_draw_never, depth_test_disabled;"
+		)
 
 
 func _load_item_atlas_texture() -> Texture2D:
@@ -172,11 +185,12 @@ func _load_item_atlas_texture() -> Texture2D:
 func _create_overlay_shader_material(
 	color: Color,
 	emission_strength: float = 0.0,
-	top_render_margin: float = 0.0
+	top_render_margin: float = 0.0,
+	depth_test_disabled: bool = false
 ) -> ShaderMaterial:
 	_ensure_shader()
 	var mat := ShaderMaterial.new()
-	mat.shader = overlay_shader
+	mat.shader = downstairs_overlay_shader if depth_test_disabled else overlay_shader
 	mat.set_shader_parameter("albedo_color", color)
 	mat.set_shader_parameter("emission_strength", emission_strength)
 	mat.set_shader_parameter("top_render_margin", top_render_margin)
@@ -192,15 +206,50 @@ func set_top_render_y(value: int) -> void:
 	for mat in all_overlay_materials:
 		if mat != null and is_instance_valid(mat):
 			mat.set_shader_parameter("top_render_y", float(value))
+	update_overlay_visibility()
+
+
+func update_overlay_visibility() -> void:
+	if world == null:
+		return
+	for key in drag_previews.keys():
+		var overlay: MeshInstance3D = drag_previews[key]
+		var metadata: Dictionary = overlay.get_meta("drag_preview", {})
+		var pos := Vector3i(
+			int(metadata.get("x", overlay.position.x)),
+			int(metadata.get("y", overlay.position.y)),
+			int(metadata.get("z", overlay.position.z))
+		)
+		overlay.visible = _drag_preview_visible(pos, int(metadata.get("mode", drag_preview_mode)))
+
+
+func _drag_preview_visible(pos: Vector3i, mode: int) -> bool:
+	if mode == World.PlayerMode.STOCKPILE:
+		return world.is_visible_at_level(pos.y - 1)
+	if mode == World.PlayerMode.UP_STAIRS:
+		return world.is_visible_at_level(pos.y - 1)
+	return world.is_visible_at_level(pos.y)
 #endregion
 
 
 #region Task Overlays
 func clear_task_overlays() -> void:
 	for key in task_overlays.keys():
-		task_overlays[key].queue_free()
+		_queue_free_overlay_value(task_overlays[key])
 	task_overlays.clear()
+	for key in stair_task_overlays.keys():
+		_queue_free_overlay_value(stair_task_overlays[key])
+	stair_task_overlays.clear()
 	task_trace_records.clear()
+
+
+func _queue_free_overlay_value(value) -> void:
+	if value is Array:
+		for overlay in value:
+			if overlay != null and is_instance_valid(overlay):
+				overlay.queue_free()
+	elif value != null and is_instance_valid(value):
+		value.queue_free()
 
 
 func clear_item_and_stockpile_overlays() -> void:
@@ -223,22 +272,33 @@ func update_task_overlays(tasks: Array) -> void:
 		if task.type == TaskQueue.TaskType.HAUL:
 			continue
 		live_ids[task.id] = true
-		if not task_overlays.has(task.id):
-			task_overlays[task.id] = create_task_overlay(task)
-		var overlay: MeshInstance3D = task_overlays[task.id]
+		var positions := _task_overlay_positions(task)
+		var overlays: Array = _ensure_task_overlay_nodes(task, positions.size())
 		var visual_state := task_overlay_state(task)
-		var desired_material := get_task_material(visual_state)
-		if overlay.material_override != desired_material:
-			overlay.material_override = desired_material
-		overlay.scale = ASSIGNED_OVERLAY_SCALE if visual_state == TaskOverlayState.ASSIGNED else Vector3.ONE
-		overlay.position = Vector3(task.pos.x, task.pos.y + OVERLAY_Y_OFFSET, task.pos.z)
-		overlay.visible = world.is_visible_at_level(task.pos.y)
-		_trace_task_overlay(task, overlay, visual_state)
+		var stair_mode := _task_stair_mode(task)
+		var flight := stair_mode >= 0
+		var desired_material := get_task_material(visual_state, flight, stair_mode == World.PlayerMode.DOWN_STAIRS)
+		for index in range(overlays.size()):
+			var overlay: MeshInstance3D = overlays[index]
+			if overlay.material_override != desired_material:
+				overlay.material_override = desired_material
+			# SEE-ADR-018: Assignment changes color/pulse, not the flight footprint.
+			overlay.scale = ASSIGNED_OVERLAY_SCALE if not flight and visual_state == TaskOverlayState.ASSIGNED else Vector3.ONE
+			var pos: Vector3i = positions[index]
+			if flight:
+				var rotation := int(StairFlightScript.rotation_for(task.material))
+				var half_material := int(StairFlightScript.lower_id(rotation) if pos == task.pos else StairFlightScript.upper_id(rotation))
+				overlay.mesh = _get_stair_preview_mesh(half_material)
+			overlay.position = Vector3(pos) if flight else Vector3(pos.x, pos.y + OVERLAY_Y_OFFSET, pos.z)
+			overlay.visible = _task_overlay_visible(task, pos)
+		_trace_task_overlay(task, overlays[0], visual_state)
 
 	for task_id in task_overlays.keys():
 		if not live_ids.has(task_id):
 			_trace_task_overlay_removed(task_id)
-			task_overlays[task_id].queue_free()
+			_queue_free_overlay_value(task_overlays[task_id])
+			_queue_free_overlay_value(stair_task_overlays.get(task_id, []))
+			stair_task_overlays.erase(task_id)
 			task_overlays.erase(task_id)
 #endregion
 
@@ -285,19 +345,87 @@ func task_state_name(state: int) -> String:
 	return "RED_BLOCKED"
 
 
-func get_task_material(state: int) -> ShaderMaterial:
-	if task_materials.has(state):
-		return task_materials[state]
-	var material := _create_overlay_shader_material(task_state_color(state), TASK_EMISSION_STRENGTH)
+func get_task_material(state: int, flight: bool = false, down: bool = false) -> ShaderMaterial:
+	var key := state + (100 if flight else 0) + (200 if flight and down else 0)
+	if task_materials.has(key):
+		return task_materials[key]
+	var margin := _stair_render_margin(World.PlayerMode.DOWN_STAIRS if down else World.PlayerMode.UP_STAIRS) if flight else 0.0
+	var material := _create_overlay_shader_material(task_state_color(state), TASK_EMISSION_STRENGTH, margin, flight and down)
 	if state == TaskOverlayState.ASSIGNED:
 		material.set_shader_parameter("pulse_strength", ASSIGNED_PULSE_STRENGTH)
-	task_materials[state] = material
+	task_materials[key] = material
 	return material
+
+
+func _task_stair_mode(task) -> int:
+	if task.type != TaskQueue.TaskType.STAIRS or not StairFlightScript.is_flight(task.material):
+		return -1
+	var data: Dictionary = task.data if task.data is Dictionary else {}
+	return World.PlayerMode.UP_STAIRS if bool(data.get("up", true)) else World.PlayerMode.DOWN_STAIRS
+
+
+func _stair_render_margin(mode: int) -> float:
+	return 1.0 if mode == World.PlayerMode.UP_STAIRS else 0.0
+
+
+func _task_overlay_positions(task) -> Array[Vector3i]:
+	var positions: Array[Vector3i] = []
+	if task.type == TaskQueue.TaskType.STAIRS:
+		var data: Dictionary = task.data if task.data is Dictionary else {}
+		for key in ["footprint", "cells", "positions"]:
+			var candidate = data.get(key, [])
+			if candidate is Array:
+				for value in candidate:
+					if value is Vector3i:
+						positions.append(value)
+				if not positions.is_empty():
+					break
+		if positions.is_empty() and StairFlightScript.is_flight(int(task.material)):
+			var rotation := int(StairFlightScript.rotation_for(int(task.material)))
+			positions = StairFlightScript.cells(task.pos, rotation)
+		if not positions.is_empty():
+			return positions
+	positions.append(task.pos)
+	return positions
+
+
+func _ensure_task_overlay_nodes(task, count: int) -> Array:
+	count = maxi(count, 1)
+	var existing: Array = []
+	if task_overlays.has(task.id):
+		existing.append(task_overlays[task.id])
+	else:
+		task_overlays[task.id] = create_task_overlay(task)
+		existing = [task_overlays[task.id]]
+	var extras: Array = stair_task_overlays.get(task.id, [])
+	if task.type != TaskQueue.TaskType.STAIRS:
+		_queue_free_overlay_value(extras)
+		extras = []
+	while extras.size() < count - 1:
+		extras.append(create_task_overlay(task))
+	while extras.size() > count - 1:
+		_queue_free_overlay_value(extras.pop_back())
+	if extras.is_empty():
+		stair_task_overlays.erase(task.id)
+	else:
+		stair_task_overlays[task.id] = extras
+	existing.append_array(extras)
+	return existing
+
+
+func _task_overlay_visible(task, pos: Vector3i) -> bool:
+	var stair_mode := _task_stair_mode(task)
+	if stair_mode >= 0:
+		return _drag_preview_visible(pos, stair_mode)
+	return world.is_visible_at_level(pos.y)
 
 
 func create_task_overlay(task) -> MeshInstance3D:
 	var mesh_instance := MeshInstance3D.new()
-	if USE_FLAT_OVERLAYS:
+	var stair_mode := _task_stair_mode(task)
+	if stair_mode >= 0:
+		mesh_instance.mesh = _get_stair_preview_mesh(task.material)
+	elif USE_FLAT_OVERLAYS:
 		var quad := QuadMesh.new()
 		quad.size = FLAT_OVERLAY_SIZE
 		mesh_instance.mesh = quad
@@ -307,7 +435,7 @@ func create_task_overlay(task) -> MeshInstance3D:
 		box.size = TASK_OVERLAY_SIZE
 		mesh_instance.mesh = box
 
-	mesh_instance.material_override = get_task_material(task_overlay_state(task))
+	mesh_instance.material_override = get_task_material(task_overlay_state(task), stair_mode >= 0, stair_mode == World.PlayerMode.DOWN_STAIRS)
 	_apply_overlay_instance_settings(mesh_instance)
 	add_child(mesh_instance)
 	return mesh_instance
@@ -411,7 +539,9 @@ func get_drag_material(mode: int, valid: bool = true) -> ShaderMaterial:
 		return drag_materials[key]
 	var color := drag_preview_color(mode) if valid else Color(DRAG_INVALID_COLOR.r, DRAG_INVALID_COLOR.g, DRAG_INVALID_COLOR.b, DRAG_OVERLAY_ALPHA)
 	var render_margin := STORAGE_RENDER_MARGIN if mode == World.PlayerMode.STOCKPILE else 0.0
-	var material := _create_overlay_shader_material(color, 0.0, render_margin)
+	if mode == World.PlayerMode.UP_STAIRS or mode == World.PlayerMode.DOWN_STAIRS:
+		render_margin = _stair_render_margin(mode)
+	var material := _create_overlay_shader_material(color, 0.0, render_margin, mode == World.PlayerMode.DOWN_STAIRS)
 	drag_materials[key] = material
 	return material
 
@@ -422,9 +552,19 @@ func _apply_overlay_instance_settings(mesh_instance: MeshInstance3D) -> void:
 	mesh_instance.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
 
 
-func create_drag_preview_overlay(mode: int) -> MeshInstance3D:
+func _get_stair_preview_mesh(stair_material: int) -> ArrayMesh:
+	if not StairFlightScript.is_flight(stair_material):
+		return ArrayMesh.new()
+	if not stair_preview_mesh_cache.has(stair_material):
+		stair_preview_mesh_cache[stair_material] = stair_preview_mesher.build_stair_flight_half_mesh(stair_material)
+	return stair_preview_mesh_cache[stair_material]
+
+
+func create_drag_preview_overlay(mode: int, stair_material: int = -1) -> MeshInstance3D:
 	var mesh_instance := MeshInstance3D.new()
-	if mode == World.PlayerMode.STOCKPILE:
+	if mode == World.PlayerMode.UP_STAIRS or mode == World.PlayerMode.DOWN_STAIRS:
+		mesh_instance.mesh = _get_stair_preview_mesh(stair_material)
+	elif mode == World.PlayerMode.STOCKPILE:
 		var stockpile_box := BoxMesh.new()
 		stockpile_box.size = STOCKPILE_OVERLAY_SIZE
 		mesh_instance.mesh = stockpile_box
@@ -474,18 +614,24 @@ func set_drag_preview_entries(entries: Array, mode: int) -> void:
 	for entry in entries:
 		var pos: Vector3i = entry["pos"]
 		var valid: bool = bool(entry.get("valid", true))
+		var stair_material := int(entry.get("stair_material", -1))
 		var key := drag_preview_key(pos.x, pos.y, pos.z)
 		live_ids[key] = true
 		var overlay: MeshInstance3D
 		if not drag_previews.has(key):
-			overlay = create_drag_preview_overlay(mode)
+			overlay = create_drag_preview_overlay(mode, stair_material)
 			drag_previews[key] = overlay
 		else:
 			overlay = drag_previews[key]
 		var desired := get_drag_material(mode, valid)
 		if overlay.material_override != desired:
 			overlay.material_override = desired
-		if mode == World.PlayerMode.STOCKPILE:
+		overlay.set_meta("drag_preview", {"x": pos.x, "y": pos.y, "z": pos.z, "mode": mode})
+		if mode == World.PlayerMode.UP_STAIRS or mode == World.PlayerMode.DOWN_STAIRS:
+			overlay.mesh = _get_stair_preview_mesh(stair_material)
+			overlay.position = Vector3(pos)
+			overlay.visible = _drag_preview_visible(pos, mode)
+		elif mode == World.PlayerMode.STOCKPILE:
 			overlay.position = Vector3(pos.x, pos.y + STOCKPILE_GROUND_OFFSET, pos.z)
 			overlay.visible = world.is_visible_at_level(pos.y - 1)
 		else:
@@ -670,17 +816,19 @@ func get_overlay_debug_stats() -> Dictionary:
 			stats["sample_mesh_valid"] = overlay.mesh != null
 			stats["sample_in_tree"] = overlay.is_inside_tree()
 	for key in task_overlays.keys():
-		var overlay: MeshInstance3D = task_overlays[key]
-		var pos := overlay.position
-		var px := int(pos.x)
-		var pz := int(pos.z)
-		stats["task_positions"].append(Vector3i(px, int(pos.y), pz))
-		if overlay.visible:
-			stats["task_visible_count"] += 1
-		if posmod(px, CHUNK_SIZE) == 0 and posmod(pz, CHUNK_SIZE) == 0:
-			stats["chunk_origin_count"] += 1
-		else:
-			stats["non_origin_count"] += 1
+		var overlays: Array = [task_overlays[key]]
+		overlays.append_array(stair_task_overlays.get(key, []))
+		for overlay: MeshInstance3D in overlays:
+			var pos := overlay.position
+			var px := int(pos.x)
+			var pz := int(pos.z)
+			stats["task_positions"].append(Vector3i(px, int(pos.y), pz))
+			if overlay.visible:
+				stats["task_visible_count"] += 1
+			if posmod(px, CHUNK_SIZE) == 0 and posmod(pz, CHUNK_SIZE) == 0:
+				stats["chunk_origin_count"] += 1
+			else:
+				stats["non_origin_count"] += 1
 	return stats
 
 

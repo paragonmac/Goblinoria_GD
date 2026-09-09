@@ -12,6 +12,7 @@ const CATEGORY_LIQUID := "liquid"
 const CATEGORY_CONSTRUCTION := "construction"
 const CATEGORY_GEMS := "gems"
 const BASE_CELL_CAPACITY := 16
+const MAX_NAME_LENGTH := 64
 const CATEGORIES := [
 	CATEGORY_SOIL,
 	CATEGORY_STONE,
@@ -49,6 +50,7 @@ func create_stockpile(cell_list: Array[Vector3i]) -> int:
 		allowed[category] = true
 	stockpiles[stockpile_id] = {
 		"id": stockpile_id,
+		"name": "Stockpile %d" % stockpile_id,
 		"cells": [],
 		"allowed_categories": allowed,
 		"material_overrides": {},
@@ -65,6 +67,7 @@ func restore_stockpile(stockpile: Dictionary) -> void:
 		return
 	var restored := {
 		"id": stockpile_id,
+		"name": _record_display_name(stockpile),
 		"cells": [],
 		"allowed_categories": _normalize_categories(stockpile.get("allowed_categories", {})),
 		"material_overrides": stockpile.get("material_overrides", {}).duplicate(true),
@@ -133,6 +136,43 @@ func stockpile_at(pos: Vector3i) -> int:
 	return int(cells.get(pos, -1))
 
 
+func display_name(stockpile_id: int) -> String:
+	return _record_display_name(stockpiles.get(stockpile_id, {"id": stockpile_id}))
+
+
+func rename_stockpile(stockpile_id: int, name: String) -> bool:
+	if not stockpiles.has(stockpile_id):
+		return false
+	var normalized := _normalize_name(name)
+	if normalized.is_empty():
+		return false
+	var stockpile: Dictionary = stockpiles[stockpile_id]
+	if stockpile.get("name", "") == normalized:
+		return true
+	# Display metadata only: preserve zone identity and all hauling decisions.
+	stockpile["name"] = normalized
+	visual_state_changed.emit("stockpile_renamed")
+	return true
+
+
+static func _normalize_name(name: String) -> String:
+	# Check before trimming so pasted newlines/tabs are rejected, not concealed.
+	for index in range(name.length()):
+		var code := name.unicode_at(index)
+		if code < 32 or (code >= 127 and code <= 159) or code == 0x2028 or code == 0x2029:
+			return ""
+	var normalized := name.strip_edges()
+	if normalized.is_empty() or normalized.length() > MAX_NAME_LENGTH:
+		return ""
+	return normalized
+
+
+static func _record_display_name(stockpile: Dictionary) -> String:
+	var value = stockpile.get("name", "")
+	var normalized := _normalize_name(value) if typeof(value) == TYPE_STRING else ""
+	return normalized if not normalized.is_empty() else "Stockpile %d" % int(stockpile.get("id", -1))
+
+
 func accepts_material(stockpile_id: int, material_id: int) -> bool:
 	if not stockpiles.has(stockpile_id):
 		return false
@@ -197,6 +237,20 @@ func set_material_override(stockpile_id: int, material_id: int, allowed_value: b
 	if _diagnostics_enabled():
 		live_diagnostics.invalidate("stockpile", str(stockpile_id), "stockpile_material_changed")
 		live_diagnostics.observe("stockpile", str(stockpile_id), "stockpile_material_changed", {"material_id": material_id, "allowed": allowed_value})
+
+
+func clear_material_override(stockpile_id: int, material_id: int) -> void:
+	if not stockpiles.has(stockpile_id):
+		return
+	var stockpile: Dictionary = stockpiles[stockpile_id]
+	var overrides: Dictionary = stockpile.get("material_overrides", {})
+	if not overrides.erase(material_id):
+		return
+	haul_state_changed.emit("stockpile_material_changed")
+	visual_state_changed.emit("stockpile_material_changed")
+	if _diagnostics_enabled():
+		live_diagnostics.invalidate("stockpile", str(stockpile_id), "stockpile_material_changed")
+		live_diagnostics.observe("stockpile", str(stockpile_id), "stockpile_material_override_cleared", {"material_id": material_id})
 
 
 func category_for_material(material_id: int) -> String:

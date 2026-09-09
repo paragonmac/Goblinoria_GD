@@ -2,6 +2,8 @@ extends RefCounted
 class_name TaskQueue
 ## Priority queue for dig, place, and stairs tasks.
 
+const StairFlightScript = preload("res://scripts/stair_flight.gd")
+
 signal active_count_changed(count: int)
 signal task_added(task)
 signal task_removed(task_id: int)
@@ -65,6 +67,7 @@ class Task:
 	var retry_due_msec: int = 0
 	var unreachable_workers: Dictionary = {}
 	var data: Dictionary = {}
+	var expected_blocks: Array[int] = []
 	var diagnostics_world: WeakRef
 
 	func _init(task_id: int, task_pos: Vector3i, task_type: int, task_material: int) -> void:
@@ -126,21 +129,33 @@ var _assist_waiter_seq := 0
 
 
 #region Task Creation
-func add_task(pos: Vector3i, task_type: int, material: int) -> int:
+func add_task(
+	pos: Vector3i,
+	task_type: int,
+	material: int,
+	task_data: Dictionary = {},
+	expected_blocks: Array[int] = []
+) -> int:
 	var pos_tasks: Array = _tasks_by_pos.get(pos, [])
 	for task in pos_tasks:
+		if task_type != TaskType.HAUL and bool(task.data.get("flight", false)) \
+				and task.status != TaskStatus.COMPLETED:
+			return -1
 		if task_type != TaskType.HAUL and task.type == task_type and task.status != TaskStatus.COMPLETED:
 			return task.id
 	var task_id = next_id
 	next_id += 1
 	var task := Task.new(task_id, pos, task_type, material)
+	task.data = task_data.duplicate(true)
+	task.expected_blocks = expected_blocks.duplicate()
 	task.diagnostics_world = diagnostics_world
 	task.visual_state_changed.connect(_on_task_visual_state_changed.bind(task))
 	tasks.append(task)
 	_tasks_by_id[task_id] = task
-	if not _tasks_by_pos.has(pos):
-		_tasks_by_pos[pos] = []
-	_tasks_by_pos[pos].append(task)
+	for footprint_pos: Vector3i in _task_footprint(task):
+		if not _tasks_by_pos.has(footprint_pos):
+			_tasks_by_pos[footprint_pos] = []
+		_tasks_by_pos[footprint_pos].append(task)
 	diagnostics_membership_revision += 1
 	if _diagnostics_enabled():
 		_diagnostics_service().observe("task", str(task.id), "task_added", {"type": task.type, "pos": task.pos})
@@ -160,6 +175,32 @@ func add_place_task(pos: Vector3i, material: int) -> int:
 
 func add_stairs_task(pos: Vector3i, stair_material: int) -> int:
 	return add_task(pos, TaskType.STAIRS, stair_material)
+
+
+func add_stair_flight_task(
+	anchor: Vector3i,
+	rotation: int,
+	up: bool,
+	lower_material: int,
+	upper_material: int,
+	expected_blocks: Array[int] = []
+) -> int:
+	var footprint := StairFlightScript.cells(anchor, rotation)
+	for cell: Vector3i in footprint:
+		if not get_active_tasks_at(cell).is_empty():
+			return -1
+	var task_data := {
+		"flight": true,
+		"rotation": rotation,
+		"up": up,
+		"footprint": footprint.duplicate(),
+		"materials": [lower_material, upper_material],
+	}
+	var task_id := add_task(anchor, TaskType.STAIRS, lower_material, task_data, expected_blocks)
+	var task = get_task(task_id)
+	if task == null:
+		return -1
+	return task_id
 
 
 func add_haul_task(item_id: int, item_pos: Vector3i, material: int, stockpile_id: int, destination: Vector3i) -> int:
@@ -189,6 +230,14 @@ func has_active_task_at(pos: Vector3i, task_type: int) -> bool:
 	return false
 
 
+func get_active_tasks_at(pos: Vector3i) -> Array:
+	var active: Array = []
+	for task in _tasks_by_pos.get(pos, []):
+		if task.status != TaskStatus.COMPLETED and not active.has(task):
+			active.append(task)
+	return active
+
+
 func has_pending_task_at(pos: Vector3i, task_types: Array = []) -> bool:
 	var pos_tasks: Array = _tasks_by_pos.get(pos, [])
 	for task in pos_tasks:
@@ -206,27 +255,16 @@ func remove_pending_task_at(pos: Vector3i, task_type: int) -> bool:
 
 func remove_pending_tasks_at(pos: Vector3i, task_types: Array = []) -> Array:
 	var removed: Array = []
-	var pos_tasks: Array = _tasks_by_pos.get(pos, [])
-	for task in pos_tasks.duplicate():
+	var candidates: Array = _tasks_by_pos.get(pos, []).duplicate()
+	for task in candidates:
 		if task.status != TaskStatus.PENDING:
 			continue
 		if not task_types.is_empty() and not task_types.has(task.type):
 			continue
-		_tasks_by_id.erase(task.id)
-		pos_tasks.erase(task)
-		tasks.erase(task)
-		diagnostics_membership_revision += 1
-		if _diagnostics_enabled():
-			_diagnostics_service().invalidate("task", str(task.id), "task_removed")
-		removed.append(task)
-		task_removed.emit(task.id)
-		task_visual_state_changed.emit(task.id)
-	if pos_tasks.is_empty():
-		_tasks_by_pos.erase(pos)
-	else:
-		_tasks_by_pos[pos] = pos_tasks
+		if remove_task(task):
+			removed.append(task)
 	if not removed.is_empty():
-		active_count_changed.emit(tasks.size())
+		pass
 	return removed
 
 
@@ -236,12 +274,13 @@ func remove_task(task) -> bool:
 	if not _tasks_by_id.has(task.id):
 		return false
 	_tasks_by_id.erase(task.id)
-	var pos_tasks: Array = _tasks_by_pos.get(task.pos, [])
-	pos_tasks.erase(task)
-	if pos_tasks.is_empty():
-		_tasks_by_pos.erase(task.pos)
-	else:
-		_tasks_by_pos[task.pos] = pos_tasks
+	for footprint_pos: Vector3i in _task_footprint(task):
+		var pos_tasks: Array = _tasks_by_pos.get(footprint_pos, [])
+		pos_tasks.erase(task)
+		if pos_tasks.is_empty():
+			_tasks_by_pos.erase(footprint_pos)
+		else:
+			_tasks_by_pos[footprint_pos] = pos_tasks
 	tasks.erase(task)
 	diagnostics_membership_revision += 1
 	if _diagnostics_enabled():
@@ -389,12 +428,28 @@ func tasks_near(
 	radius_y: int
 ) -> Array:
 	var nearby: Array = []
+	var seen: Dictionary = {}
 	for x in range(pos.x - radius_xz, pos.x + radius_xz + 1):
 		for y in range(pos.y - radius_y, pos.y + radius_y + 1):
 			for z in range(pos.z - radius_xz, pos.z + radius_xz + 1):
 				for task in _tasks_by_pos.get(Vector3i(x, y, z), []):
+					if seen.has(task.id):
+						continue
+					seen[task.id] = true
 					nearby.append(task)
 	return nearby
+
+
+func _task_footprint(task) -> Array:
+	if task != null and task.data is Dictionary and bool(task.data.get("flight", false)):
+		var rotation := int(task.data.get("rotation", -1))
+		if rotation >= 0 and rotation < StairFlightScript.ROTATION_COUNT:
+			return StairFlightScript.cells(task.pos, rotation)
+	if task != null and task.data is Dictionary and task.data.get("footprint", []) is Array:
+		var footprint: Array = task.data.get("footprint", [])
+		if not footprint.is_empty():
+			return footprint
+	return [task.pos] if task != null else []
 
 
 func _on_task_visual_state_changed(task) -> void:

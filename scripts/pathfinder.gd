@@ -2,6 +2,8 @@ extends RefCounted
 class_name Pathfinder
 ## A* pathfinding for voxel worlds with stair support.
 
+const StairFlightScript = preload("res://scripts/stair_flight.gd")
+
 #region Constants
 const MIN_WALKABLE_Y := 1
 const LEVEL_STEP := 1
@@ -52,6 +54,8 @@ func is_walkable(world, x: int, y: int, z: int) -> bool:
 	if not world.is_block_solid_id(below_block):
 		return false
 	var current_block: int = world.get_block_no_generate(x, y, z)
+	if StairFlightScript.is_flight(current_block) and not is_valid_flight_cell(world, Vector3i(x, y, z)):
+		return false
 	if is_blocking(world, current_block):
 		return false
 	return true
@@ -81,6 +85,25 @@ func can_move_same_level(world, from: Vector3i, to: Vector3i) -> bool:
 	var from_block: int = world.get_block_no_generate(from.x, from.y, from.z)
 	var to_block: int = world.get_block_no_generate(to.x, to.y, to.z)
 	var dir := Vector2i(to.x - from.x, to.z - from.z)
+	if StairFlightScript.is_flight(from_block) or StairFlightScript.is_flight(to_block):
+		if not is_walkable(world, from.x, from.y, from.z) or not is_walkable(world, to.x, to.y, to.z):
+			return false
+		if StairFlightScript.is_lower(from_block) and StairFlightScript.is_upper(to_block):
+			return StairFlightScript.rotation_for(from_block) == StairFlightScript.rotation_for(to_block) \
+				and to == from + StairFlightScript.direction(StairFlightScript.rotation_for(from_block))
+		if StairFlightScript.is_upper(from_block) and StairFlightScript.is_lower(to_block):
+			return StairFlightScript.rotation_for(from_block) == StairFlightScript.rotation_for(to_block) \
+				and from == to + StairFlightScript.direction(StairFlightScript.rotation_for(to_block))
+		# A flight has no same-level side connection through its mid/high edge.
+		if StairFlightScript.is_lower(to_block) and not StairFlightScript.is_flight(from_block):
+			var to_direction := StairFlightScript.direction(StairFlightScript.rotation_for(to_block))
+			return dir == Vector2i(to_direction.x, to_direction.z) \
+				and (not world.is_ramp_block_id(from_block) or _ramp_edge_has_low(from_block, dir))
+		if StairFlightScript.is_lower(from_block) and not StairFlightScript.is_flight(to_block):
+			var from_direction := StairFlightScript.direction(StairFlightScript.rotation_for(from_block))
+			return dir == Vector2i(-from_direction.x, -from_direction.z) \
+				and (not world.is_ramp_block_id(to_block) or _ramp_edge_has_low(to_block, -dir))
+		return false
 	if world.is_ramp_block_id(from_block) and not _ramp_edge_has_low(from_block, dir):
 		return false
 	if world.is_ramp_block_id(to_block) and not _ramp_edge_has_low(to_block, -dir):
@@ -99,6 +122,24 @@ func can_change_level(world, from: Vector3i, to: Vector3i) -> bool:
 	var from_block: int = world.get_block_no_generate(from.x, from.y, from.z)
 	var to_block: int = world.get_block_no_generate(to.x, to.y, to.z)
 	var dir := Vector2i(to.x - from.x, to.z - from.z)
+	if StairFlightScript.is_flight(from_block) or StairFlightScript.is_flight(to_block):
+		if not is_valid_flight_cell(world, from) or not is_valid_flight_cell(world, to):
+			return false
+		var rotation := StairFlightScript.rotation_for(from_block if StairFlightScript.is_flight(from_block) else to_block)
+		var flight_dir := StairFlightScript.direction(rotation)
+		if to.y == from.y + LEVEL_STEP:
+			return StairFlightScript.is_upper(from_block) \
+				and dir == Vector2i(flight_dir.x, flight_dir.z) \
+				and to == from + flight_dir + Vector3i.UP \
+				and not is_blocking(world, world.get_block_no_generate(from.x, to.y, from.z)) \
+				and is_walkable(world, to.x, to.y, to.z)
+		if to.y == from.y - LEVEL_STEP:
+			return StairFlightScript.is_upper(to_block) \
+				and dir == Vector2i(-flight_dir.x, -flight_dir.z) \
+				and from == to + flight_dir + Vector3i.UP \
+				and not is_blocking(world, world.get_block_no_generate(to.x, from.y, to.z)) \
+				and is_walkable(world, from.x, from.y, from.z)
+		return false
 	if to.y == from.y + LEVEL_STEP:
 		if is_blocking(world, world.get_block_no_generate(from.x, to.y, from.z)):
 			return false
@@ -113,7 +154,7 @@ func can_change_level(world, from: Vector3i, to: Vector3i) -> bool:
 func _ramp_edge_has_low(block_id: int, dir: Vector2i) -> bool:
 	var heights := _ramp_corner_heights(block_id)
 	for corner in _edge_corners(dir):
-		if int(heights.get(corner, -1)) < 0:
+		if float(heights.get(corner, -1.0)) < 0.0:
 			return true
 	return false
 
@@ -121,7 +162,7 @@ func _ramp_edge_has_low(block_id: int, dir: Vector2i) -> bool:
 func _ramp_edge_has_high(block_id: int, dir: Vector2i) -> bool:
 	var heights := _ramp_corner_heights(block_id)
 	for corner in _edge_corners(dir):
-		if int(heights.get(corner, -1)) > 0:
+		if float(heights.get(corner, -1.0)) > 0.0:
 			return true
 	return false
 
@@ -139,6 +180,8 @@ func _edge_corners(dir: Vector2i) -> Array[String]:
 
 
 func _ramp_corner_heights(block_id: int) -> Dictionary:
+	if StairFlightScript.is_flight(block_id):
+		return StairFlightScript.corner_heights(block_id)
 	match World.ramp_shape_id(block_id):
 		World.RAMP_NORTH_ID:
 			return {"nw": 1, "ne": 1, "se": -1, "sw": -1}
@@ -166,6 +209,43 @@ func _ramp_corner_heights(block_id: int) -> Dictionary:
 			return {"nw": 1, "ne": -1, "se": 1, "sw": 1}
 		_:
 			return {"nw": -1, "ne": -1, "se": -1, "sw": -1}
+
+
+func is_valid_flight_cell(world, pos: Vector3i) -> bool:
+	if world == null or not world.is_block_coord_valid(pos.x, pos.y, pos.z):
+		return false
+	var block_id: int = world.get_block_no_generate(pos.x, pos.y, pos.z)
+	var rotation := StairFlightScript.rotation_for(block_id)
+	if rotation < 0:
+		return true
+	var other_pos := pos + StairFlightScript.direction(rotation) \
+		if StairFlightScript.is_lower(block_id) \
+		else pos - StairFlightScript.direction(rotation)
+	if not world.is_block_coord_valid(other_pos.x, other_pos.y, other_pos.z):
+		return false
+	var other_id: int = world.get_block_no_generate(other_pos.x, other_pos.y, other_pos.z)
+	var expected_other_id := StairFlightScript.upper_id(rotation) \
+		if StairFlightScript.is_lower(block_id) \
+		else StairFlightScript.lower_id(rotation)
+	if other_id != expected_other_id:
+		return false
+	for cell: Vector3i in [
+		pos if StairFlightScript.is_lower(block_id) else other_pos,
+		other_pos if StairFlightScript.is_lower(block_id) else pos,
+	]:
+		if cell.y <= 0 or not world.is_block_coord_valid(cell.x, cell.y + 1, cell.z):
+			return false
+		var below_id: int = world.get_block_no_generate(cell.x, cell.y - 1, cell.z)
+		if not is_block_solid(world, below_id) or world.is_ramp_block_id(below_id):
+			return false
+		var above_id: int = world.get_block_no_generate(cell.x, cell.y + 1, cell.z)
+		if is_blocking(world, above_id):
+			return false
+	return true
+
+
+func is_block_solid(world, block_id: int) -> bool:
+	return world.is_block_solid_id(block_id)
 #endregion
 
 

@@ -88,8 +88,8 @@ func set_enabled(value: bool) -> void:
 	service.set_enabled(value)
 	errors.clear()
 	dropped_errors = 0
-	if main.world.renderer != null:
-		main.world.renderer.diagnostics_render_bounds.clear()
+	# Renderer owns this potentially immutable worker snapshot. Toggling an
+	# observer must not clear rendering evidence or mutate worker-owned data.
 	enable_checkbox.set_pressed_no_signal(value)
 	_show("Live diagnostics enabled | F1 capture" if value else "Live diagnostics disabled")
 

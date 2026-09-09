@@ -5,6 +5,8 @@ class_name Worker
 const WorkerVisualsScript = preload("res://scripts/worker_visuals.gd")
 const TaskWorkPositionRulesScript = preload("res://scripts/task_work_position_rules.gd")
 const WorkerRolesScript = preload("res://scripts/worker_roles.gd")
+const WorkPrioritiesScript = preload("res://scripts/worker_work_priorities.gd")
+const StairFlightScript = preload("res://scripts/stair_flight.gd")
 
 #region Enums
 enum WorkerState {IDLE, MOVING, WORKING, WAITING, FALLING, WAITING_FOR_PATH}
@@ -60,6 +62,7 @@ var fall_target_y := 0.0
 var rng := RandomNumberGenerator.new()
 var worker_id := 0
 var role_id: int = WorkerRolesScript.Role.MINER
+var work_priorities: Dictionary = {}
 var movement_intent: MovementIntent = MovementIntent.NONE
 var assist_task_id := -1
 var assist_goal := Vector3i.ZERO
@@ -139,7 +142,21 @@ func get_role_idle_status() -> String:
 
 
 func can_accept_task(task) -> bool:
-	return task != null and WorkerRolesScript.can_accept_task(role_id, task.type)
+	return task != null and get_work_priority(WorkPrioritiesScript.task_work_id(task.type)) > 0
+
+
+func get_work_priority(work_id: String) -> int:
+	return WorkPrioritiesScript.effective_priority(role_id, work_priorities, work_id)
+
+
+func get_work_configuration() -> Dictionary:
+	return WorkPrioritiesScript.effective_values(role_id, work_priorities)
+
+
+func can_idle_wander() -> bool:
+	return WorkerRolesScript.allows_idle_wander(role_id) and (
+		get_work_priority("hauling") > 0 or get_work_priority("mining") > 0 \
+		or get_work_priority("building") > 0)
 #endregion
 
 
@@ -314,6 +331,10 @@ func _can_stand_at(world, x: int, y: int, z: int) -> bool:
 	if y <= 0:
 		return true
 	var current_block: int = world.get_block_no_generate(x, y, z)
+	if StairFlightScript.is_flight(current_block) \
+			and world.get("pathfinder") != null \
+			and not world.pathfinder.is_valid_flight_cell(world, Vector3i(x, y, z)):
+		return false
 	if _is_worker_blocking(world, current_block):
 		return false
 	var below_block: int = world.get_block_no_generate(x, y - 1, z)
@@ -339,7 +360,7 @@ func _standing_y_for_coord(world, x: int, y: int, z: int) -> float:
 #region Idle State
 func update_idle(dt: float, world, task_queue, pathfinder) -> void:
 	if task_search_timer > 0.0:
-		if not _has_pending_tasks_for_role(task_queue) and WorkerRolesScript.allows_idle_wander(role_id):
+		if not _has_pending_tasks_for_role(task_queue) and can_idle_wander():
 			update_wander(dt, world, pathfinder)
 		return
 	task_search_timer = IDLE_TASK_SEARCH_INTERVAL
@@ -358,7 +379,7 @@ func update_idle(dt: float, world, task_queue, pathfinder) -> void:
 			world.live_diagnostics.observe("worker", str(worker_id), "no_assignment_or_assist_path", {"role_id": role_id, "retry_seconds": task_search_timer})
 		return
 
-	if WorkerRolesScript.allows_idle_wander(role_id):
+	if can_idle_wander():
 		update_wander(dt, world, pathfinder)
 	elif _diagnostics_enabled(world):
 		world.live_diagnostics.observe("worker", str(worker_id), "role_reserve_idle", {"role_id": role_id})
@@ -465,8 +486,15 @@ func _move_to_work_front(world, task_queue, pathfinder) -> bool:
 		if task.type != TaskQueue.TaskType.DIG and task.type != TaskQueue.TaskType.STAIRS:
 			continue
 		var work_level: int = _work_level_for_task(task.type, task.pos, world)
-		for pos in pathfinder.get_walkable_adjacent_on_level(world, task.pos, work_level):
-			if not _can_work_task_from_coord(task.type, pos, task.pos, world, pathfinder):
+		var work_positions: Array = []
+		if task.type == TaskQueue.TaskType.STAIRS:
+			var flight_rotation := int(task.data.get("rotation", -1)) if task.data is Dictionary else -1
+			work_positions = TaskWorkPositionRulesScript.stair_work_positions(world, pathfinder, task.pos, flight_rotation)
+		else:
+			work_positions = pathfinder.get_walkable_adjacent_on_level(world, task.pos, work_level)
+		for pos in work_positions:
+			var work_rotation := int(task.data.get("rotation", -1)) if task.type == TaskQueue.TaskType.STAIRS and task.data is Dictionary else -1
+			if not _can_work_task_from_coord(task.type, pos, task.pos, world, pathfinder, work_rotation):
 				continue
 			if pos == start:
 				continue
@@ -516,7 +544,8 @@ func start_assist_path(
 
 
 func can_work_task(task, world = null, pathfinder = null) -> bool:
-	if not can_accept_task(task):
+	# Work settings govern the NEXT claim, never invalidate the owned job in transit.
+	if not can_accept_task(task) and not (task != null and current_task_id == task.id and task.assigned_worker == self):
 		return false
 	if task.type == TaskQueue.TaskType.DIG or task.type == TaskQueue.TaskType.PLACE:
 		var worker_pos := get_block_coord()
@@ -526,7 +555,8 @@ func can_work_task(task, world = null, pathfinder = null) -> bool:
 			world,
 			pathfinder,
 			get_block_coord(),
-			task.pos
+			task.pos,
+			int(task.data.get("rotation", -1)) if task.data is Dictionary else -1
 		)
 	return true
 #endregion
@@ -620,6 +650,8 @@ func update_moving(dt: float, world, task_queue, pathfinder) -> void:
 
 
 func _ramp_center_offset(block_id: int) -> float:
+	if StairFlightScript.is_flight(block_id):
+		return 0.5 + StairFlightScript.center_offset(block_id)
 	match World.ramp_shape_id(block_id):
 		World.RAMP_NORTHEAST_ID, World.RAMP_NORTHWEST_ID, World.RAMP_SOUTHEAST_ID, World.RAMP_SOUTHWEST_ID:
 			return 0.25
@@ -782,7 +814,18 @@ func update_working(dt: float, world, task_queue, pathfinder) -> void:
 						return
 					world.set_block(task.pos.x, task.pos.y, task.pos.z, task.material)
 				TaskQueue.TaskType.STAIRS:
-					world.set_block(task.pos.x, task.pos.y, task.pos.z, task.material)
+					if bool(task.data.get("flight", false)):
+						if not world.complete_stair_flight(task):
+							task.status = TaskQueue.TaskStatus.PENDING
+							task.accessibility = TaskQueue.TaskAccessibility.UNKNOWN
+							task.assigned_worker = null
+							current_task_id = -1
+							active_work_anim = &""
+							idle_timer = IDLE_PAUSE
+							set_state(WorkerState.IDLE, world)
+							return
+					else:
+						world.set_block(task.pos.x, task.pos.y, task.pos.z, task.material)
 				TaskQueue.TaskType.HAUL:
 					if not _advance_haul_task(world, task_queue, task):
 						return
@@ -1005,7 +1048,7 @@ func find_path_to_task(
 	max_iterations_cap: int = WORKER_PATH_SEARCH_MAX_ITERATIONS
 ) -> Array:
 	if task_type == TaskQueue.TaskType.STAIRS:
-		return find_path_to_stairs(world, start, target, pathfinder)
+		return find_path_to_stairs(world, start, target, pathfinder, -1)
 	if task_type == TaskQueue.TaskType.HAUL:
 		return pathfinder.find_path(world, start, target, false, false, max_iterations_cap)
 
@@ -1046,8 +1089,8 @@ func find_path_to_work_position(
 	return pathfinder.find_path_to_any(world, start, work_positions, max_iterations_cap)
 
 
-func find_path_to_stairs(world, start: Vector3i, target: Vector3i, pathfinder) -> Array:
-	var candidates := TaskWorkPositionRulesScript.stair_work_positions(world, pathfinder, target)
+func find_path_to_stairs(world, start: Vector3i, target: Vector3i, pathfinder, flight_rotation: int = -1) -> Array:
+	var candidates := TaskWorkPositionRulesScript.stair_work_positions(world, pathfinder, target, flight_rotation)
 	return pathfinder.find_path_to_any(world, start, candidates, WORKER_PATH_SEARCH_MAX_ITERATIONS)
 #endregion
 
@@ -1072,10 +1115,17 @@ func _current_movement_task(task_queue):
 	return null
 
 
-func _can_work_task_from_coord(task_type: int, worker_pos: Vector3i, task_pos: Vector3i, world, pathfinder) -> bool:
+func _can_work_task_from_coord(
+	task_type: int,
+	worker_pos: Vector3i,
+	task_pos: Vector3i,
+	world,
+	pathfinder,
+	flight_rotation: int = -1
+) -> bool:
 	# SEE-ADR-001: Normal DIG/PLACE work is same-level and cardinal-adjacent.
 	if task_type == TaskQueue.TaskType.STAIRS:
-		return TaskWorkPositionRulesScript.can_work_stairs_from(world, pathfinder, worker_pos, task_pos)
+		return TaskWorkPositionRulesScript.can_work_stairs_from(world, pathfinder, worker_pos, task_pos, flight_rotation)
 	if task_type != TaskQueue.TaskType.DIG and task_type != TaskQueue.TaskType.PLACE:
 		return true
 	if worker_pos.y != _work_level_for_task(task_type, task_pos, world):

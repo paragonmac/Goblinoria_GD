@@ -93,6 +93,7 @@ func reserve_item(item_id: int, task_id: int) -> bool:
 	item["reserved_by_task_id"] = task_id
 	items[item_id] = item
 	_observe_item(item_id, "item_reserved")
+	visual_state_changed.emit("item_reserved")
 	return true
 
 

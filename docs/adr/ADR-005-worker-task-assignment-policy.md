@@ -11,6 +11,11 @@ Workers were claiming tasks in update order, which could send a far worker to a 
 
 Task assignment uses a path-length auction across currently available workers. A task is assigned only after pending worker bids finish; the shortest valid path wins, with worker ID as the deterministic tie-breaker.
 
+ADR-017 extends this policy with per-worker work priorities. Each worker prefers
+reachable priority 1 work before 2, and so on; Off disables future claims. Equal
+priorities retain cheapest-path selection and deterministic identity tie-breaking.
+Edits invalidate pending decisions but never interrupt the current owned job.
+
 If a worker reaches a work front where another worker owns a task but has not started working, task ownership may transfer to the arrived worker. If a worker is waiting on an invalid work position, it releases the task back to pending after a short retry interval so the changed world can be re-evaluated.
 
 ## Consequences

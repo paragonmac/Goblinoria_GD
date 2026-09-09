@@ -13,13 +13,13 @@ Item and stockpile mutations request a coalesced haul rebuild. The normal frame 
 
 `TaskQueue.complete_task()` marks a task complete and immediately removes it from all queue indexes. Production code must not leave completed tasks for later polling cleanup.
 
-HUD status, inventory, and stockpile sections refresh through coalesced state-change signals. Generation status uses a 250 ms timer. The worker window uses a 200 ms timer that runs only while the window is open.
+HUD status, inventory, and stockpile sections originally refreshed through coalesced state-change signals, with 200-250 ms worker/generation timers. ADR-016 replaces those production surfaces with the bounded colony presentation model: economy mutations coalesce invalidation, collection runs incrementally, and worker observations refresh on a 200 ms cadence for the activity summary and open panels. The old worker-window timer stays stopped under the new UI.
 
 ## Consequences
 
 - Idle frames do not scan items, stockpile cells, or tasks to reconstruct hauling work.
 - Completed tasks disappear from queue lookups in the same operation that completes them.
-- HUD update latency is at most one deferred frame; timer-driven diagnostics have bounded 200-250 ms latency.
+- Colony observations can take multiple bounded frames to rebuild and show Updating; the old one-deferred-frame HUD latency promise no longer applies. Worker polling cadence is not a guarantee of immediate publication under heavy mutation.
 - Store mutation APIs and task completion APIs are required so change notifications are not bypassed.
 
 ## Guardrails

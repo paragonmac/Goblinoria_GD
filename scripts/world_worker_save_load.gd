@@ -1,12 +1,13 @@
 extends RefCounted
 class_name WorldWorkerSaveLoad
-## Persists worker role assignments while workers continue to respawn on load.
+## Persists role templates and work priorities; workers still respawn on load.
 
 const WorldSaveTransactionScript = preload("res://scripts/world_save_transaction.gd")
 
 const WORKER_FILE_NAME := "workers.dat"
 const WORKER_MAGIC := 0x574F524B
 const WorkerRolesScript = preload("res://scripts/worker_roles.gd")
+const WorkPriorities = preload("res://scripts/worker_work_priorities.gd")
 
 
 func save_workers(world: World, world_dir: String) -> bool:
@@ -19,6 +20,7 @@ func save_workers(world: World, world_dir: String) -> bool:
 		roles.append({
 			"worker_id": worker.worker_id,
 			"role_id": worker.role_id,
+			"work_priorities": worker.work_priorities.duplicate(),
 		})
 	var path := world_dir.path_join(WORKER_FILE_NAME)
 	var file := FileAccess.open(path, FileAccess.WRITE)
@@ -50,6 +52,8 @@ func read_snapshot(world_dir: String) -> Dictionary:
 			return {"ok": false}
 		if not WorkerRolesScript.is_valid(int(entry.get("role_id", -1))):
 			return {"ok": false}
+		if not _valid_work_priorities(entry.get("work_priorities", {})):
+			return {"ok": false}
 	return {"ok": true, "roles": roles_value.duplicate(true)}
 
 
@@ -62,4 +66,22 @@ func apply_snapshot(world: World, snapshot: Dictionary) -> void:
 			int(entry.get("role_id", WorkerRolesScript.Role.MINER)),
 			false
 		)
+		for worker: Worker in world.workers:
+			if worker.worker_id == int(entry.get("worker_id", -1)):
+				worker.work_priorities = entry.get("work_priorities", {}).duplicate()
+				break
 	world.notify_worker_roles_changed()
+
+
+static func _valid_work_priorities(value: Variant) -> bool:
+	if not value is Dictionary:
+		return false
+	var available: Dictionary = {}
+	for work: Dictionary in WorkPriorities.entries():
+		if work.implemented: available[work.id] = true
+	for key: Variant in value:
+		if not key is String or not available.has(key) or not value[key] is int:
+			return false
+		if value[key] < 0 or value[key] > 9:
+			return false
+	return true

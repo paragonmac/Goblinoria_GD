@@ -45,7 +45,8 @@ func read_world_meta_snapshot(
 	save_version: int,
 	expected_block_table_hash: int,
 	legacy_save_versions: Array = [],
-	legacy_block_table_versions: Array = []
+	legacy_block_table_versions: Array = [],
+	compatible_hashes_by_version: Dictionary = {}
 ) -> Dictionary:
 	if world == null:
 		return {"ok": false}
@@ -88,7 +89,8 @@ func read_world_meta_snapshot(
 	var block_hash: int = file.get_32()
 	var legacy_block_table: bool = legacy_block_table_versions.has(version) \
 		and block_hash != expected_block_table_hash
-	if block_hash != expected_block_table_hash and not legacy_block_table:
+	var compatible_hash: bool = compatible_hashes_by_version.get(version, []).has(block_hash)
+	if block_hash != expected_block_table_hash and not legacy_block_table and not compatible_hash:
 		push_warning("World load failed: block table hash mismatch")
 		return {"ok": false}
 	return {
@@ -97,6 +99,7 @@ func read_world_meta_snapshot(
 		"spawn_coord": Vector3i(spawn_x, spawn_y, spawn_z),
 		"top_render_y": clampi(top_y, 0, world.world_size_y - 1),
 		"save_version": version,
+		"block_table_hash": block_hash,
 		"legacy_block_table": legacy_block_table,
 	}
 

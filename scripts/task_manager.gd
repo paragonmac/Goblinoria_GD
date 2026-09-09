@@ -4,6 +4,7 @@ class_name TaskManager
 
 const PathSearchSchedulerScript = preload("res://scripts/pathfinding/path_search_scheduler.gd")
 const TaskWorkPositionRulesScript = preload("res://scripts/task_work_position_rules.gd")
+const StairFlightScript = preload("res://scripts/stair_flight.gd")
 
 #region State
 var world: World
@@ -31,6 +32,17 @@ var assignment_bids: Array = []
 var assignment_pending_jobs: Dictionary = {}
 var assignment_auction_id := 0
 var next_assignment_auction_id := 1
+# A round visits the live task array incrementally; no task/path matrix is copied.
+# Retain only one best bid per worker, and one task's asynchronous bids at a time.
+var priority_round_active := false
+var priority_task_cursor := 0
+var priority_task_limit := 0
+var priority_worker_cursor := 0
+var priority_choices: Dictionary = {}
+var priority_winner: Dictionary = {}
+var priority_choice_checks: Dictionary = {}
+var assignment_job_context: Dictionary = {}
+const PRIORITY_SCAN_BUDGET := 128
 var assist_requests_by_worker: Dictionary = {}
 var assist_requests_by_id: Dictionary = {}
 var next_assist_request_id := 1
@@ -69,6 +81,7 @@ func _init(world_ref: World, queue_ref: TaskQueue) -> void:
 
 func shutdown() -> void:
 	path_search_scheduler.stop()
+	reset_assignment_auction()
 	if path_retry_timer != null and is_instance_valid(path_retry_timer):
 		path_retry_timer.stop()
 		path_retry_timer.queue_free()
@@ -87,10 +100,20 @@ func _setup_path_retry_timer() -> void:
 
 func _on_task_added(task) -> void:
 	if task != null:
+		if priority_round_active:
+			priority_task_limit = task_queue.tasks.size()
+			priority_worker_cursor = 0
+			priority_winner = {}
 		request_accessibility_check(task.id, "task_added")
 
 
 func _on_task_removed(task_id: int) -> void:
+	# Do not assume ordered erase versus swap-removal. Retain valid nominations,
+	# but revisit the array under the normal scan budget after membership changes.
+	priority_task_cursor = 0
+	priority_task_limit = mini(priority_task_limit, task_queue.tasks.size())
+	priority_worker_cursor = 0
+	priority_winner = {}
 	pending_accessibility_set.erase(task_id)
 	_clear_haul_path_request_for_task(task_id)
 	if path_retry_due_by_task.has(task_id):
@@ -157,11 +180,7 @@ func _classify_task_accessibility(task) -> void:
 	var now_msec := Time.get_ticks_msec()
 	var has_work_position := true
 	if task.type == TaskQueue.TaskType.STAIRS:
-		has_work_position = not TaskWorkPositionRulesScript.stair_work_positions(
-			world,
-			world.pathfinder,
-			task.pos
-		).is_empty()
+		has_work_position = not _stair_work_positions_for_task(task).is_empty()
 	elif task.type != TaskQueue.TaskType.HAUL:
 		has_work_position = world.pathfinder.has_walkable_adjacent_on_level(world, task.pos, task.pos.y)
 	if not has_work_position:
@@ -256,6 +275,10 @@ func process_due_path_retries(now_msec: int) -> void:
 func notify_worker_availability_changed() -> void:
 	var now_msec := Time.get_ticks_msec()
 	_reset_assignment_auction()
+	_reset_priority_round()
+	# Invalidate unclaimed assist results, not active haul delivery requests.
+	assist_requests_by_worker.clear()
+	assist_requests_by_id.clear()
 	for task in task_queue.tasks:
 		if task.status != TaskQueue.TaskStatus.PENDING:
 			continue
@@ -279,44 +302,179 @@ func reset_accessibility_state() -> void:
 
 
 func update_task_assignments() -> void:
-	# SEE-ADR-005: Assignment waits for worker path bids so shortest valid paths win.
+	# SEE-ADR-005: Compare completed reachable paths, not straight-line distances.
+	# Per-worker numeric priority precedes route cost across ALL implemented types.
+	if world == null or task_queue == null:
+		return
+	priority_choice_checks.clear()
 	_process_path_results()
+	if task_queue.tasks.is_empty():
+		if priority_round_active:
+			_reset_assignment_auction()
+			_reset_priority_round()
+		return
+	if not priority_round_active:
+		priority_round_active = true
+		priority_task_limit = task_queue.tasks.size()
 	var task = task_queue.get_task(assignment_task_id) if assignment_task_id >= 0 else null
 	if task == null \
 			or task.status != TaskQueue.TaskStatus.PENDING \
 			or task.accessibility == TaskQueue.TaskAccessibility.UNREACHABLE:
 		_reset_assignment_auction()
-		task = _next_assignable_task()
+		task = _next_priority_round_task()
 		if task == null:
+			if priority_task_cursor >= mini(priority_task_limit, task_queue.tasks.size()):
+				_finish_priority_round_step()
 			return
 		_start_assignment_auction(task)
 
+	# One in-flight assignment path bounds snapshot/result retention independent of
+	# task count. Delivery/assist paths retain their own existing handoff contracts.
+	if not assignment_pending_jobs.is_empty():
+		if _diagnostics_enabled():
+			world.live_diagnostics.observe("task", str(task.id), "auction_waiting_for_bids", {"auction_id": assignment_auction_id, "pending_jobs": assignment_pending_jobs.size(), "received_bids": assignment_bids.size()})
+		return
 	if assignment_worker_index < assignment_workers.size():
 		var worker: Worker = assignment_workers[assignment_worker_index]
 		assignment_worker_index += 1
 		_queue_worker_bid(task, worker)
 		return
-	if not assignment_pending_jobs.is_empty():
-		if _diagnostics_enabled():
-			world.live_diagnostics.observe("task", str(task.id), "auction_waiting_for_bids", {"auction_id": assignment_auction_id, "pending_jobs": assignment_pending_jobs.size(), "received_bids": assignment_bids.size()})
-		return
-
-	var best_bid := _best_available_assignment_bid()
-	if not best_bid.is_empty():
-		var best_worker: Worker = best_bid["worker"]
-		if _diagnostics_enabled():
-			world.live_diagnostics.observe("task", str(task.id), "auction_winner", {"auction_id": assignment_auction_id, "worker_id": best_worker.worker_id, "path_length": int(best_bid["path_length"]), "bid_count": assignment_bids.size(), "tie_break": "shortest_path_then_worker_id"})
-		best_worker.assign_task_with_path(
-			world,
-			task_queue,
-			task,
-			best_bid["path"],
-			float(best_bid["search_ms"])
-		)
-	elif not assignment_workers.is_empty():
-		if task.block_reason != TaskQueue.TaskBlockReason.NO_WORKER_PATH:
-			_mark_task_path_blocked(task, Time.get_ticks_msec())
+	# Only actual failed paths may mark a task blocked. A skipped lower-priority
+	# bid, busy worker, or settings edit is not proof of unreachability.
 	_reset_assignment_auction()
+
+
+func _next_priority_round_task():
+	var started := Time.get_ticks_usec()
+	var steps := 0
+	while priority_task_cursor < mini(priority_task_limit, task_queue.tasks.size()):
+		if steps >= PRIORITY_SCAN_BUDGET or Time.get_ticks_usec() - started >= 1000:
+			return null
+		var task = task_queue.tasks[priority_task_cursor]
+		priority_task_cursor += 1
+		steps += 1
+		if task.status != TaskQueue.TaskStatus.PENDING \
+				or task.accessibility == TaskQueue.TaskAccessibility.UNREACHABLE:
+			continue
+		if not world.is_block_coord_valid(task.pos.x, task.pos.y, task.pos.z):
+			continue
+		if task.type == TaskQueue.TaskType.DIG and world.is_block_protected_from_dig(task.pos):
+			continue
+		if not _task_material_available(task):
+			continue
+		var worth_bidding := false
+		for worker: Worker in world.workers:
+			if _is_worker_available(worker) and worker.can_accept_task(task) and _can_improve_priority_choice(task, worker):
+				worth_bidding = true
+				break
+		if not worth_bidding:
+			continue
+		return task
+	return null
+
+
+func _remember_priority_bid(task, worker: Worker, bid: Dictionary) -> void:
+	if not priority_round_active:
+		return
+	var priority := worker.get_work_priority(Worker.WorkPrioritiesScript.task_work_id(task.type))
+	var previous: Dictionary = priority_choices.get(worker.worker_id, {})
+	if not previous.is_empty():
+		if priority > int(previous["priority"]):
+			return
+		if priority == int(previous["priority"]) and (
+			int(bid["path_length"]) > int(previous["path_length"]) or (
+			int(bid["path_length"]) == int(previous["path_length"]) and task.id >= previous["task"].id)):
+			return
+	var choice := bid.duplicate()
+	choice["task"] = task
+	choice["priority"] = priority
+	choice["configuration"] = worker.get_work_configuration()
+	choice["start"] = worker.get_block_coord()
+	priority_choices[worker.worker_id] = choice
+	priority_choice_checks.erase(worker.worker_id)
+
+
+func _priority_choice_valid(choice: Dictionary) -> bool:
+	if choice.is_empty():
+		return false
+	var worker: Worker = choice["worker"]
+	var task = choice["task"]
+	if not is_instance_valid(worker) or not _is_worker_available(worker):
+		return false
+	if task_queue.get_task(task.id) != task or task.status != TaskQueue.TaskStatus.PENDING:
+		return false
+	if not _task_material_available(task):
+		return false
+	if not worker.can_accept_task(task) or worker.get_work_configuration() != choice["configuration"]:
+		return false
+	if worker.get_block_coord() != choice["start"]:
+		return false
+	var snapshot = choice.get("snapshot")
+	return snapshot != null and snapshot.revisions_match(world)
+
+
+func _finish_priority_round_step() -> void:
+	# Reduction and final validation also advance one worker per frame.
+	if priority_worker_cursor < world.workers.size():
+		var worker: Worker = world.workers[priority_worker_cursor]
+		priority_worker_cursor += 1
+		var choice: Dictionary = priority_choices.get(worker.worker_id, {})
+		if _priority_choice_valid(choice):
+			if priority_winner.is_empty() or int(choice["path_length"]) < int(priority_winner["path_length"]) \
+					or (choice["path_length"] == priority_winner["path_length"] and choice["worker_id"] < priority_winner["worker_id"]):
+				priority_winner = choice
+		return
+	if _priority_choice_valid(priority_winner):
+		var worker: Worker = priority_winner["worker"]
+		var task = priority_winner["task"]
+		if _diagnostics_enabled():
+			world.live_diagnostics.observe("task", str(task.id), "auction_winner", {"worker_id": worker.worker_id, "priority": priority_winner["priority"], "path_length": priority_winner["path_length"], "tie_break": "worker_priority_then_path_then_worker_id"})
+		worker.assign_task_with_path(world, task_queue, task, priority_winner["path"], priority_winner["search_ms"])
+		priority_choices.erase(worker.worker_id)
+		priority_winner = {}
+		priority_worker_cursor = 0
+		return
+	# Independent nominations can claim without repeating searches. Once exhausted,
+	# recompute losers against unclaimed jobs, including their lower priorities.
+	_reset_priority_round()
+
+
+func _reset_priority_round() -> void:
+	priority_round_active = false
+	priority_task_cursor = 0
+	priority_task_limit = 0
+	priority_worker_cursor = 0
+	priority_choices.clear()
+	priority_choice_checks.clear()
+	priority_winner = {}
+
+
+func _task_material_available(task) -> bool:
+	# World.inventory is the maintained stored/spendable compatibility view.
+	# get_inventory_count() would rescan item stacks here; do not use it.
+	return task.type != TaskQueue.TaskType.PLACE or int(world.inventory.get(task.material, 0)) > 0
+
+
+func _can_improve_priority_choice(task, worker: Worker) -> bool:
+	var previous: Dictionary = priority_choices.get(worker.worker_id, {})
+	if previous.is_empty():
+		return true
+	# At most one snapshot validation per worker per update, not per candidate.
+	# A stale winner must not suppress routes already skipped using its old bound.
+	if not priority_choice_checks.has(worker.worker_id):
+		priority_choice_checks[worker.worker_id] = _priority_choice_valid(previous)
+	if not priority_choice_checks[worker.worker_id]:
+		priority_choices.erase(worker.worker_id)
+		priority_task_cursor = 0
+		priority_worker_cursor = 0
+		priority_winner = {}
+		return true
+	var priority := worker.get_work_priority(Worker.WorkPrioritiesScript.task_work_id(task.type))
+	if priority != int(previous["priority"]):
+		return priority < int(previous["priority"])
+	var bound := Worker.WorkPrioritiesScript.route_length_lower_bound(worker.get_block_coord(), task.pos, task.type)
+	return bound < int(previous["path_length"]) \
+		or (bound == int(previous["path_length"]) and task.id < previous["task"].id)
 
 
 func transfer_task_to_arrived_worker(task, worker: Worker) -> bool:
@@ -325,6 +483,10 @@ func transfer_task_to_arrived_worker(task, worker: Worker) -> bool:
 	if task.status != TaskQueue.TaskStatus.IN_PROGRESS or task.assigned_worker == null:
 		return false
 	if task.assigned_worker == worker or worker.current_task_id >= 0:
+		return false
+	# Higher-priority pending work must go through the cross-type comparison.
+	# For equal priorities the arrived worker already has the minimum route cost.
+	if has_assignable_pending_task_for_worker(worker, worker.get_work_priority(Worker.WorkPrioritiesScript.task_work_id(task.type))):
 		return false
 	if not worker.can_work_task(task, world, world.pathfinder):
 		return false
@@ -348,6 +510,7 @@ func transfer_task_to_arrived_worker(task, worker: Worker) -> bool:
 
 func reset_assignment_auction() -> void:
 	_reset_assignment_auction()
+	_reset_priority_round()
 	assist_requests_by_worker.clear()
 	assist_requests_by_id.clear()
 	haul_path_requests_by_worker.clear()
@@ -447,7 +610,7 @@ func has_assignable_pending_task() -> bool:
 	return _next_assignable_task() != null
 
 
-func has_assignable_pending_task_for_worker(worker: Worker) -> bool:
+func has_assignable_pending_task_for_worker(worker: Worker, priority_below: int = 10) -> bool:
 	if worker == null or not _is_worker_available(worker):
 		return false
 	var now_msec := Time.get_ticks_msec()
@@ -458,6 +621,10 @@ func has_assignable_pending_task_for_worker(worker: Worker) -> bool:
 			if task.type != task_type or task.accessibility == TaskQueue.TaskAccessibility.UNREACHABLE:
 				continue
 			if not worker.can_accept_task(task):
+				continue
+			if not _task_material_available(task):
+				continue
+			if worker.get_work_priority(Worker.WorkPrioritiesScript.task_work_id(task.type)) >= priority_below:
 				continue
 			if task.is_worker_unreachable(worker.worker_id, now_msec):
 				continue
@@ -472,9 +639,19 @@ func request_assist_path(worker: Worker, candidates: Array) -> bool:
 		return true
 	var goals: Array = []
 	var goal_task_ids: Dictionary = {}
+	var best_priority := 10
 	for entry: Dictionary in candidates:
 		var goal: Vector3i = entry["pos"]
 		var task = entry["task"]
+		if not worker.can_accept_task(task) or task.type == TaskQueue.TaskType.HAUL:
+			continue
+		var priority := worker.get_work_priority(Worker.WorkPrioritiesScript.task_work_id(task.type))
+		if priority > best_priority:
+			continue
+		if priority < best_priority:
+			best_priority = priority
+			goals.clear()
+			goal_task_ids.clear()
 		if goal_task_ids.has(goal):
 			continue
 		goals.append(goal)
@@ -495,6 +672,7 @@ func request_assist_path(worker: Worker, candidates: Array) -> bool:
 		"job_id": job_id,
 		"worker": worker,
 		"goal_task_ids": goal_task_ids,
+		"configuration": worker.get_work_configuration(),
 	}
 	assist_requests_by_worker[worker.worker_id] = request
 	assist_requests_by_id[request_id] = request
@@ -578,6 +756,7 @@ func _start_assignment_auction(task) -> void:
 	assignment_best_search_ms = 0.0
 	assignment_bids.clear()
 	assignment_pending_jobs.clear()
+	assignment_job_context.clear()
 	world.trace_task_event(task, "assignment_auction_started", "candidate_workers=%s" % _worker_ids(assignment_workers))
 	if _diagnostics_enabled():
 		world.live_diagnostics.observe("task", str(task.id), "auction_started", {"auction_id": assignment_auction_id, "candidate_count": assignment_workers.size()})
@@ -587,6 +766,10 @@ func _queue_worker_bid(task, worker: Worker) -> void:
 	if not worker.can_accept_task(task) or not _is_worker_available(worker):
 		if _diagnostics_enabled():
 			world.live_diagnostics.observe("worker", str(worker.worker_id), "bid_ineligible", {"task_id": task.id, "role_id": worker.role_id, "state": worker.state, "current_task_id": worker.current_task_id})
+		return
+	if not _task_material_available(task) or not _can_improve_priority_choice(task, worker):
+		# A proven higher-priority choice makes this path unnecessary this round.
+		# If it goes stale before commit, the next round retries all candidates.
 		return
 	var now_msec := Time.get_ticks_msec()
 	if task.is_worker_unreachable(worker.worker_id, now_msec):
@@ -601,6 +784,7 @@ func _queue_worker_bid(task, worker: Worker) -> void:
 		Worker.WORKER_PATH_SEARCH_MAX_ITERATIONS
 	)
 	assignment_pending_jobs[job_id] = worker
+	assignment_job_context[job_id] = {"task": task, "configuration": worker.get_work_configuration(), "start": worker.get_block_coord()}
 	if _diagnostics_enabled():
 		world.live_diagnostics.observe("worker", str(worker.worker_id), "assignment_bid_queued", {"task_id": task.id, "auction_id": assignment_auction_id, "job_id": job_id})
 	world.trace_worker_event(worker, "assignment_bid_queued", task, "job_id=%d" % job_id)
@@ -627,10 +811,19 @@ func _process_path_results() -> void:
 		var job_id: int = int(result.get("job_id", -1))
 		var worker: Worker = assignment_pending_jobs.get(job_id, null)
 		assignment_pending_jobs.erase(job_id)
+		var context: Dictionary = assignment_job_context.get(job_id, {})
+		assignment_job_context.erase(job_id)
 		var task = task_queue.get_task(int(result.get("task_id", -1)))
-		if worker == null or task == null:
+		if not is_instance_valid(worker) or task == null:
 			_observe_path_result(result, "assignment_result_cancelled", "worker_or_task_missing")
 			_record_path_disposition("assignment", "cancelled")
+			continue
+		if not context.is_empty() and (context["task"] != task \
+				or context["configuration"] != worker.get_work_configuration() \
+				or context["start"] != worker.get_block_coord()):
+			_record_path_disposition("assignment", "stale")
+			_observe_path_result(result, "assignment_bid_stale", "worker_configuration_or_identity_changed")
+			restart_auction = true
 			continue
 		var snapshot = result.get("snapshot", null)
 		if snapshot == null or not snapshot.revisions_match(world):
@@ -644,6 +837,7 @@ func _process_path_results() -> void:
 		_collect_worker_bid_result(task, worker, result)
 	if restart_auction:
 		_reset_assignment_auction()
+		_reset_priority_round()
 
 
 ## Exactly once per popped result, before any request/lifetime rejection.
@@ -749,6 +943,10 @@ func _process_assist_result(result: Dictionary) -> void:
 		_record_path_disposition("goals", "cancelled")
 		return
 	assist_requests_by_worker.erase(worker.worker_id)
+	if request.get("configuration", worker.get_work_configuration()) != worker.get_work_configuration():
+		_record_path_disposition("goals", "stale")
+		worker.task_search_timer = 0.0
+		return
 	var snapshot = result.get("snapshot", null)
 	if snapshot == null or not snapshot.revisions_match(world):
 		world.trace_worker_event(worker, "assist_path_stale", null, "request_id=%d" % request_id)
@@ -781,7 +979,9 @@ func _process_assist_result(result: Dictionary) -> void:
 	if task == null \
 		or task.status != TaskQueue.TaskStatus.IN_PROGRESS \
 		or task.assigned_worker == null \
-		or task.assigned_worker == worker:
+		or task.assigned_worker == worker \
+		or not worker.can_accept_task(task) \
+		or has_assignable_pending_task_for_worker(worker):
 		_record_path_disposition("goals", "cancelled")
 		worker.task_search_timer = 0.0
 		return
@@ -823,13 +1023,16 @@ func _collect_worker_bid_result(task, worker: Worker, result: Dictionary) -> voi
 	task.set_accessibility(TaskQueue.TaskAccessibility.REACHABLE, Time.get_ticks_msec())
 	if _diagnostics_enabled():
 		world.live_diagnostics.observe("task", str(task.id), "assignment_bid_received", {"worker_id": worker.worker_id, "path_length": maybe_path.size(), "search_ms": search_ms})
-	assignment_bids.append({
+	var bid := {
 		"worker": worker,
 		"path": maybe_path,
 		"path_length": maybe_path.size(),
 		"worker_id": worker.worker_id,
 		"search_ms": search_ms,
-	})
+		"snapshot": result.get("snapshot"),
+	}
+	assignment_bids.append(bid)
+	_remember_priority_bid(task, worker, bid)
 	if _is_better_assignment_bid(maybe_path.size(), worker.worker_id):
 		assignment_best_worker = worker
 		assignment_best_path = maybe_path.duplicate()
@@ -890,6 +1093,7 @@ func _reset_assignment_auction() -> void:
 	assignment_best_search_ms = 0.0
 	assignment_bids.clear()
 	assignment_pending_jobs.clear()
+	assignment_job_context.clear()
 
 
 func _worker_ids(worker_list: Array) -> String:
@@ -936,7 +1140,36 @@ func queue_task_request(task_type: int, pos: Vector3i, material: int) -> bool:
 			and task_queue.has_active_task_at(pos, TaskQueue.TaskType.DIG) \
 			and not task_queue.remove_pending_task_at(pos, TaskQueue.TaskType.DIG):
 		return false
-	add_task_to_queue(task_type, pos, material)
+	return add_task_to_queue(task_type, pos, material)
+
+
+func queue_stair_flight(anchor: Vector3i, rotation: int, up: bool) -> bool:
+	if world == null or not world.can_place_stair_flight(anchor, rotation, up):
+		return false
+	var cells := StairFlightScript.cells(anchor, rotation)
+	var expected: Array[int] = []
+	for cell: Vector3i in cells:
+		for existing_task in task_queue.get_active_tasks_at(cell):
+			if existing_task.type == TaskQueue.TaskType.DIG \
+					and existing_task.status == TaskQueue.TaskStatus.PENDING:
+				continue
+			return false
+		expected.append(world.get_block_no_generate(cell.x, cell.y, cell.z))
+	for cell: Vector3i in cells:
+		task_queue.remove_pending_task_at(cell, TaskQueue.TaskType.DIG)
+	var task_id := task_queue.add_stair_flight_task(
+		anchor,
+		rotation,
+		up,
+		StairFlightScript.lower_id(rotation),
+		StairFlightScript.upper_id(rotation),
+		expected
+	)
+	if task_id < 0:
+		return false
+	var task = task_queue.get_task(task_id)
+	if task == null:
+		return false
 	return true
 
 
@@ -947,24 +1180,52 @@ func cancel_pending_task_requests_at(pos: Vector3i) -> Array:
 	if removed.is_empty():
 		return removed
 	for task in removed:
-		if task.type == TaskQueue.TaskType.HAUL:
-			world.item_store.release_reservation(int(task.data.get("item_id", -1)), task.id)
-		world.trace_task_event(task, "task_cancelled", "reason=player_erase")
-		if task.id == assignment_task_id:
-			_reset_assignment_auction()
+		_finish_player_cancellation(task)
 	return removed
 
 
-func add_task_to_queue(task_type: int, pos: Vector3i, material: int) -> void:
+func cancel_pending_task(task_id: int, expected_task) -> bool:
+	var task = task_queue.get_task(task_id)
+	if task == null or task != expected_task or task.status != TaskQueue.TaskStatus.PENDING:
+		return false
+	if not task_queue.remove_task(task):
+		return false
+	_finish_player_cancellation(task)
+	return true
+
+
+func _finish_player_cancellation(task) -> void:
+	# SEE-ADR-008: Both UI cancellation routes preserve hauling cleanup.
+	if task.type == TaskQueue.TaskType.HAUL:
+		world.item_store.release_reservation(int(task.data.get("item_id", -1)), task.id)
+	world.trace_task_event(task, "task_cancelled", "reason=player_erase")
+	if task.id == assignment_task_id:
+		_reset_assignment_auction()
+
+
+func add_task_to_queue(task_type: int, pos: Vector3i, material: int) -> bool:
 	match task_type:
 		TaskQueue.TaskType.DIG:
-			task_queue.add_dig_task(pos)
+			return task_queue.add_dig_task(pos) >= 0
 		TaskQueue.TaskType.PLACE:
-			task_queue.add_place_task(pos, material)
+			return task_queue.add_place_task(pos, material) >= 0
 		TaskQueue.TaskType.STAIRS:
-			task_queue.add_stairs_task(pos, material)
+			return task_queue.add_stairs_task(pos, material) >= 0
 		TaskQueue.TaskType.HAUL:
-			pass
+			return false
+	return false
+
+
+func _stair_work_positions_for_task(task) -> Array[Vector3i]:
+	var rotation := -1
+	if task != null and task.data is Dictionary and bool(task.data.get("flight", false)):
+		rotation = int(task.data.get("rotation", -1))
+	return TaskWorkPositionRulesScript.stair_work_positions(
+		world,
+		world.pathfinder,
+		task.pos,
+		rotation
+	)
 #endregion
 
 
@@ -994,6 +1255,8 @@ func mark_worker_unreachable_for_task(task, worker: Worker) -> void:
 		world.live_diagnostics.observe("worker", str(worker.worker_id), "task_worker_unreachable", {"task_id": task.id, "marked_msec": now_msec, "ttl_msec": TaskQueue.WORKER_UNREACHABLE_TTL_MSEC})
 	world.trace_worker_event(worker, "task_worker_unreachable", task, "worker excluded from task assignment")
 	for candidate: Worker in world.workers:
+		if not candidate.can_accept_task(task):
+			continue
 		if not task.is_worker_unreachable(candidate.worker_id, now_msec):
 			return
 	_mark_task_path_blocked(task, now_msec)

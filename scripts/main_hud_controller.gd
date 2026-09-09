@@ -15,6 +15,7 @@ var current_world: World
 var current_stockpile_id := -1
 var render_level_base_y: int = 0
 var status_refresh_count := 0
+var retired := false
 var inventory_refresh_count := 0
 var stockpile_refresh_count := 0
 var generation_refresh_count := 0
@@ -79,6 +80,8 @@ func set_render_level_base(world: World) -> void:
 
 
 func update_status(world: World, hud_label: Label, info_block_id: int, info_block_pos: Vector3i) -> void:
+	if retired:
+		return
 	if world == null or hud_label == null:
 		return
 	status_refresh_count += 1
@@ -93,6 +96,8 @@ func update_status(world: World, hud_label: Label, info_block_id: int, info_bloc
 
 
 func update_generation_status(world: World) -> void:
+	if retired:
+		return
 	if world == null:
 		return
 	generation_refresh_count += 1
@@ -116,6 +121,8 @@ func _get_info_display_text(world: World, info_block_id: int, info_block_pos: Ve
 
 
 func update_inventory(world: World) -> void:
+	if retired:
+		return
 	if inventory_label == null or world == null:
 		return
 	inventory_refresh_count += 1
@@ -137,6 +144,8 @@ func update_inventory(world: World) -> void:
 
 
 func update_stockpile(world: World) -> void:
+	if retired:
+		return
 	if world == null:
 		return
 	stockpile_refresh_count += 1

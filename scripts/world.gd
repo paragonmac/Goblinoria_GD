@@ -7,6 +7,9 @@ signal stockpiles_changed
 signal player_mode_changed(mode: int)
 signal render_level_changed(level: int)
 
+# Runtime-only identity, independent of optional diagnostics and persistence.
+var runtime_epoch := 0
+
 const OVERLAY_REFRESH_TASKS := 1
 const OVERLAY_REFRESH_ITEMS := 2
 const OVERLAY_REFRESH_STOCKPILES := 4
@@ -28,6 +31,7 @@ const StockpileStoreScript = preload("res://scripts/world/stockpile_store.gd")
 const WorldChunkSpaceScript = preload("res://scripts/world/world_chunk_space.gd")
 const WorkerTraceScript = preload("res://scripts/diagnostics/worker_trace.gd")
 const WorkerRolesScript = preload("res://scripts/worker_roles.gd")
+const StairFlightScript = preload("res://scripts/stair_flight.gd")
 const ChunkDataType = ChunkDataScript
 #endregion
 
@@ -92,6 +96,9 @@ const TERRAIN_INNER_SOUTHWEST_ID := 120
 const TERRAIN_INNER_SOUTHEAST_ID := 121
 const TERRAIN_INNER_NORTHWEST_ID := 122
 const TERRAIN_INNER_NORTHEAST_ID := 123
+const STAIR_FLIGHT_LOWER_BASE_ID := 124
+const STAIR_FLIGHT_UPPER_BASE_ID := 128
+const STAIR_FLIGHT_BLOCK_IDS := [124, 125, 126, 127, 128, 129, 130, 131]
 const STAIR_BLOCK_ID := RAMP_NORTH_ID
 const PLAYER_STAIR_BLOCK_IDS := [
 	RAMP_NORTH_ID,
@@ -106,6 +113,14 @@ const PLAYER_STAIR_BLOCK_IDS := [
 	INNER_SOUTHEAST_ID,
 	INNER_NORTHWEST_ID,
 	INNER_NORTHEAST_ID,
+	124,
+	125,
+	126,
+	127,
+	128,
+	129,
+	130,
+	131,
 ]
 const TERRAIN_SLOPE_BLOCK_IDS := [
 	TERRAIN_SLOPE_NORTH_ID,
@@ -271,6 +286,7 @@ func _ready() -> void:
 
 #region World Initialization
 func init_world(seed_world_flag: bool = true) -> void:
+	runtime_epoch += 1
 	if live_diagnostics != null:
 		live_diagnostics.begin_world("world_initialized")
 	clear_tasks()
@@ -575,6 +591,77 @@ func can_place_stairs_at(x: int, y: int, z: int) -> bool:
 	return block_registry.is_replaceable(block_id)
 
 
+func can_place_stair_flight(anchor: Vector3i, rotation: int, up: bool, ignored_task_id: int = -1) -> bool:
+	if rotation < 0 or rotation >= StairFlightScript.ROTATION_COUNT:
+		return false
+	var flight_cells := StairFlightScript.cells(anchor, rotation)
+	for cell: Vector3i in flight_cells:
+		if not is_block_coord_valid(cell.x, cell.y, cell.z) \
+				or cell.y <= 0 or cell.y + 1 >= world_size_y \
+				or not _is_loaded_generated_cell(cell) \
+				or not _is_loaded_generated_cell(cell + Vector3i.DOWN) \
+				or not _is_loaded_generated_cell(cell + Vector3i.UP):
+			return false
+		if task_queue != null:
+			for existing_task in task_queue.get_active_tasks_at(cell):
+				if existing_task.id == ignored_task_id:
+					continue
+				if existing_task.type != TaskQueue.TaskType.DIG \
+						or existing_task.status == TaskQueue.TaskStatus.IN_PROGRESS:
+					return false
+		var block_id := get_block_no_generate(cell.x, cell.y, cell.z)
+		if up:
+			if not is_block_empty_id(block_id):
+				return false
+		else:
+			if is_block_empty_id(block_id) or is_ramp_block_id(block_id) \
+					or not block_registry.is_replaceable(block_id):
+				return false
+		var support_id := get_block_no_generate(cell.x, cell.y - 1, cell.z)
+		if not is_block_solid_id(support_id) or is_ramp_block_id(support_id):
+			return false
+		var headroom_id := get_block_no_generate(cell.x, cell.y + 1, cell.z)
+		if is_block_solid_id(headroom_id) and not is_ramp_block_id(headroom_id):
+			return false
+	return true
+
+
+func _is_loaded_generated_cell(pos: Vector3i) -> bool:
+	var chunk := get_chunk(world_to_chunk_coords(pos.x, pos.y, pos.z))
+	return chunk != null and chunk.generated
+
+
+func complete_stair_flight(task) -> bool:
+	if task == null or task.type != TaskQueue.TaskType.STAIRS:
+		return false
+	if task_queue.get_task(task.id) != task:
+		return false
+	if not bool(task.data.get("flight", false)):
+		return false
+	var anchor: Vector3i = task.pos
+	var rotation := int(task.data.get("rotation", -1))
+	var up := bool(task.data.get("up", false))
+	var flight_cells := StairFlightScript.cells(anchor, rotation)
+	if task.material != StairFlightScript.lower_id(rotation) or task.data.get("footprint", []) != flight_cells:
+		return false
+	if not can_place_stair_flight(anchor, rotation, up, task.id):
+		return false
+	var materials: Array = [StairFlightScript.lower_id(rotation), StairFlightScript.upper_id(rotation)]
+	if task.expected_blocks.size() != 2:
+		return false
+	for index in 2:
+		var cell: Vector3i = flight_cells[index]
+		if not get_workers_blocking_dig(cell).is_empty():
+			return false
+		if get_block_no_generate(cell.x, cell.y, cell.z) != task.expected_blocks[index]:
+			return false
+	# Preflight above is complete before either cell is mutated. Both writes occur
+	# on the main thread and use the task's immutable footprint/material pair.
+	set_block(flight_cells[0].x, flight_cells[0].y, flight_cells[0].z, int(materials[0]))
+	set_block(flight_cells[1].x, flight_cells[1].y, flight_cells[1].z, int(materials[1]))
+	return true
+
+
 func is_stairs_at(x: int, y: int, z: int) -> bool:
 	if not is_block_coord_valid(x, y, z):
 		return false
@@ -869,6 +956,12 @@ func queue_task_request(task_type: int, pos: Vector3i, material: int) -> bool:
 	if task_manager != null:
 		return task_manager.queue_task_request(task_type, pos, material)
 	return false
+
+
+func queue_stair_flight(anchor: Vector3i, rotation: int, up: bool) -> bool:
+	if task_manager == null:
+		return false
+	return task_manager.queue_stair_flight(anchor, rotation, up)
 
 
 func cancel_pending_task_requests_at(pos: Vector3i) -> Array:
@@ -1201,6 +1294,20 @@ func set_worker_role(worker_id: int, role_id: int, notify: bool = true) -> bool:
 func notify_worker_roles_changed() -> void:
 	if task_manager != null:
 		task_manager.notify_worker_availability_changed()
+
+
+func set_worker_work_priority(worker_id: int, work_id: String, value: int) -> bool:
+	if not WorkerRolesScript.WorkPrioritiesScript.is_valid_setting(work_id, value):
+		return false
+	for worker: Worker in workers:
+		if not is_instance_valid(worker) or worker.worker_id != worker_id:
+			continue
+		worker.work_priorities[work_id] = value
+		trace_worker_event(worker, "work_priority_changed", null, "%s=%d" % [work_id, value])
+		# Only pending decisions are invalidated. Active work and delivery paths survive.
+		notify_worker_roles_changed()
+		return true
+	return false
 #endregion
 
 

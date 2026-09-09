@@ -11,6 +11,7 @@ static func worker_snapshot(worker) -> Dictionary:
 	var data := {
 		"worker_id": worker.worker_id,
 		"role_id": worker.role_id,
+		"work_priorities": worker.get_work_configuration(),
 		"state": worker.state,
 		"current_task_id": worker.current_task_id,
 		"position": worker.position,
@@ -113,6 +114,7 @@ static func stockpile_snapshot(store, pos: Vector3i) -> Dictionary:
 	return {
 		"pos": pos,
 		"stockpile_id": stockpile_id,
+		"name": store.display_name(stockpile_id),
 		"exists": not stockpile.is_empty(),
 		"cell_capacity": store.BASE_CELL_CAPACITY,
 		"cell_count": stockpile.get("cells", []).size(),

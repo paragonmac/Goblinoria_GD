@@ -30,6 +30,7 @@ const WorkerRolesScript = preload("res://scripts/worker_roles.gd")
 
 #region State
 var panel: PanelContainer
+var colony_ui
 var title_label: Label
 var hint_label: Label
 var summary_label: Label
@@ -132,6 +133,10 @@ func setup(hud_layer: CanvasLayer, world: World) -> void:
 
 
 func toggle() -> void:
+	if colony_ui != null:
+		if colony_ui.category == "workers": colony_ui.close_management()
+		else: colony_ui.open_category("workers")
+		return
 	visible = not visible
 	if panel != null:
 		panel.visible = visible
@@ -144,6 +149,9 @@ func toggle() -> void:
 
 
 func open() -> void:
+	if colony_ui != null:
+		colony_ui.open_category("workers")
+		return
 	visible = true
 	if panel != null:
 		panel.show()
@@ -153,6 +161,8 @@ func open() -> void:
 
 
 func close() -> void:
+	if colony_ui != null:
+		colony_ui.close_management()
 	visible = false
 	if panel != null:
 		panel.visible = false

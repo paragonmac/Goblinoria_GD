@@ -9,6 +9,10 @@ Normal dig work is horizontal-only, so downward excavation needs an explicit acc
 
 ## Decision
 
+New two-cell player-tool placement and explicit wheel orientation are specified by
+ADR-018. The one-cell placement and inferred orientation below describe legacy
+stairs; their saved block identities remain supported.
+
 `UP_STAIRS` and `DOWN_STAIRS` player modes both create `STAIRS` task designations, and those tasks create ramp blocks. The task type stays shared because worker execution is the same: travel to the target, then place the chosen player-stair ramp material. Player stairs use a distinct block-ID range from generated terrain slopes; see ADR-011.
 
 Stair execution uses one shared work-position rule for accessibility, path goals, and live placement validation. Valid positions are the target or its four cardinal neighbors on the target level or one level above. Diagonal positions and positions two levels above are not valid.

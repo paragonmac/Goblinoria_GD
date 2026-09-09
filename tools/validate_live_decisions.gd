@@ -274,17 +274,29 @@ func _decision_scenario(enabled: bool) -> Array:
 	scheduler.results.append(_result(task.id, worker.worker_id, manager.assignment_auction_id, 1, [Vector3i(1, 1, 0)], stale))
 	manager._process_path_results()
 	_check(stale.checks == 1 and manager.assignment_task_id == -1 and worker.current_task_id == -1, "Stale path was accepted or revision check was repeated")
-	manager._start_assignment_auction(task)
-	manager._queue_worker_bid(task, worker)
-	manager._queue_worker_bid(task, second)
-	manager.assignment_worker_index = manager.assignment_workers.size()
-	var first_revision := RevisionSnapshot.new()
-	var second_revision := RevisionSnapshot.new()
-	scheduler.results.append(_result(task.id, second.worker_id, manager.assignment_auction_id, 3, [Vector3i(1, 1, 0)], second_revision))
-	scheduler.results.append(_result(task.id, worker.worker_id, manager.assignment_auction_id, 2, [Vector3i(1, 1, 0)], first_revision))
+	# Exercise the real sequential handoffs and later nomination reduction.
 	manager.update_task_assignments()
-	_check(task.assigned_worker == worker and worker.state == Worker.WorkerState.MOVING, "Equal length bids must assign lowest worker ID")
+	_check(manager.assignment_pending_jobs.size() == 1, "One assignment path in flight")
+	var first_job_id: int = manager.assignment_pending_jobs.keys()[0]
+	var first_revision := RevisionSnapshot.new()
+	scheduler.results.append(_result(task.id, worker.worker_id, manager.assignment_auction_id, first_job_id, [worker.get_block_coord()], first_revision))
+	manager.update_task_assignments()
+	_check(task.assigned_worker == null, "First completed bid must wait for remaining candidates")
+	_check(manager.assignment_pending_jobs.size() == 1, "Second assignment path handed off alone")
+	var second_job_id: int = manager.assignment_pending_jobs.keys()[0]
+	var second_revision := RevisionSnapshot.new()
+	scheduler.results.append(_result(task.id, second.worker_id, manager.assignment_auction_id, second_job_id, [second.get_block_coord()], second_revision))
+	manager.update_task_assignments()
 	_check(first_revision.checks == 1 and second_revision.checks == 1, "Diagnostics revalidated path results")
+	_check(task.assigned_worker == null, "Collecting nominations must not commit before reduction")
+	for _frame in range(12):
+		manager.update_task_assignments()
+		if task.assigned_worker != null: break
+	_check(task.assigned_worker == worker and worker.state == Worker.WorkerState.MOVING, "Equal length bids must assign lowest worker ID")
+	var revision_checks := [first_revision.checks, second_revision.checks]
+	Snapshots.worker_snapshot(worker)
+	Snapshots.task_snapshot(task)
+	_check(revision_checks == [first_revision.checks, second_revision.checks], "Inspection must not add commit-time revision validation")
 	worker.set_state(Worker.WorkerState.WAITING, world)
 	worker.waiting_repath_timer = 0.0
 	worker.update_waiting(0.0, world, queue, world.pathfinder)
@@ -331,6 +343,10 @@ func _decision_scenario(enabled: bool) -> Array:
 	_check(worker.state == Worker.WorkerState.IDLE and queue.get_task(haul.id) == null and worker.carried_count == 0, "Path invalidation changed interrupted haul cleanup")
 	_check(world.item_store.get_item(item_id).pos == worker.get_block_coord(), "Invalidated haul failed to drop at worker's actual location")
 	# Assist completions also consume exactly one existing revision decision.
+	worker.set_role(Roles.Role.MINER, world)
+	task.status = TaskQueue.TaskStatus.IN_PROGRESS
+	task.assigned_worker = second
+	second.current_task_id = task.id
 	manager.request_assist_path(worker, [{"task": task, "pos": Vector3i(2, 1, 0)}])
 	var assist_id: int = manager.assist_requests_by_worker[worker.worker_id].request_id
 	var stale_assist := RevisionSnapshot.new()
@@ -345,7 +361,7 @@ func _decision_scenario(enabled: bool) -> Array:
 		_check(recorder.events.is_empty() and recorder.invalidations.is_empty(), "Disabled decision diagnostics received calls")
 	for event in recorder.events:
 		_check(_plain(event), "Decision hook leaked engine object")
-	var state: Array = [worker.state, worker.current_task_id, worker.carried_source_item_id, task.status, task.accessibility, world.item_store.as_save_array(), queue.active_count(), queue.diagnostics_membership_revision, scheduler.enqueued]
+	var state: Array = [worker.state, worker.current_task_id, worker.carried_source_item_id, task.status, task.accessibility, world.item_store.as_save_array(), queue.active_count(), queue.diagnostics_membership_revision, scheduler.enqueued, first_revision.checks, second_revision.checks]
 	_dispose(world)
 	return state
 

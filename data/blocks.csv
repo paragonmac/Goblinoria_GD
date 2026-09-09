@@ -40,3 +40,11 @@ id,name,solid,hardness,replaceable,drop,color_r,color_g,color_b
 121,terrain_inner_se,1,1,0,0,0.7,0.6,0.35
 122,terrain_inner_nw,1,1,0,0,0.7,0.6,0.35
 123,terrain_inner_ne,1,1,0,0,0.7,0.6,0.35
+124,stair_flight_lower_n,1,1,0,0,0.7,0.6,0.35
+125,stair_flight_lower_e,1,1,0,0,0.7,0.6,0.35
+126,stair_flight_lower_s,1,1,0,0,0.7,0.6,0.35
+127,stair_flight_lower_w,1,1,0,0,0.7,0.6,0.35
+128,stair_flight_upper_n,1,1,0,0,0.7,0.6,0.35
+129,stair_flight_upper_e,1,1,0,0,0.7,0.6,0.35
+130,stair_flight_upper_s,1,1,0,0,0.7,0.6,0.35
+131,stair_flight_upper_w,1,1,0,0,0.7,0.6,0.35

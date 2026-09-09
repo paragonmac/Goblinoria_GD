@@ -6,6 +6,7 @@ class_name ChunkMesher
 const ChunkMesherPaddedBufferScript = preload("res://scripts/rendering/chunk_mesher_padded_buffer.gd")
 const ChunkMesherUvScript = preload("res://scripts/rendering/chunk_mesher_uv.gd")
 const ChunkMesherVisualsScript = preload("res://scripts/rendering/chunk_mesher_visuals.gd")
+const StairFlightScript = preload("res://scripts/stair_flight.gd")
 #endregion
 
 #region Constants
@@ -164,6 +165,20 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 				var block_id := padded_block(padded_blocks, padded_size, lx + 1, ly + 1, lz + 1, air_id)
 				if block_id == air_id:
 					continue
+				if is_flight_id(block_id):
+					var flight_base := Vector3(lx, ly, lz)
+					var flight_color := block_color_from_table(color_table, block_id, wx, wy, wz)
+					var flight_tile_index := _tile_index_for_id(block_id, tile_count)
+					var flight_tile_offset := _atlas_tile_offset(flight_tile_index, atlas_columns, tile_scale)
+					var flight_counts := add_stair_flight_faces(
+						vertices, normals, colors, uvs, uv2s, flight_base, block_id,
+						flight_color, float(wy) - 1.0, flight_tile_offset, tile_scale
+					)
+					visible_faces += int(flight_counts.get("visible", 0))
+					occluded_faces += int(flight_counts.get("occluded", 0))
+					ramp_visible_faces += int(flight_counts.get("visible", 0))
+					ramp_occluded_faces += int(flight_counts.get("occluded", 0))
+					continue
 				if not is_ramp_id(block_id, ramp_table):
 					continue
 
@@ -171,7 +186,9 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 				# Player stairs remain visible from their destination level. Generated terrain
 				# slopes use their physical level so a level cut removes the whole slope.
 				var block_center_y: float = float(wy)
-				if not World.is_terrain_slope_block_id(block_id):
+				if is_flight_id(block_id):
+					block_center_y = float(wy)
+				elif not World.is_terrain_slope_block_id(block_id):
 					block_center_y -= 1.0
 
 				var above_id := padded_block(padded_blocks, padded_size, lx + 1, ly + 2, lz + 1, air_id)
@@ -275,7 +292,7 @@ func _ensure_block_tables(world: World) -> void:
 	for i in range(BlockRegistry.TABLE_SIZE):
 		block_solid_table[i] = 1 if world.is_block_solid_id(i) else 0
 		block_color_table[i] = world.get_block_color(i)
-		block_ramp_table[i] = 1 if world.is_ramp_block_id(i) else 0
+		block_ramp_table[i] = 1 if world.is_ramp_block_id(i) or is_flight_id(i) else 0
 
 
 func _copy_neighbor_blocks(world: World, coord: Vector3i, missing_neighbors: Array) -> Variant:
@@ -317,17 +334,23 @@ func is_solid_id(block_id: int, solid_table: PackedByteArray) -> bool:
 
 func is_ramp_id(block_id: int, ramp_table: PackedByteArray) -> bool:
 	if block_id < 0 or block_id >= ramp_table.size():
-		return false
-	return ramp_table[block_id] != 0
+		return is_flight_id(block_id)
+	return ramp_table[block_id] != 0 or is_flight_id(block_id)
+
+
+func is_flight_id(block_id: int) -> bool:
+	return StairFlightScript.is_flight(block_id)
 
 
 func is_occluding_id(block_id: int, solid_table: PackedByteArray, ramp_table: PackedByteArray) -> bool:
-	if is_ramp_id(block_id, ramp_table):
+	if is_ramp_id(block_id, ramp_table) or is_flight_id(block_id):
 		return false
 	return is_solid_id(block_id, solid_table)
 
 
 func is_face_occluding(block_id: int, solid_table: PackedByteArray, ramp_table: PackedByteArray, neighbor_face: Vector3) -> bool:
+	if is_flight_id(block_id):
+		return false
 	if is_ramp_id(block_id, ramp_table):
 		return _ramp_side_is_full(block_id, neighbor_face)
 	return is_solid_id(block_id, solid_table)
@@ -615,7 +638,7 @@ func _add_greedy_x_side_faces(
 
 
 func _is_greedy_cube_block(block_id: int, air_id: int, ramp_table: PackedByteArray) -> bool:
-	return block_id != air_id and not is_ramp_id(block_id, ramp_table)
+	return block_id != air_id and not is_ramp_id(block_id, ramp_table) and not is_flight_id(block_id)
 
 
 func _make_greedy_cell(block_id: int, lx: int, ly: int, lz: int, cx: int, cy: int, cz: int, chunk_size: int, top_flag: float, visible_counted: bool, covered_from_above: bool) -> Dictionary:
@@ -1023,6 +1046,101 @@ func add_quad_double_sided(
 ) -> void:
 	add_quad_with_normal(vertices, normals, colors, uvs, uv2s, base, v1, v2, v3, v4, expected_normal, color, block_center_y, top_flag, tile_offset, tile_scale, false)
 	add_quad_with_normal(vertices, normals, colors, uvs, uv2s, base, v1, v2, v3, v4, expected_normal, color, block_center_y, top_flag, tile_offset, tile_scale, true)
+
+
+func build_stair_flight_half_mesh(stair_id: int) -> ArrayMesh:
+	var mesh := ArrayMesh.new()
+	if not is_flight_id(stair_id):
+		return mesh
+	var vertices := PackedVector3Array()
+	var normals := PackedVector3Array()
+	var colors := PackedColorArray()
+	var uvs := PackedVector2Array()
+	var uv2s := PackedVector2Array()
+	var color_table := PackedColorArray()
+	color_table.resize(BlockRegistry.TABLE_SIZE)
+	color_table[stair_id] = Color.WHITE
+	var tile_scale := _atlas_tile_scale(ATLAS_COLUMNS, ATLAS_ROWS)
+	var tile_offset := _atlas_tile_offset(_tile_index_for_id(stair_id, ATLAS_COLUMNS * ATLAS_ROWS), ATLAS_COLUMNS, tile_scale)
+	add_stair_flight_faces(
+		vertices,
+		normals,
+		colors,
+		uvs,
+		uv2s,
+		Vector3.ZERO,
+		stair_id,
+		Color.WHITE,
+		0.0,
+		tile_offset,
+		tile_scale
+	)
+	if vertices.is_empty():
+		return mesh
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_COLOR] = colors
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_TEX_UV2] = uv2s
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return mesh
+
+
+func add_stair_flight_faces(
+	vertices: PackedVector3Array,
+	normals: PackedVector3Array,
+	colors: PackedColorArray,
+	uvs: PackedVector2Array,
+	uv2s: PackedVector2Array,
+	base: Vector3,
+	block_id: int,
+	color: Color,
+	block_center_y: float,
+	tile_offset: Vector2,
+	tile_scale: Vector2
+) -> Dictionary:
+	var counts := {"visible": 0, "occluded": 0}
+	if not is_flight_id(block_id):
+		return counts
+	var h := FACE_HALF_SIZE
+	var heights: Dictionary = StairFlightScript.corner_heights(block_id, h)
+	var nw := base + Vector3(-h, _flight_corner_height(heights, "nw", -h), -h)
+	var ne := base + Vector3(h, _flight_corner_height(heights, "ne", -h), -h)
+	var se := base + Vector3(h, _flight_corner_height(heights, "se", -h), h)
+	var sw := base + Vector3(-h, _flight_corner_height(heights, "sw", -h), h)
+	var bnw := base + Vector3(-h, -h, -h)
+	var bne := base + Vector3(h, -h, -h)
+	var bse := base + Vector3(h, -h, h)
+	var bsw := base + Vector3(-h, -h, h)
+	add_quad_double_sided(vertices, normals, colors, uvs, uv2s, base, nw, sw, se, ne, Vector3.UP, color, block_center_y, 0.0, tile_offset, tile_scale)
+	add_quad_double_sided(vertices, normals, colors, uvs, uv2s, base, bnw, bne, bse, bsw, Vector3.DOWN, color, block_center_y, 0.0, tile_offset, tile_scale)
+	counts["visible"] = 4
+
+	# Keep the join face until a matching neighboring half is verified. This
+	# preserves a valid exposed face while either half is being removed or streamed.
+	var north_counts := _add_ramp_side(vertices, normals, colors, uvs, uv2s, base, Vector3.BACK, bnw, bne, nw, ne, color, block_center_y, tile_offset, tile_scale, false)
+	var south_counts := _add_ramp_side(vertices, normals, colors, uvs, uv2s, base, Vector3.FORWARD, bsw, bse, sw, se, color, block_center_y, tile_offset, tile_scale, false)
+	var east_counts := _add_ramp_side(vertices, normals, colors, uvs, uv2s, base, Vector3.RIGHT, bne, bse, ne, se, color, block_center_y, tile_offset, tile_scale, false)
+	var west_counts := _add_ramp_side(vertices, normals, colors, uvs, uv2s, base, Vector3.LEFT, bnw, bsw, nw, sw, color, block_center_y, tile_offset, tile_scale, false)
+	counts["visible"] += int(north_counts["visible"])
+	counts["visible"] += int(south_counts["visible"])
+	counts["visible"] += int(east_counts["visible"])
+	counts["visible"] += int(west_counts["visible"])
+	return counts
+
+
+func _flight_corner_height(heights: Dictionary, key: String, fallback: float) -> float:
+	if heights.has(key):
+		return float(heights[key])
+	var long_key: String = {
+		"nw": "north_west",
+		"ne": "north_east",
+		"se": "south_east",
+		"sw": "south_west",
+	}.get(key, key)
+	return float(heights.get(long_key, fallback))
 
 
 func add_ramp_faces(

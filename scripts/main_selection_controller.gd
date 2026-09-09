@@ -1,5 +1,7 @@
 extends RefCounted
 class_name MainSelectionController
+signal selection_feedback(message: String)
+signal cell_inspected(block_id: int, pos: Vector3i)
 ## Mouse drag selection, hover preview, and click-to-task logic.
 
 #region Constants
@@ -8,6 +10,7 @@ const ROUND_HALF := 0.5
 const CAMERA_RAYCAST_DISTANCE := 500.0
 const PLACE_HEIGHT_OFFSET := 1.0
 const PLACE_MATERIAL_ID := World.PLACE_MATERIAL_ID
+const Flight = preload("res://scripts/stair_flight.gd")
 #endregion
 
 #region Refs
@@ -23,6 +26,7 @@ var released_drag_event_id := 0
 var is_dragging := false
 var drag_start: Vector2
 var drag_plane_y: float = 0.0
+var stair_rotation := 0
 
 var info_block_id: int = -1
 var info_block_pos := Vector3i(-1, -1, -1)
@@ -57,6 +61,16 @@ func observe_input(event: InputEvent) -> void:
 func handle_unhandled_input(event: InputEvent) -> bool:
 	if world == null or camera == null or viewport == null:
 		return false
+	if _is_stair_mode() and event is InputEventMouseButton and event.button_index in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]:
+		if viewport.gui_get_hovered_control() != null:
+			return false
+		if event.pressed:
+			stair_rotation = posmod(stair_rotation + (1 if event.button_index == MOUSE_BUTTON_WHEEL_UP else -1), 4)
+			if is_dragging:
+				_update_drag_preview()
+			else:
+				update_hover_preview()
+		return true
 	if not event is InputEventMouseButton or event.button_index != MOUSE_BUTTON_LEFT:
 		return false
 	# Controls need not consume a release whose press began outside the GUI.
@@ -98,15 +112,13 @@ func update_hover_preview() -> void:
 		return
 
 	var hit_pos: Vector3i = hit["pos"]
+	if _is_stair_mode():
+		var anchor := _up_stair_target_from_hit(hit_pos) if world.player_mode == World.PlayerMode.UP_STAIRS else _down_stair_target_from_hit(hit_pos)
+		world.set_drag_preview_entries(_flight_preview_entries(anchor), world.player_mode)
+		return
 	var pos := hit_pos
 	var valid := true
-	if world.player_mode == World.PlayerMode.UP_STAIRS:
-		pos = _up_stair_target_from_hit(hit_pos)
-		valid = _can_place_up_stairs_at(pos)
-	elif world.player_mode == World.PlayerMode.DOWN_STAIRS:
-		pos = _down_stair_target_from_hit(hit_pos)
-		valid = _can_place_down_stairs_at(pos)
-	elif world.player_mode == World.PlayerMode.STOCKPILE:
+	if world.player_mode == World.PlayerMode.STOCKPILE:
 		pos = _stockpile_target_from_hit(hit_pos)
 		valid = _can_create_stockpile_at(pos)
 	else:
@@ -133,7 +145,7 @@ func update_info_hover() -> void:
 		return
 
 	var pos: Vector3i = hit["pos"]
-	info_block_id = world.get_block(pos.x, pos.y, pos.z)
+	info_block_id = world.get_block_no_generate(pos.x, pos.y, pos.z)
 	info_block_pos = pos
 
 
@@ -158,15 +170,20 @@ func _update_drag_preview() -> void:
 	if viewport == null or world == null:
 		return
 	var drag_now := viewport.get_mouse_position()
+	if _is_stair_mode():
+		var hit := _raycast_block_from_screen_pos(drag_now)
+		if hit.get("hit", false):
+			var anchor := _up_stair_target_from_hit(hit.pos) if world.player_mode == World.PlayerMode.UP_STAIRS else _down_stair_target_from_hit(hit.pos)
+			world.set_drag_preview_entries(_flight_preview_entries(anchor), world.player_mode)
+		else:
+			world.clear_drag_preview()
+		return
 	var drag_rect := _get_drag_rect(drag_start, drag_now, drag_plane_y)
 	if drag_rect.is_empty():
 		world.clear_drag_preview()
 		return
 	if world.player_mode == World.PlayerMode.DIG:
 		world.set_drag_preview_entries(_build_drag_preview_entries(drag_rect), world.player_mode)
-		return
-	if _is_stair_mode():
-		world.set_drag_preview_entries(_build_stair_preview_entries(drag_rect), world.player_mode)
 		return
 	if world.player_mode == World.PlayerMode.STOCKPILE:
 		world.set_drag_preview_entries(_build_stockpile_preview_entries(drag_rect), world.player_mode)
@@ -189,7 +206,8 @@ func _raycast_block_from_screen_pos(screen_pos: Vector2) -> Dictionary:
 		return {"hit": false}
 	var ray_origin := camera.project_ray_origin(screen_pos)
 	var ray_dir := camera.project_ray_normal(screen_pos)
-	return world.raycast_block(ray_origin, ray_dir, CAMERA_RAYCAST_DISTANCE)
+	return world.raycast_block(ray_origin, ray_dir, CAMERA_RAYCAST_DISTANCE,
+		world.player_mode != World.PlayerMode.INFORMATION and not _is_stair_mode())
 
 
 func _get_drag_plane_y(screen_pos: Vector2) -> float:
@@ -232,6 +250,10 @@ func _get_drag_rect(start: Vector2, end: Vector2, plane_y: float) -> Dictionary:
 
 
 func _commit_selection(start: Vector2, end: Vector2, rect: Dictionary) -> void:
+	# A stair tool stamps one complete flight, never overlapping rectangle cells.
+	if _is_stair_mode():
+		_handle_click(end)
+		return
 	if _is_click(start, end):
 		_handle_click(start)
 		return
@@ -284,6 +306,9 @@ func _handle_click(screen_pos: Vector2) -> void:
 		pos = _erase_target_from_hit(pos)
 	elif world != null and world.player_mode == World.PlayerMode.STOCKPILE:
 		pos = _stockpile_target_from_hit(pos)
+	if world.player_mode == World.PlayerMode.INFORMATION:
+		cell_inspected.emit(world.get_block_no_generate(pos.x, pos.y, pos.z), pos)
+		return
 	var result := _enqueue_task_at(pos.x, pos.y, pos.z)
 	_trace_selection("click", pos.x, pos.x, pos.z, pos.z, pos.y, [result])
 
@@ -301,7 +326,7 @@ func _enqueue_task_at(x: int, y: int, z: int) -> Dictionary:
 		return result
 	if not _is_valid_position(x, y, z):
 		return result
-	var block_id := world.get_block(x, y, z)
+	var block_id := world.get_block_no_generate(x, y, z) if _is_stair_mode() else world.get_block(x, y, z)
 	result["block_id"] = block_id
 
 	match world.player_mode:
@@ -322,13 +347,13 @@ func _enqueue_task_at(x: int, y: int, z: int) -> Dictionary:
 				result["reason"] = "no_stock"
 		World.PlayerMode.UP_STAIRS:
 			if _can_place_up_stairs_at(pos):
-				result["queued"] = world.queue_task_request(TaskQueue.TaskType.STAIRS, pos, _stair_material_for(pos))
+				result["queued"] = world.queue_stair_flight(pos, stair_rotation, true)
 				result["reason"] = "queued" if result["queued"] else "duplicate"
 			else:
 				result["reason"] = "up_stairs_not_placeable"
 		World.PlayerMode.DOWN_STAIRS:
 			if _can_place_down_stairs_at(pos):
-				result["queued"] = world.queue_task_request(TaskQueue.TaskType.STAIRS, pos, _stair_material_for(pos))
+				result["queued"] = world.queue_stair_flight(pos, stair_rotation, false)
 				result["reason"] = "queued" if result["queued"] else "duplicate"
 			else:
 				result["reason"] = "down_stairs_not_placeable"
@@ -338,7 +363,12 @@ func _enqueue_task_at(x: int, y: int, z: int) -> Dictionary:
 			result["queued"] = not removed.is_empty() or not removed_stockpiles.is_empty()
 			result["reason"] = "cancelled:%d stockpile_cells:%d" % [removed.size(), removed_stockpiles.size()] if result["queued"] else "nothing_to_erase"
 		World.PlayerMode.STOCKPILE:
-			result = _stockpile_result([pos] if _can_create_stockpile_at(pos) else [])
+			var cells: Array[Vector3i] = []
+			if _can_create_stockpile_at(pos):
+				cells.append(pos)
+			result = _stockpile_result(cells)
+			if cells.is_empty() and (world.is_stockpile_cell(pos) or world.is_stockpile_cell(pos + Vector3i.UP)):
+				result["feedback"] = "Already designated as stockpile"
 	return result
 
 
@@ -364,6 +394,11 @@ func _trace_selection(
 			queued.append(entry)
 		else:
 			rejected.append("%s:reason=%s" % [entry, result.get("reason", "unknown")])
+	var message := "%d accepted, %d rejected" % [queued.size(), rejected.size()]
+	if results.size() == 1 and queued.is_empty():
+		var reasons := {"no_stock": "Requires one stored iron ore", "not_empty": "Target is occupied", "no_valid_stockpile_cells": "No valid stockpile cells", "duplicate": "Already designated", "nothing_to_erase": "No pending designation to erase"}
+		message = str(results[0].get("feedback", reasons.get(results[0].get("reason", ""), "Action unavailable: " + str(results[0].get("reason", "unknown")))))
+	selection_feedback.emit(message)
 	var mode_name := str(World.PlayerMode.keys()[world.player_mode])
 	world.trace_system_event("selection_committed", "kind=%s mode=%s bounds=%d..%d:%d:%d..%d requested=%d queued=%d rejected=%d queued_positions=%s rejected_positions=%s" % [
 		kind,
@@ -413,13 +448,16 @@ func _build_drag_preview_entries(rect: Dictionary) -> Array[Dictionary]:
 
 
 func _build_stair_preview_entries(rect: Dictionary) -> Array[Dictionary]:
-	var entries: Array[Dictionary] = []
-	for pos: Vector3i in _rect_positions(rect):
-		entries.append({
-			"pos": pos,
-			"valid": _stair_preview_is_valid(pos),
-		})
-	return entries
+	return _flight_preview_entries(Vector3i(int(round(rect.max_x)), int(rect.y), int(round(rect.max_z))))
+
+
+func _flight_preview_entries(anchor: Vector3i) -> Array[Dictionary]:
+	var valid := _stair_preview_is_valid(anchor)
+	var cells := Flight.cells(anchor, stair_rotation)
+	return [
+		{"pos": cells[0], "valid": valid, "stair_material": Flight.lower_id(stair_rotation)},
+		{"pos": cells[1], "valid": valid, "stair_material": Flight.upper_id(stair_rotation)},
+	]
 
 
 func _build_erase_preview_entries(rect: Dictionary) -> Array[Dictionary]:
@@ -488,42 +526,21 @@ func _stair_preview_is_valid(pos: Vector3i) -> bool:
 	return false
 
 
-func _stair_material_for(pos: Vector3i) -> int:
-	# SEE-ADR-007: Stairs convert a planned cell into directional downward access.
-	for high_dir in _stair_high_side_dirs_for_planned_digs(pos):
-		if _has_walkable_stair_high_side(pos, high_dir):
-			return _ramp_id_for_high_side(high_dir)
-	for high_dir in _stair_cardinal_dirs():
-		if _has_walkable_stair_high_side(pos, high_dir):
-			return _ramp_id_for_high_side(high_dir)
-	return World.STAIR_BLOCK_ID
-
-
 func _up_stair_target_from_hit(hit_pos: Vector3i) -> Vector3i:
-	if world == null:
-		return hit_pos
-	var above := Vector3i(hit_pos.x, hit_pos.y + 1, hit_pos.z)
-	if _can_place_up_stairs_at(above):
-		return above
-	return hit_pos
+	return hit_pos + Vector3i.UP
 
 
 func _down_stair_target_from_hit(hit_pos: Vector3i) -> Vector3i:
-	return hit_pos
+	# Anchor the upper end at the clicked surface; the other half descends away.
+	return hit_pos - Flight.direction(stair_rotation)
 
 
 func _can_place_up_stairs_at(pos: Vector3i) -> bool:
-	return world != null \
-		and world.is_block_coord_valid(pos.x, pos.y, pos.z) \
-		and world.is_empty(pos.x, pos.y, pos.z) \
-		and world.can_place_stairs_at(pos.x, pos.y, pos.z)
+	return world != null and world.can_place_stair_flight(pos, stair_rotation, true)
 
 
 func _can_place_down_stairs_at(pos: Vector3i) -> bool:
-	return world != null \
-		and world.is_block_coord_valid(pos.x, pos.y, pos.z) \
-		and not world.is_empty(pos.x, pos.y, pos.z) \
-		and world.can_place_stairs_at(pos.x, pos.y, pos.z)
+	return world != null and world.can_place_stair_flight(pos, stair_rotation, false)
 
 
 func _erase_target_from_hit(hit_pos: Vector3i) -> Vector3i:
@@ -574,46 +591,6 @@ func _stockpile_result(cells: Array[Vector3i]) -> Dictionary:
 	result["queued"] = stockpile_id > 0
 	result["reason"] = "stockpile:%d cells:%d" % [stockpile_id, cells.size()] if result["queued"] else "stockpile_failed"
 	return result
-
-
-func _stair_high_side_dirs_for_planned_digs(pos: Vector3i) -> Array[Vector2i]:
-	var dirs: Array[Vector2i] = []
-	if world == null or world.task_queue == null:
-		return dirs
-	for high_dir in _stair_cardinal_dirs():
-		var low_dir := Vector2i(-high_dir.x, -high_dir.y)
-		var low_pos := Vector3i(pos.x + low_dir.x, pos.y, pos.z + low_dir.y)
-		if world.task_queue.has_active_task_at(low_pos, TaskQueue.TaskType.DIG):
-			dirs.append(high_dir)
-	return dirs
-
-
-func _has_walkable_stair_high_side(pos: Vector3i, high_dir: Vector2i) -> bool:
-	if world == null or world.pathfinder == null:
-		return false
-	var high_pos := Vector3i(pos.x + high_dir.x, pos.y + 1, pos.z + high_dir.y)
-	return world.pathfinder.is_walkable(world, high_pos.x, high_pos.y, high_pos.z)
-
-
-func _ramp_id_for_high_side(high_dir: Vector2i) -> int:
-	if high_dir == Vector2i(0, -1):
-		return World.RAMP_NORTH_ID
-	if high_dir == Vector2i(0, 1):
-		return World.RAMP_SOUTH_ID
-	if high_dir == Vector2i(1, 0):
-		return World.RAMP_EAST_ID
-	if high_dir == Vector2i(-1, 0):
-		return World.RAMP_WEST_ID
-	return World.STAIR_BLOCK_ID
-
-
-func _stair_cardinal_dirs() -> Array[Vector2i]:
-	return [
-		Vector2i(0, -1),
-		Vector2i(0, 1),
-		Vector2i(1, 0),
-		Vector2i(-1, 0),
-	]
 
 
 func _is_valid_position(x: int, y: int, z: int) -> bool:

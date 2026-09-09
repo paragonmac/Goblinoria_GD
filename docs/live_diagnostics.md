@@ -14,6 +14,11 @@ F1 works without enabling diagnostics, but that capture has current state only, 
 
 The small status line is below the performance recorder indicator. A menu capture includes the menu in its screenshot; capture does not hide UI or pause simulation to manufacture evidence.
 
+Both indicators occupy the colony UI's bottom status area. Game & Diagnostics
+links to the existing controls, but ordinary worker/job/resource explanations work
+with the bridge disabled. Enabling or disabling the bridge leaves renderer-owned
+read-only view snapshots untouched; prior view evidence is not cleared by a toggle.
+
 Status and chunk inspection expose asynchronous `visibility` / `visibility_state`: renderer-owned epoch, requested/accepted/fully-applied sequences, pending/running/result slots, application backlog, fallback mode, mixed-view flag, and ages measured from the originating requests. Ages continue increasing for an unchanged view; they are not proof of a backlog. These epochs are independent of live-diagnostics epochs. While application is partial or invalidated, `last_frustum_accepted` is unavailable; `effective_eligible` and node visibility describe current state. A last completed view is historical evidence, not proof that the current camera view has caught up. Inspection never drains results or changes the queue.
 
 ## Local Client

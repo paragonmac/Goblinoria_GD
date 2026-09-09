@@ -2,6 +2,13 @@ extends SceneTree
 
 var main
 
+func _settle_model() -> void:
+	for _step in range(100):
+		main.colony_ui.model.pump()
+		if not main.colony_ui.model.updating:
+			return
+	push_error("Colony presentation did not converge")
+
 
 func _init() -> void:
 	var scene: PackedScene = load("res://scenes/Main.tscn")
@@ -15,6 +22,8 @@ func _run_contract() -> void:
 	await process_frame
 
 	var hud = main.hud_controller
+	_settle_model()
+	var economy_before: Dictionary = main.colony_ui.model.snapshot().counts
 	var initial_status_count: int = hud.status_refresh_count
 	var initial_inventory_count: int = hud.inventory_refresh_count
 	var initial_stockpile_count: int = hud.stockpile_refresh_count
@@ -22,7 +31,8 @@ func _run_contract() -> void:
 		await process_frame
 	var idle_hud_ok: bool = hud.status_refresh_count == initial_status_count \
 		and hud.inventory_refresh_count == initial_inventory_count \
-		and hud.stockpile_refresh_count == initial_stockpile_count
+		and hud.stockpile_refresh_count == initial_stockpile_count \
+		and main.colony_ui.model.snapshot().counts == economy_before
 
 	main.world.update_task_overlays_phase()
 	var initial_overlay_counts: Dictionary = main.world.overlay_refresh_counts.duplicate()
@@ -32,8 +42,9 @@ func _run_contract() -> void:
 
 	var task_id: int = main.world.task_queue.add_dig_task(Vector3i(1, 1, 1))
 	await process_frame
-	var task_signal_ok: bool = hud.status_refresh_count == initial_status_count + 1 \
-		and main.hud_label.text.contains("Tasks: 1")
+	_settle_model()
+	var task_signal_ok: bool = main.colony_ui.model.snapshot().counts.jobs == 1 \
+		and main.colony_ui.model.list_rows("job").size() == 1
 	main.world.update_task_overlays_phase()
 	var task_overlay_signal_ok: bool = \
 		int(main.world.overlay_refresh_counts["tasks"]) == int(initial_overlay_counts["tasks"]) + 1 \
@@ -41,16 +52,18 @@ func _run_contract() -> void:
 		and int(main.world.overlay_refresh_counts["stockpiles"]) == int(initial_overlay_counts["stockpiles"])
 	main.world.task_queue.complete_task(main.world.task_queue.get_task(task_id))
 	await process_frame
+	_settle_model()
 	var completion_signal_ok: bool = main.world.task_queue.active_count() == 0 \
-		and main.hud_label.text.contains("Tasks: 0")
+		and main.colony_ui.model.snapshot().counts.jobs == 0
 	main.world.update_task_overlays_phase()
 
-	var previous_stockpile_count: int = hud.stockpile_refresh_count
+	var previous_stockpile_count: int = main.colony_ui.model.snapshot().counts.stockpiles
 	var pre_stockpile_overlay_count: int = int(main.world.overlay_refresh_counts["stockpiles"])
 	var stockpile_cells: Array[Vector3i] = [Vector3i(2, 1, 2)]
 	main.world.create_stockpile(stockpile_cells)
 	await process_frame
-	var stockpile_signal_ok: bool = hud.stockpile_refresh_count == previous_stockpile_count + 1
+	_settle_model()
+	var stockpile_signal_ok: bool = main.colony_ui.model.snapshot().counts.stockpiles == previous_stockpile_count + 1
 	main.world.update_task_overlays_phase()
 	var stockpile_overlay_signal_ok: bool = \
 		int(main.world.overlay_refresh_counts["stockpiles"]) == pre_stockpile_overlay_count + 1
@@ -88,9 +101,13 @@ func _run_contract() -> void:
 		and worker_window.poll_timer.is_stopped() \
 		and is_equal_approx(worker_window.poll_timer.wait_time, 0.2)
 	worker_window.toggle()
-	var worker_timer_active_ok: bool = not worker_window.poll_timer.is_stopped()
+	main.world_started = true
+	worker_window.open()
+	var worker_timer_active_ok: bool = worker_window.poll_timer.is_stopped() \
+		and main.colony_ui.category == "workers"
 	worker_window.close()
-	var worker_timer_stopped_ok: bool = worker_window.poll_timer.is_stopped()
+	var worker_timer_stopped_ok: bool = worker_window.poll_timer.is_stopped() \
+		and main.colony_ui.category.is_empty()
 	var generation_timer_ok: bool = main.generation_status_timer != null \
 		and is_equal_approx(main.generation_status_timer.wait_time, 0.25)
 

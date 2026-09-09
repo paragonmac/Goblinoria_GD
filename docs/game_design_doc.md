@@ -321,7 +321,7 @@ Fluid simulation should be simple enough to reason about and visual enough to pl
 
 ## User Interface And Player Tools
 
-Prototype boundary: seven shared tools, a right-click context menu, cell snapshots, worker details/idle role selection, task/item/stockpile overlays, and diagnostics exist. The stockpile filter HUD currently edits only the first stockpile. Broader management surfaces below remain design targets; automated input coverage is not graphical usability sign-off.
+Prototype boundary: the docked colony UI exposes seven shared tools, right-click actions/cell snapshots, searchable worker/job lists, a movable Jobs worker-list pop-out with selected per-worker priority details, pending-job cancellation, all named stockpile zones and their filters, physical-resource accounting, task/item/stockpile overlays, and existing diagnostics. Workers is informational; the task queue is labeled Tasks. Reusable player-created priority templates are deferred; the grouped work editor remains per-worker. Jobs enables hauling, mining and building at Off or 1-9; lower values win, equal priorities use cheapest reachable paths, and current jobs are not interrupted by edits. It distinguishes working, travelling, waiting and reserve workers; combat remains unavailable, but reserve workers can be assigned other existing work. Future GDD features remain grouped, explained and disabled through shared catalogs. Lighting and fog of war are future environment capabilities, with terrain-visibility acceptance deferred to that work; fire/smoke and temperature/pressure remain tentative. A UI entry does not implement its gameplay system. See [Colony UI](colony_ui.md) for controls and current limits; automated input coverage is not graphical usability sign-off.
 
 The UI should help the player plan and diagnose, not hide the simulation.
 
@@ -348,7 +348,7 @@ Important UI principles:
 
 Persistence is core because colony games create long-running stories.
 
-Current V6 behavior is narrower than the target requirements below: edited terrain, world metadata, physical item stacks, stockpile zones/filters, and worker role assignments persist. Workers respawn on load; queued designations, active tasks, worker positions, and work progress are not restored. Carried items become loose at the saving worker's position and transient reservations are cleared. Optional mesh caches accelerate rendering. Transactional slot replacement protects the previous save on failure. Full colony-session continuity remains future design/implementation work, not a completed capability.
+Current V8 behavior is narrower than the target requirements below: edited terrain (including two-cell stair flights and unchanged legacy one-cell stairs), world metadata, physical item stacks, stockpile zones/names/filters, worker role templates and per-worker work-priority overrides persist. V4-V7 remain readable with legacy defaults for absent names/priorities. Workers respawn on load; queued designations, active tasks, worker positions, and work progress are not restored. Carried items become loose at the saving worker's position and transient reservations are cleared. Optional mesh caches accelerate rendering. Transactional slot replacement protects the previous save on failure. Full colony-session continuity remains future design/implementation work, not a completed capability.
 
 Major persistence requirements:
 

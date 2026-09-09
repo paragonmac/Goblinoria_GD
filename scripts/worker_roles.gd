@@ -1,5 +1,6 @@
 extends RefCounted
 class_name WorkerRoles
+const WorkPrioritiesScript = preload("res://scripts/worker_work_priorities.gd")
 ## Static role templates. Workers share one state machine and differ by eligibility.
 
 enum Role {MINER, HAULER, FIGHTER}
@@ -65,7 +66,7 @@ static func allowed_task_types(role_id: int) -> Array[int]:
 
 
 static func can_accept_task(role_id: int, task_type: int) -> bool:
-	return allowed_task_types(role_id).has(task_type)
+	return WorkPrioritiesScript.default_priority(role_id, WorkPrioritiesScript.task_work_id(task_type)) > 0
 
 
 static func task_role_name(task_type: int) -> String:

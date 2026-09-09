@@ -15,6 +15,13 @@ Workers retain one shared state machine, pathing implementation, safety behavior
 - Hauler: HAUL.
 - Fighter: no current task type; it remains at its reserve position until combat work exists.
 
+ADR-017 makes these initial templates rather than permanent eligibility filters.
+Assignments can enable hauling, mining or building on any worker using Off or 1-9.
+Absent overrides preserve these template defaults at priority 2; explicit Off
+disables a type. Crafting and combat remain unavailable. Work-priority edits may
+occur during active jobs and affect the next assignment only; changing the legacy
+role template itself retains its idle-only restriction.
+
 Task assignment auctions include only workers whose role accepts the task. A structurally valid task with no eligible role becomes `NO_ELIGIBLE_WORKER`, distinct from a failed path search. Reassigning an idle worker role immediately requeues affected accessibility checks and auctions.
 
 New worlds begin with two Miners, one Hauler, and one Fighter. Roles are persisted in `workers.dat` as worker-ID/role-ID records. V5 saves without that file receive the default roster; V4 terrain-slope migration remains supported.

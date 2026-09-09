@@ -66,6 +66,7 @@ func enqueue(world, auction_id: int, task, worker: Worker, max_iterations: int) 
 		"worker_id": worker.worker_id,
 		"start": start,
 		"target": task.pos,
+		"flight_rotation": int(task.data.get("rotation", -1)) if task.data is Dictionary else -1,
 		"max_iterations": max_iterations,
 		"snapshot": snapshot,
 		"snapshot_ms": float(Time.get_ticks_usec() - snapshot_started_usec) / 1000.0,
@@ -211,7 +212,7 @@ func _run_search(job: Dictionary) -> Dictionary:
 	elif kind == "haul_delivery":
 		path = pathfinder.find_path(snapshot, start, target, false, false, max_iterations)
 	elif task_type == TaskQueue.TaskType.STAIRS:
-		path = _find_stairs_path(snapshot, pathfinder, start, target, max_iterations)
+		path = _find_stairs_path(snapshot, pathfinder, start, target, max_iterations, int(job.get("flight_rotation", -1)))
 	elif task_type == TaskQueue.TaskType.HAUL:
 		path = pathfinder.find_path(snapshot, start, target, false, false, max_iterations)
 	else:
@@ -268,7 +269,8 @@ func _find_stairs_path(
 	pathfinder: Pathfinder,
 	start: Vector3i,
 	target: Vector3i,
-	max_iterations: int
+	max_iterations: int,
+	flight_rotation: int = -1
 ) -> Array:
-	var candidates := TaskWorkPositionRulesScript.stair_work_positions(snapshot, pathfinder, target)
+	var candidates := TaskWorkPositionRulesScript.stair_work_positions(snapshot, pathfinder, target, flight_rotation)
 	return pathfinder.find_path_to_any(snapshot, start, candidates, max_iterations)

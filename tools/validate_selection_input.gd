@@ -7,6 +7,12 @@ class SelectionWorld:
 
 	var preview_rect: Dictionary = {}
 	var preview_entries: Array = []
+	var selection_trace := ""
+
+	func trace_system_event(event: String, details: String = "") -> void:
+		super.trace_system_event(event, details)
+		if event == "selection_committed":
+			selection_trace = details
 
 	func _ready() -> void:
 		_init_ramp_lookup()
@@ -92,7 +98,7 @@ func _run() -> void:
 	worker.free()
 	main.free()
 	if failures.is_empty():
-		print("Selection input contract OK (Main events, worker GUI, cancellation, terrain selection and stockpile erase)")
+		print("Selection input contract OK (Main events, worker GUI, cancellation, terrain selection and stockpile creation/erase)")
 		quit(0)
 	else:
 		for failure in failures:
@@ -211,7 +217,43 @@ func _validate_cancellation() -> void:
 func _validate_stockpile_erase() -> void:
 	var floor_pos := Vector3i(-9, 0, 6)
 	var cell := floor_pos + Vector3i.UP
-	world.create_stockpile([cell])
+	world.set_player_mode(World.PlayerMode.STOCKPILE)
+	await _click(_screen(floor_pos))
+	_check(world.is_stockpile_cell(cell) and world.stockpile_store.cells.size() == 1
+		and world.stockpile_store.stockpiles.size() == 1,
+		"Stockpile floor click did not create exactly one designation above the floor")
+	var stockpiles_before: Dictionary = world.stockpile_store.stockpiles.duplicate(true)
+	var cells_before: Dictionary = world.stockpile_store.cells.duplicate(true)
+	var next_id_before: int = world.stockpile_store.next_id
+	world.selection_trace = ""
+	await _click(_screen(floor_pos))
+	_check(world.selection_trace.contains("kind=click mode=STOCKPILE")
+		and world.selection_trace.contains("requested=1 queued=0 rejected=1")
+		and world.selection_trace.contains("reason=no_valid_stockpile_cells"),
+		"Repeated stockpile click did not complete with a traced no_valid_stockpile_cells rejection")
+	_check(world.stockpile_store.stockpiles == stockpiles_before
+		and world.stockpile_store.cells == cells_before and world.stockpile_store.next_id == next_id_before,
+		"Repeated stockpile click mutated the existing designation or allocated another stockpile")
+	_check(not main.selection_controller.is_dragging, "Repeated stockpile click left selection dragging")
+
+	# SEE-ADR-006: Hidden blocks do not intercept the floor raycast, but the
+	# occupied cell above that floor must still reject stockpile creation.
+	var invalid_floor := Vector3i(-8, 0, 6)
+	var invalid_cell := invalid_floor + Vector3i.UP
+	world.set_block_raw(invalid_cell.x, invalid_cell.y, invalid_cell.z, World.BLOCK_ID_GRANITE, true)
+	var previous_top := world.top_render_y
+	world.top_render_y = 0
+	world.selection_trace = ""
+	await _click(_screen(invalid_floor))
+	_check(world.selection_trace.contains("reason=no_valid_stockpile_cells"),
+		"Invalid stockpile click did not complete with a traced rejection")
+	_check(not world.is_stockpile_cell(invalid_cell) and world.stockpile_store.stockpiles == stockpiles_before
+		and world.stockpile_store.cells == cells_before and world.stockpile_store.next_id == next_id_before,
+		"Invalid stockpile target created or mutated a designation")
+	_check(not main.selection_controller.is_dragging and world.task_queue.active_count() == 0,
+		"Stockpile clicks left selection dragging or queued terrain tasks")
+	world.top_render_y = previous_top
+	world.set_block_raw(invalid_cell.x, invalid_cell.y, invalid_cell.z, World.BLOCK_ID_AIR, true)
 	world.set_player_mode(World.PlayerMode.ERASE)
 	_mouse_motion(_screen(floor_pos), false)
 	main.update_hover_preview()

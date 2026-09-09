@@ -3,6 +3,9 @@ class_name MainContextMenuController
 ## GUI-owned contextual actions and the world right-click/pan gesture.
 
 signal input_barrier_changed
+signal cell_inspected(block_id: int, pos: Vector3i)
+signal action_feedback(message: String)
+var external_inspector := false
 
 const ToolCatalog = preload("res://scripts/main_tool_catalog.gd")
 const PAN_THRESHOLD := 6.0
@@ -398,8 +401,8 @@ func _pending_tasks_at(pos: Vector3i) -> Array:
 	var result: Array = []
 	if world.task_queue == null:
 		return result
-	for task in world.task_queue.tasks:
-		if task.pos == pos and task.status == TaskQueue.TaskStatus.PENDING:
+	for task in world.task_queue.get_active_tasks_at(pos):
+		if task.status == TaskQueue.TaskStatus.PENDING:
 			# Instance identity also prevents an ID reused after queue replacement.
 			result.append(task)
 	return result
@@ -422,6 +425,9 @@ func _on_action_selected(id: int) -> void:
 			if not _cell_unchanged(_hit):
 				_target_changed()
 				return
+			if external_inspector:
+				cell_inspected.emit(int(_hit.block_id), _hit.pos)
+				return
 			snapshot_label.text = ToolCatalog.format_block_info(world, int(_hit.block_id), _hit.pos)
 			snapshot_panel.show()
 			_clamp_snapshot()
@@ -443,6 +449,9 @@ func _on_action_selected(id: int) -> void:
 
 
 func _target_changed() -> void:
+	if external_inspector:
+		action_feedback.emit("Target changed; reopen the menu")
+		return
 	status_label.text = "Target changed; reopen the menu"
 	status_label.show()
 	status_timer.start()

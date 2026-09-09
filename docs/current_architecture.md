@@ -15,9 +15,9 @@ Normal frame flow is:
 3. Camera, selection, streaming, world simulation, workers, tasks, and overlays update through `Main._run_frame_updates()`.
 4. Directional Y prewarm and background level warmup pump after the main update.
 
-HUD status, inventory, and stockpile sections refresh from coalesced state-change signals. Generation status polls every 250 ms, and the worker window polls every 200 ms only while open.
+`ColonyUIController` owns the docked player UI, with separate code-created theme/navigation, capability catalog, management panels and read-only presentation model. It replaces the production HUD/worker window and first-stockpile-only editor. Economy mutation signals invalidate coalesced observations; collection and filtering use bounded 128-record/1 ms pumps, worker activity refreshes every 200 ms, and visible lists page at 50 rows. Completed immutable data stays available with an Updating label during rebuilds; sustained mutations can postpone fresh economy publication. No diagnostic recording is required and no decisions are rerun to explain state. Main pumps the UI once per frame and measures `Main.colony_ui_ms`. See [UI controls](colony_ui.md) and [ADR-016](adr/ADR-016-colony-management-ui.md).
 
-`MainToolCatalog` shares the seven tool labels/modes/keys between keyboard selection, HUD, and the context menu. `MainContextMenuController` owns the script-created popup, right-click versus pan gesture, captured cell actions, and inspection snapshot. `MainCameraController` pans only through explicit begin/update/end calls. `Main` gates world controls while the popup owns input and synchronizes shortcut state on input-barrier changes; simulation/streaming still run. Menu/loading/focus/resize transitions cancel pointer ownership, and loading clears snapshots. Context raycasts use `generate_missing=false`, leaving the usual selection raycast behavior unchanged.
+`MainToolCatalog` shares the seven tool labels/modes/keys between keyboard selection, tool bar, and context menu. `MainContextMenuController` owns the script-created popup, right-click versus pan gesture and captured cell actions; its inspection uses the shared right-hand details dock. `MainCameraController` pans only through explicit begin/update/end calls. Main gates world controls for popup/text-field and GUI-origin gesture ownership, and synchronizes shortcut state without replay; simulation/streaming still run. Escape closes popups, then the most recent dock, then the menu. Loading/world replacement clears selections; runtime World epochs and exact entity identity reject reused targets without requiring diagnostics. Both context and Information inspection raycasts use `generate_missing=false`; designation behavior is unchanged.
 
 ## New World Flow
 
@@ -111,15 +111,24 @@ Terrain shaders retain exposed cave sides even when a solid block sits above the
 
 `WorldSaveLoad` orchestrates persistence, with metadata, bulk block data, physical item/stockpile state, and persistent mesh-cache file handling split into small helpers:
 
-- `world_meta.dat`: seed, spawn, top render Y, world dimensions, chunk size, block table hash, save version. Handled by `WorldMetadataSaveLoad`. V6 adds worker-role persistence; V5 receives the default role roster and V4 terrain-ramp migration remains supported.
+- `world_meta.dat`: seed, spawn, top render Y, world dimensions, chunk size, block table hash, save version. Handled by `WorldMetadataSaveLoad`. V7 adds named stockpiles and per-worker work priorities. V6 role saves, V5 default rosters and V4 terrain-ramp migration remain supported.
 - `world_blocks.dat`: finite-world bulk chunk block data with fill/raw/ZSTD entries. Handled by `WorldBulkChunkSaveLoad`.
 - `world_mesh_cache.dat`: optional raw mesh-cache acceleration data. Handled by `WorldMeshCacheSaveLoad`.
-- `items_stockpiles.dat`: physical item stacks and stockpile zones. Handled by `WorldItemStockpileSaveLoad`.
-- `workers.dat`: worker-ID to role-ID records. Handled by `WorldWorkerSaveLoad`; workers still respawn at normal positions on load.
+- `items_stockpiles.dat`: physical item stacks and named stockpile zones. Handled by `WorldItemStockpileSaveLoad`; legacy unnamed zones receive `Stockpile <id>`.
+- `workers.dat`: worker-ID to role-template-ID records and validated per-work priority overrides. Handled by `WorldWorkerSaveLoad`; workers still respawn at normal positions on load. Missing legacy overrides use the role defaults; Off is an explicit zero, not a missing value.
 
 Current save formats are not changed by housekeeping refactors unless explicitly planned.
 
-Whole-world saves stage a complete slot in a reserved `.save-stage` sibling directory. Authoritative writers check write/flush completion before promotion; unloaded legacy chunks are folded into the bulk data. Promotion renames the previous slot to a `.save-backup` sibling, then installs the stage. Failures restore the previous slot and in-memory persistence state; if rollback itself fails, the backup is retained for recovery on the next load/save. The active slot pointer and chunk dirty flags change only after promotion succeeds. Optional mesh-cache failure omits that cache without failing an otherwise valid save. This changes transaction handling, not the V6 file format.
+Whole-world saves stage a complete slot in a reserved `.save-stage` sibling directory. Authoritative writers check write/flush completion before promotion; unloaded legacy chunks are folded into the bulk data. Promotion renames the previous slot to a `.save-backup` sibling, then installs the stage. Failures restore the previous slot and in-memory persistence state; if rollback itself fails, the backup is retained for recovery on the next load/save. The active slot pointer and chunk dirty flags change only after promotion succeeds. Optional mesh-cache failure omits that cache without failing an otherwise valid save. The transaction mechanism is unchanged by the V7 name/priority additions.
+
+Workers is informational; Jobs opens a movable, non-modal worker-list pop-out
+(`jobs_worker_popup.gd`). Its selected worker's details edit numeric work settings through
+World's validated API. The work catalog maps Hauling to HAUL, Mining to DIG and
+Building to PLACE/STAIRS; future categories cannot dispatch. Lower numbers precede
+cheaper routes within each worker's choices, with Off disabling new claims. Active
+jobs survive edits. Stockpile renaming emits visual invalidation only, preserving
+IDs, reservations and hauling state. Explicit category/row clicks toggle panels;
+programmatic opens remain idempotent. See [ADR-017](adr/ADR-017-work-priorities-and-stockpile-names.md).
 
 ## Gameplay Systems
 
@@ -137,6 +146,14 @@ Task accessibility is also dirty-driven. New or locally invalidated tasks enter 
 Persistent task, item, and stockpile overlays have independent dirty flags. They synchronize after relevant state changes or render-level changes; assigned pulse animation remains shader-driven. Drag and hover previews remain input-driven.
 
 Ordinary DIG work is horizontal-only: the worker and target block must share a Y level. Downward excavation requires the stairs workflow to establish controlled access to the next level.
+
+New stair tools stamp a two-cell, one-level flight with a shared `StairFlight`
+geometry contract. One task owns both halves; input chooses orientation explicitly
+using the wheel and the renderer shows a matching ghost. Flight job designations
+reuse the ghost half meshes, unit scale, and Up/Down depth and slice rules;
+assignment changes color and pulse without changing the footprint. Legacy one-cell stairs
+and terrain slopes retain their identities. V8 extends saved block identities;
+see [ADR-018](adr/ADR-018-two-cell-stair-flights.md).
 
 Worker activity tracing is toggled with `F11`. `WorkerTrace` writes transition, block-level movement, and task-overlay color events to timestamped CSV files under `user://diagnostics`, including worker coordinates, task targets, path progress, logical overlay colors, and renderer visibility state.
 

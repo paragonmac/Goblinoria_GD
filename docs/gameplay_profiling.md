@@ -6,7 +6,7 @@ The gameplay recorder observes normal play. It does not drive workers, generate 
 
 - **F12:** start or stop a recording after a world exists, including from the pause menu.
 - **Shift+F12:** mark a moment while recording, with detailed nearby frame data.
-- A small non-interactive indicator shows recording duration, segment, and marker/error status. The timing/debug overlays do not need to be visible. Existing F2-F11 controls are unchanged.
+- A small non-interactive indicator above the colony tool bar shows recording duration, segment, and marker/error status. The timing/debug overlays do not need to be visible. Existing F2-F11 controls are unchanged. The Game & Diagnostics category also exposes the existing controls.
 - GUI controls and open dropdowns/context menus retain input priority. A consumed capture shortcut is not replayed when the popup closes.
 
 Recording is off by default. A recording continues through menus, saves, loads, and world replacement. Focus loss takes precedence over the other segment labels; returning restores the current operation/menu/gameplay label. Context menus remain gameplay because the simulation continues under them.
@@ -36,6 +36,13 @@ Frame interval is monotonic elapsed time between frame boundaries. Simulation de
 In detailed rows, the timestamp is the current frame's start: its interval looks back to the previous frame start, while its Main/phase costs describe the current update. Inspect the preceding row as well when correlating a stall with work.
 
 World and Main phase timings describe parts of the update. Parent and child timings overlap; do not add all labels together. Path and mesh timings describe completed asynchronous work and must not be added to main-thread frame cost. A result received during capture may have begun before recording; the report measures completed-job costs, not a reconstruction of thread occupancy.
+
+`Main.colony_ui_ms` measures the management UI's bounded presentation/filter pumps,
+window-policy checks and control refreshes. It is real main-thread work, independent
+of diagnostic-overlay visibility, and is included in the measured Main duration.
+Control construction dispatched directly by input can occur outside that pump;
+frame intervals still reflect its cost. A 1 ms cooperative collection allowance
+does not bound all engine layout, input or rendering work.
 
 Streaming detail appears in F4 timings and F12 reports independently of overlay visibility:
 
