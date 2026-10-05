@@ -13,6 +13,10 @@ var last_access_tick: int = 0
 var generated: bool = false
 var mesh_state: int = MESH_STATE_NONE
 var mesh_revision: int = 0
+## Bumped only when block content changes. Remeshing, neighbor streaming and
+## other render-only invalidation leave it alone, so pathing does not depend
+## on rendering.
+var block_revision: int = 0
 #endregion
 
 

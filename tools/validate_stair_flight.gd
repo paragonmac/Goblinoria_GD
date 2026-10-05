@@ -25,6 +25,7 @@ func _init() -> void:
 	_test_queue_and_atomic_completion()
 	_test_worker_completion()
 	_test_worker_blocked_and_stale_flights()
+	_test_side_access()
 	if failures == 0:
 		print("Stair flight contract OK (%d checks)" % checks)
 		quit(0)
@@ -98,7 +99,7 @@ func _test_path_contract() -> void:
 	_check(pathfinder.can_traverse(world, exit, cells[1]), "high-to-upper descent rejected")
 	_check(pathfinder.can_traverse(world, cells[1], anchor), "upper-to-lower midpoint rejected")
 	_check(pathfinder.can_traverse(world, anchor, entry), "low-side exit rejected")
-	_check(not pathfinder.can_traverse(world, Vector3i(1, 2, 0), anchor), "side approach entered lower half")
+	_check(not pathfinder.can_traverse(world, Vector3i(1, 2, 0), anchor), "unsupported side cell entered lower half")
 	_check(not pathfinder.can_traverse(world, cells[1], anchor + StairFlightScript.direction(rotation)), "high-side same-level exit allowed")
 	var worker := Worker.new()
 	_check(is_equal_approx(worker._ramp_center_offset(StairFlightScript.lower_id(rotation)), 0.25), "worker lower physical endpoint is wrong")
@@ -296,4 +297,57 @@ func _test_worker_blocked_and_stale_flights() -> void:
 		remaining.free()
 	world.workers.clear()
 	world.task_manager.shutdown()
+	world.free()
+
+
+func _test_side_access() -> void:
+	# Lower half: within half a level of the same floor, so its sides connect there.
+	# Upper half: within half a level of the next floor, so its sides connect up there.
+	var world := _make_world()
+	var pathfinder := Pathfinder.new()
+	for x in range(-3, 4):
+		for z in range(-3, 4):
+			_load_cell(world, Vector3i(x, 1, z), World.BLOCK_ID_GRANITE)
+			_load_cell(world, Vector3i(x, 2, z), World.BLOCK_ID_AIR)
+			_load_cell(world, Vector3i(x, 3, z), World.BLOCK_ID_AIR)
+	var anchor := Vector3i(0, 2, 0)
+	var rotation := 0
+	var cells := StairFlightScript.cells(anchor, rotation)
+	_load_cell(world, cells[0], StairFlightScript.lower_id(rotation))
+	_load_cell(world, cells[1], StairFlightScript.upper_id(rotation))
+	var lower_east := cells[0] + Vector3i(1, 0, 0)
+	var lower_west := cells[0] + Vector3i(-1, 0, 0)
+	_check(pathfinder.can_traverse(world, lower_east, cells[0]) and pathfinder.can_traverse(world, cells[0], lower_east), "Same-level floor reaches lower half from the east side")
+	_check(pathfinder.can_traverse(world, lower_west, cells[0]) and pathfinder.can_traverse(world, cells[0], lower_west), "Same-level floor reaches lower half from the west side")
+	var upper_west_floor := cells[1] + Vector3i(-1, 0, 0)
+	_check(not pathfinder.can_traverse(world, upper_west_floor, cells[1]), "Same-level floor cannot climb onto the upper half's side")
+	_check(not pathfinder.can_traverse(world, cells[1], upper_west_floor), "Upper half cannot drop to same-level floor at its side")
+	var upper_east_support := cells[1] + Vector3i(1, 0, 0)
+	_load_cell(world, upper_east_support, World.BLOCK_ID_GRANITE)
+	var upper_east_high := upper_east_support + Vector3i.UP
+	_check(pathfinder.can_traverse(world, upper_east_high, cells[1]) and pathfinder.can_traverse(world, cells[1], upper_east_high), "Next-level floor reaches upper half from its side")
+	_load_cell(world, cells[1] + Vector3i.UP, World.BLOCK_ID_GRANITE)
+	_check(not pathfinder.can_traverse(world, upper_east_high, cells[1]) and not pathfinder.can_traverse(world, cells[1], upper_east_high), "Covered upper half blocks side access to the next level")
+	_load_cell(world, cells[1] + Vector3i.UP, World.BLOCK_ID_AIR)
+	_load_cell(world, lower_east, World.BLOCK_ID_GRANITE)
+	var lower_east_high := lower_east + Vector3i.UP
+	_check(not pathfinder.can_traverse(world, lower_east_high, cells[0]) and not pathfinder.can_traverse(world, cells[0], lower_east_high), "Next-level floor cannot drop onto the lower half's side")
+	_load_cell(world, lower_west, World.TERRAIN_SLOPE_NORTH_ID)
+	_check(not pathfinder.can_traverse(world, lower_west, cells[0]) and not pathfinder.can_traverse(world, cells[0], lower_west), "Terrain slope beside a flight does not connect sideways")
+	world.free()
+
+	# Parallel flights: matching halves are level with each other.
+	world = _make_world()
+	for x in range(-3, 4):
+		for z in range(-3, 4):
+			_load_cell(world, Vector3i(x, 1, z), World.BLOCK_ID_GRANITE)
+			_load_cell(world, Vector3i(x, 2, z), World.BLOCK_ID_AIR)
+			_load_cell(world, Vector3i(x, 3, z), World.BLOCK_ID_AIR)
+	var left := StairFlightScript.cells(Vector3i(0, 2, 0), rotation)
+	var right := StairFlightScript.cells(Vector3i(1, 2, 0), rotation)
+	for pair in [left, right]:
+		_load_cell(world, pair[0], StairFlightScript.lower_id(rotation))
+		_load_cell(world, pair[1], StairFlightScript.upper_id(rotation))
+	_check(pathfinder.can_traverse(world, left[0], right[0]) and pathfinder.can_traverse(world, left[1], right[1]), "Matching halves of parallel flights connect sideways")
+	_check(not pathfinder.can_traverse(world, left[0], right[1]), "Mismatched halves do not connect diagonally")
 	world.free()

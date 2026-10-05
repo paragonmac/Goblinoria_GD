@@ -30,6 +30,7 @@ const ItemStackStoreScript = preload("res://scripts/world/item_stack_store.gd")
 const StockpileStoreScript = preload("res://scripts/world/stockpile_store.gd")
 const WorldChunkSpaceScript = preload("res://scripts/world/world_chunk_space.gd")
 const WorkerTraceScript = preload("res://scripts/diagnostics/worker_trace.gd")
+const AnomalyWatchdogScript = preload("res://scripts/diagnostics/anomaly_watchdog.gd")
 const WorkerRolesScript = preload("res://scripts/worker_roles.gd")
 const StairFlightScript = preload("res://scripts/stair_flight.gd")
 const ChunkDataType = ChunkDataScript
@@ -169,6 +170,7 @@ const SEA_LEVEL_MIN := 8
 
 #region Constants - Workers
 const WORKER_SPAWN_HEIGHT_OFFSET := 1.0
+const MAX_WORKERS := 200
 const WORKER_ACTIVITY_GRACE_SEC := 0.75
 const WORKER_SPAWN_OFFSETS := [
 	Vector2i(-10, -10),
@@ -223,6 +225,13 @@ var live_diagnostics = null
 var diagnostics_workers_revision := 0
 var diagnostics_workers_by_id: Dictionary = {}
 var worker_trace = WorkerTraceScript.new()
+# Debug builds only; logs suspicious states, never changes gameplay.
+var anomaly_watchdog = AnomalyWatchdogScript.new()
+const MAX_SIM_SPEED := 10
+var sim_speed := 1
+# Camera view handed in by Main before saving, and read back by the last load.
+var saved_view_state: Dictionary = {}
+var loaded_view_state: Dictionary = {}
 #endregion
 
 #region Worker State
@@ -273,6 +282,7 @@ func _ready() -> void:
 	stockpile_store.visual_state_changed.connect(_on_stockpile_visual_state_changed)
 	task_manager = TaskManager.new(self, task_queue)
 	generator = WorldGeneratorScript.new(self)
+	anomaly_watchdog.setup(self)
 	save_load = WorldSaveLoadScript.new(self)
 	arena_cooker = WorldArenaCookerScript.new(self)
 	streaming = WorldStreamingScript.new(self)
@@ -344,6 +354,7 @@ func load_world(path: String) -> bool:
 		live_diagnostics.mark_event("loading_finished", {"success": ok})
 	if ok:
 		clear_tasks()
+		save_load.restore_saved_tasks()
 	if ok and renderer != null:
 		renderer.set_top_render_y(top_render_y)
 		renderer.set_min_render_y(get_min_render_y())
@@ -494,6 +505,8 @@ func set_block_raw(x: int, y: int, z: int, value: int, mark_dirty: bool) -> void
 		touch_chunk(chunk)
 		return
 	chunk.blocks[idx] = value
+	# Path snapshots key on block content, not on render state.
+	chunk.block_revision += 1
 	if mark_dirty:
 		if performance_recorder != null and performance_recorder.enabled:
 			performance_recorder.add_counter("terrain_change")
@@ -820,6 +833,12 @@ func get_generation_stats() -> Dictionary:
 
 
 #region World Update Loop
+## Debug builds only: simulation steps per frame (1 = normal speed).
+func set_sim_speed(speed: int) -> int:
+	sim_speed = clampi(speed, 1, MAX_SIM_SPEED) if OS.is_debug_build() else 1
+	return sim_speed
+
+
 func update_world(dt: float) -> void:
 	update_world_controlled(dt, true)
 
@@ -829,12 +848,16 @@ func update_world_controlled(dt: float, advance_simulation: bool) -> void:
 	run_performance_timed("World.process_generation_results", process_generation_results)
 	run_performance_timed("World.update_render_height_queue", update_render_height_queue)
 	if advance_simulation:
-		run_performance_timed("World.update_task_assignments", update_task_assignments)
-		run_performance_timed("World.update_workers", update_workers.bind(dt))
-		run_performance_timed("World.update_task_queue", update_task_queue)
-		run_performance_timed("World.update_task_accessibility", update_task_accessibility)
-		run_performance_timed("World.update_reassign_tasks", update_reassign_tasks.bind(dt))
+		# Debug speed runs whole extra steps rather than scaling dt, so movement,
+		# support checks and timers behave exactly as at 1x.
+		for _step in sim_speed:
+			run_performance_timed("World.update_task_assignments", update_task_assignments)
+			run_performance_timed("World.update_workers", update_workers.bind(dt))
+			run_performance_timed("World.update_task_queue", update_task_queue)
+			run_performance_timed("World.update_task_accessibility", update_task_accessibility)
+			run_performance_timed("World.update_reassign_tasks", update_reassign_tasks.bind(dt))
 	run_performance_timed("World.update_task_overlays", update_task_overlays_phase)
+	run_performance_timed("World.anomaly_watchdog", anomaly_watchdog.tick.bind(dt, advance_simulation, sim_speed))
 
 
 func run_performance_timed(label: String, callback: Callable) -> void:
@@ -1287,6 +1310,7 @@ func _prewarm_sync_chunks(view_rect: Rect2, plane_y: float) -> void:
 
 func _exit_tree() -> void:
 	worker_trace.stop()
+	anomaly_watchdog.close()
 	if task_manager != null:
 		task_manager.shutdown()
 	if generator != null:
@@ -1314,6 +1338,93 @@ func spawn_initial_workers() -> void:
 		trace_worker_event(worker, "spawned")
 	if task_manager != null:
 		task_manager.notify_worker_availability_changed()
+
+
+## Debug roster control. New workers appear on an existing worker's cell (or the
+## spawn point) so they start somewhere reachable. Returns the number added.
+func add_workers(count: int) -> int:
+	var added := 0
+	for i in clampi(count, 0, MAX_WORKERS - workers.size()):
+		var worker := Worker.new()
+		worker.worker_id = _next_worker_id()
+		worker.role_id = WorkerRolesScript.default_spawn_role(workers.size())
+		worker.position = _debug_spawn_position(i)
+		add_child(worker)
+		workers.append(worker)
+		diagnostics_workers_by_id[worker.worker_id] = worker
+		diagnostics_workers_revision += 1
+		trace_worker_event(worker, "spawned")
+		added += 1
+	if added > 0 and task_manager != null:
+		task_manager.notify_worker_availability_changed()
+	return added
+
+
+## Removes the highest-ID workers first. Their jobs return to pending and any
+## carried item is released through the normal interruption path.
+func remove_workers(count: int) -> int:
+	var removed := 0
+	for i in clampi(count, 0, workers.size()):
+		var worker: Worker = workers.pop_back()
+		worker._interrupt_current_task(task_queue, self)
+		diagnostics_workers_by_id.erase(worker.worker_id)
+		diagnostics_workers_revision += 1
+		worker_chunk_cache.erase(worker)
+		trace_worker_event(worker, "despawned")
+		worker.queue_free()
+		removed += 1
+	if removed > 0 and task_manager != null:
+		task_manager.reset_assignment_auction()
+		task_manager.notify_worker_availability_changed()
+	return removed
+
+
+## Makes the live roster exactly match saved worker IDs (used after load
+## respawns the default roster). Positions and roles are applied by the caller.
+func sync_worker_roster(worker_ids: Array) -> void:
+	if worker_ids.is_empty():
+		return
+	for index in range(workers.size() - 1, -1, -1):
+		var worker: Worker = workers[index]
+		if not worker_ids.has(worker.worker_id):
+			workers.remove_at(index)
+			diagnostics_workers_by_id.erase(worker.worker_id)
+			worker_chunk_cache.erase(worker)
+			trace_worker_event(worker, "despawned")
+			worker.queue_free()
+	for worker_id in worker_ids:
+		if diagnostics_workers_by_id.has(int(worker_id)) or workers.size() >= MAX_WORKERS:
+			continue
+		var worker := Worker.new()
+		worker.worker_id = int(worker_id)
+		worker.role_id = WorkerRolesScript.default_spawn_role(workers.size())
+		worker.position = _debug_spawn_position(workers.size())
+		add_child(worker)
+		workers.append(worker)
+		diagnostics_workers_by_id[worker.worker_id] = worker
+		trace_worker_event(worker, "spawned")
+	diagnostics_workers_revision += 1
+	if task_manager != null:
+		task_manager.notify_worker_availability_changed()
+
+
+func _next_worker_id() -> int:
+	var max_id := 0
+	for worker: Worker in workers:
+		max_id = maxi(max_id, worker.worker_id)
+	return max_id + 1
+
+
+func _debug_spawn_position(index: int) -> Vector3:
+	for worker: Worker in workers:
+		if is_instance_valid(worker) and worker.state != Worker.WorkerState.FALLING:
+			var coord := worker.get_block_coord()
+			if worker._can_stand_at(self, coord.x, coord.y, coord.z):
+				return Vector3(coord.x, worker.position.y, coord.z)
+	var offset: Vector2i = WORKER_SPAWN_OFFSETS[index % WORKER_SPAWN_OFFSETS.size()]
+	var x := spawn_coord.x + offset.x
+	var z := spawn_coord.z + offset.y
+	return Vector3(x, find_surface_y(x, z) + WORKER_SPAWN_HEIGHT_OFFSET, z)
 
 
 func find_surface_y(x: int, z: int) -> int:

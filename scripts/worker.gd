@@ -197,6 +197,7 @@ func _update_falling(dt: float, world, task_queue) -> bool:
 		return false
 	if state != WorkerState.FALLING:
 		_trace(world, "fall_started", _current_task(task_queue))
+		_report_anomaly(world, "worker_fall", {"from": get_block_coord()})
 		_begin_fall(world, task_queue)
 	fall_target_y = _find_fall_target_y(world)
 	if fall_target_y < float(RESCUE_MIN_WALKABLE_Y) and _recover_to_surface(world, task_queue, "fall_target_below_walkable_floor"):
@@ -272,6 +273,7 @@ func _recover_to_surface(world, task_queue, reason: String) -> bool:
 		old_coord,
 		get_block_coord(),
 	])
+	_report_anomaly(world, "worker_rescued", {"reason": reason, "from": old_coord, "to": get_block_coord()})
 	return true
 
 
@@ -621,6 +623,7 @@ func update_moving(dt: float, world, task_queue, pathfinder) -> void:
 				if task != null and can_work_task(task, world, pathfinder):
 					movement_intent = MovementIntent.NONE
 					active_work_anim = _get_work_anim_for_task(task)
+					_face_task_work_target(task, world)
 					set_state(WorkerState.WORKING, world)
 					work_timer = _get_work_duration(world, task)
 					_trace_work_duration_resolved(world, task, work_timer)
@@ -792,6 +795,37 @@ func _get_dig_duration_for_block_id(block_id: int) -> float:
 
 func _update_facing_from_delta(delta: Vector3) -> void:
 	visuals.update_facing_from_delta(delta)
+
+
+func _face_task_work_target(task, world) -> void:
+	if task == null:
+		return
+	var target := Vector3(task.pos)
+	if task.type == TaskQueue.TaskType.STAIRS and bool(task.data.get("flight", false)):
+		var footprint = task.data.get("footprint", [])
+		if footprint is Array and not footprint.is_empty():
+			var nearest: Vector3i = footprint[0]
+			var nearest_distance := Vector3(nearest).distance_squared_to(position)
+			for cell in footprint:
+				var cell_pos: Vector3i = cell
+				var distance := Vector3(cell_pos).distance_squared_to(position)
+				if distance < nearest_distance:
+					nearest = cell_pos
+					nearest_distance = distance
+			target = Vector3(nearest)
+	elif task.type == TaskQueue.TaskType.HAUL:
+		var stage := str(task.data.get("stage", "pickup"))
+		if stage == "pickup":
+			if world != null and world.item_store != null:
+				var item: Dictionary = world.item_store.get_item(int(task.data.get("item_id", -1)))
+				var item_pos = item.get("pos")
+				if item_pos is Vector3i:
+					target = Vector3(item_pos)
+		else:
+			var destination = task.data.get("destination")
+			if destination is Vector3i:
+				target = Vector3(destination)
+	visuals.face_point(target)
 #endregion
 
 
@@ -1287,6 +1321,12 @@ func _worker_ids(worker_list: Array) -> String:
 func _trace(world, event: String, task = null, details: String = "") -> void:
 	if world != null:
 		world.trace_worker_event(self, event, task, details)
+
+
+func _report_anomaly(world, check: String, details: Dictionary) -> void:
+	var watchdog = world.get("anomaly_watchdog") if world != null else null
+	if watchdog != null:
+		watchdog.report_event(check, "worker:%d" % worker_id, details, self)
 
 
 func _diagnostics_enabled(world) -> bool:

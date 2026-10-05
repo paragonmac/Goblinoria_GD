@@ -115,7 +115,8 @@ Terrain shaders retain exposed cave sides even when a solid block sits above the
 - `world_blocks.dat`: finite-world bulk chunk block data with fill/raw/ZSTD entries. Handled by `WorldBulkChunkSaveLoad`.
 - `world_mesh_cache.dat`: optional raw mesh-cache acceleration data. Handled by `WorldMeshCacheSaveLoad`.
 - `items_stockpiles.dat`: physical item stacks and named stockpile zones. Handled by `WorldItemStockpileSaveLoad`; legacy unnamed zones receive `Stockpile <id>`.
-- `workers.dat`: worker-ID to role-template-ID records and validated per-work priority overrides. Handled by `WorldWorkerSaveLoad`; workers still respawn at normal positions on load. Missing legacy overrides use the role defaults; Off is an explicit zero, not a missing value.
+- `tasks.dat` (V9): pending dig, place, stair-build and stair-removal designations. Handled by `WorldTaskSaveLoad`; hauling is rebuilt from items/stockpiles, in-progress jobs reload as pending, and sites are revalidated by normal completion checks. `World.load_world` restores them after clearing the previous queue. V8 and older saves load with an empty queue.
+- `workers.dat`: worker-ID to role-template-ID records and validated per-work priority overrides. Handled by `WorldWorkerSaveLoad`; since V9 each record also stores the worker position, restored on load only when saved terrain still supports that cell (otherwise the default spawn is kept). Missing legacy overrides use the role defaults; Off is an explicit zero, not a missing value.
 
 Current save formats are not changed by housekeeping refactors unless explicitly planned.
 

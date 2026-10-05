@@ -45,6 +45,15 @@ Pathfinding and live movement agree on the intermediate half-height connection,
 low entry, high exit, headroom and invalidated connections. This is not two
 independently climbable full-height ramps.
 
+Amended 2026-10-05: flights also connect sideways where the height step is at
+most half a level. The lower half (surface 0 to 0.5 above its floor) joins flat
+floor on the same level along both sides; the upper half (0.5 to 1.0) joins flat
+floor on the next level along both sides, subject to the same headroom and
+support checks as the high exit. Matching halves of parallel flights connect
+sideways. Climbing onto the upper half from the lower floor, dropping onto the
+lower half from the upper floor, and side moves to or from terrain slopes remain
+rejected. Workers previously became trapped in pockets dug beside a flight.
+
 Normal mining uses a shared work-reach rule rather than a movement-into-target
 test. A worker on the lower half may mine a solid cell adjoining the low end on
 the same logical level, despite its fractional standing height. This does not
@@ -65,6 +74,8 @@ V8 adds the new block identities. V4-V7 saves remain readable through explicit
 compatibility handling; old stairs retain their original geometry. Mesh caches
 are versioned separately. Unfinished jobs still reset on load; this change does
 not add colony-session continuation or a material-delivery construction system.
+(Superseded 2026-10-05: V9 saves pending flight builds and removals in
+`tasks.dat`; they reload as pending jobs with their footprints.)
 
 ## Guardrails
 

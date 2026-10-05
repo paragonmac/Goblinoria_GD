@@ -10,7 +10,9 @@ var stage_dir := ""
 var backup_dir := ""
 
 
-func begin(destination: String) -> bool:
+## regenerated_files names top-level slot files or directories the caller will
+## rewrite or no longer needs; they are not copied into the stage.
+func begin(destination: String, regenerated_files: Array = []) -> bool:
 	if not _is_slot_path_safe(destination):
 		return false
 	world_dir = ProjectSettings.globalize_path(destination).simplify_path().trim_suffix("/")
@@ -28,8 +30,8 @@ func begin(destination: String) -> bool:
 		return false
 	if DirAccess.make_dir_recursive_absolute(stage_dir) != OK:
 		return false
-	# Preserve legacy chunks and other existing slot files.
-	if DirAccess.dir_exists_absolute(world_dir) and not _copy_tree(world_dir, stage_dir):
+	# Preserve other existing slot files unless the caller regenerates or drops them.
+	if DirAccess.dir_exists_absolute(world_dir) and not _copy_tree(world_dir, stage_dir, regenerated_files):
 		abort()
 		return false
 	return true
@@ -84,8 +86,21 @@ func _is_slot_path_safe(destination: String) -> bool:
 	return true
 
 
+const RENAME_ATTEMPTS := 10
+const RENAME_RETRY_MSEC := 50
+
+
+## Windows briefly locks freshly written files (antivirus, indexers), which
+## makes directory renames fail transiently. Retry for up to ~0.5 s before
+## reporting failure; a persistent error still fails the save normally.
 func _rename_directory(source: String, destination: String) -> Error:
-	return DirAccess.rename_absolute(source, destination)
+	var result := DirAccess.rename_absolute(source, destination)
+	for attempt in RENAME_ATTEMPTS - 1:
+		if result == OK or not DirAccess.dir_exists_absolute(source):
+			break
+		OS.delay_msec(RENAME_RETRY_MSEC)
+		result = DirAccess.rename_absolute(source, destination)
+	return result
 
 
 static func finish_write(file: FileAccess) -> bool:
@@ -100,7 +115,7 @@ static func finish_write(file: FileAccess) -> bool:
 	return ok and check != null and check.get_length() == expected_length
 
 
-func _copy_tree(source: String, destination: String) -> bool:
+func _copy_tree(source: String, destination: String, skip_files: Array = []) -> bool:
 	var dir := DirAccess.open(source)
 	if dir == null:
 		return false
@@ -115,7 +130,9 @@ func _copy_tree(source: String, destination: String) -> bool:
 		# Do not follow links out of the slot during copying or cleanup.
 		if dir.is_link(name):
 			return false
-		if dir.current_is_dir():
+		if skip_files.has(name):
+			pass
+		elif dir.current_is_dir():
 			if DirAccess.make_dir_absolute(to) != OK or not _copy_tree(from, to):
 				return false
 		elif DirAccess.copy_absolute(from, to) != OK:

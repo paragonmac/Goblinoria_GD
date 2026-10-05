@@ -115,7 +115,7 @@ func get_work_anim_for_task(task) -> StringName:
 
 
 func update_facing_from_delta(delta: Vector3) -> void:
-	if owner == null or model_instance == null:
+	if owner == null:
 		return
 	var dir := Vector3(delta.x, 0.0, delta.z)
 	if dir.length_squared() < 0.0001:
@@ -123,6 +123,12 @@ func update_facing_from_delta(delta: Vector3) -> void:
 	var target := owner.global_position + dir
 	target.y = owner.global_position.y
 	owner.look_at(target, Vector3.UP)
+
+
+func face_point(world_pos: Vector3) -> void:
+	if owner == null:
+		return
+	update_facing_from_delta(world_pos - owner.global_position)
 
 
 func _apply_config(config: Dictionary) -> void:

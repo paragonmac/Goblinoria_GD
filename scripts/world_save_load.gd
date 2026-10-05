@@ -9,6 +9,7 @@ const WorldMetadataSaveLoadScript = preload("res://scripts/world_metadata_save_l
 const WorldBulkChunkSaveLoadScript = preload("res://scripts/world_bulk_chunk_save_load.gd")
 const WorldMeshCacheSaveLoadScript = preload("res://scripts/world_mesh_cache_save_load.gd")
 const WorldWorkerSaveLoadScript = preload("res://scripts/world_worker_save_load.gd")
+const WorldTaskSaveLoadScript = preload("res://scripts/world_task_save_load.gd")
 const WorldSaveTransactionScript = preload("res://scripts/world_save_transaction.gd")
 const WorldGenerationSharedScript = preload("res://scripts/world/world_generation_shared.gd")
 const WorldTerrainHeightSamplerScript = preload("res://scripts/world/world_terrain_height_sampler.gd")
@@ -17,13 +18,18 @@ const WorldRampRulesScript = preload("res://scripts/world/world_ramp_rules.gd")
 
 #region Constants
 const CHUNK_MAGIC := 0x43484B53
-const SAVE_VERSION := 8
+const SAVE_VERSION := 9
 const LEGACY_SAVE_VERSION := 4
 const WORKER_ROLES_LEGACY_SAVE_VERSION := 5
 const NAMED_WORK_SETTINGS_LEGACY_SAVE_VERSION := 6
 const PREVIOUS_STAIR_FLIGHT_SAVE_VERSION := 7
-const LEGACY_SAVE_VERSIONS := [LEGACY_SAVE_VERSION, WORKER_ROLES_LEGACY_SAVE_VERSION, NAMED_WORK_SETTINGS_LEGACY_SAVE_VERSION, PREVIOUS_STAIR_FLIGHT_SAVE_VERSION]
+# V8 has no worker positions or saved designations; both default on load.
+const NO_TASKS_LEGACY_SAVE_VERSION := 8
+const LEGACY_SAVE_VERSIONS := [LEGACY_SAVE_VERSION, WORKER_ROLES_LEGACY_SAVE_VERSION, NAMED_WORK_SETTINGS_LEGACY_SAVE_VERSION, PREVIOUS_STAIR_FLIGHT_SAVE_VERSION, NO_TASKS_LEGACY_SAVE_VERSION]
 const CHUNK_DIR_NAME := "chunks"
+# Optional since V9: camera view at save time. Missing means the default view.
+const VIEW_FILE_NAME := "view.dat"
+const VIEW_MAGIC := 0x56494557
 const CHUNK_FILE_EXT := ".chunk"
 const COMPRESSION_NONE := 0
 #endregion
@@ -39,6 +45,9 @@ var metadata_save_load = WorldMetadataSaveLoadScript.new()
 var bulk_chunk_save_load = WorldBulkChunkSaveLoadScript.new()
 var mesh_cache_save_load = WorldMeshCacheSaveLoadScript.new()
 var worker_save_load = WorldWorkerSaveLoadScript.new()
+var task_save_load = WorldTaskSaveLoadScript.new()
+# Read during load; applied by World after it clears the previous task queue.
+var pending_task_snapshot: Dictionary = {}
 var save_transaction = WorldSaveTransactionScript.new()
 var legacy_terrain_slope_migration: bool = false
 #endregion
@@ -60,22 +69,48 @@ func clear_world_dir() -> void:
 
 func save_world(path: String) -> bool:
 	var world_dir := _world_dir_from_path(path)
-	if not save_transaction.begin(world_dir):
+	var start_usec := Time.get_ticks_usec()
+	# The mesh cache is rewritten whenever a renderer exists; copying the old one
+	# into the stage first only to truncate it doubled save I/O.
+	# Files this save rewrites are not copied into the stage first: copying then
+	# immediately reopening a fresh copy for writing races antivirus scans on
+	# Windows and wasted I/O. Only unknown slot files are carried over.
+	var regenerated: Array = [
+		WorldMetadataSaveLoad.META_FILE_NAME,
+		WorldBulkChunkSaveLoadScript.BULK_CHUNKS_FILE_NAME,
+		WorldItemStockpileSaveLoadScript.ITEM_STOCKPILE_FILE_NAME,
+		WorldWorkerSaveLoadScript.WORKER_FILE_NAME,
+		WorldTaskSaveLoadScript.TASK_FILE_NAME,
+		VIEW_FILE_NAME,
+	]
+	if world.renderer != null:
+		regenerated.append(WorldMeshCacheSaveLoadScript.MESH_CACHE_FILE_NAME)
+	# Legacy per-chunk files are folded into the bulk file below (read from the
+	# live slot, not the stage), and loading ignores them once bulk data exists.
+	# Copying ~30k small files dominated save time, so new slots omit them.
+	regenerated.append(CHUNK_DIR_NAME)
+	if not save_transaction.begin(world_dir, regenerated):
 		push_error("World save failed: %s" % world_dir)
 		return false
+	var begin_usec := Time.get_ticks_usec()
 	var previous_bulk_state := bulk_chunk_save_load.snapshot_state()
 	var previous_mesh_state := mesh_cache_save_load.snapshot_state()
 	var stage_dir: String = save_transaction.stage_dir
 	var ok := DirAccess.make_dir_recursive_absolute(_chunk_dir_path(stage_dir)) == OK \
 		and _write_world_meta(stage_dir) and _collect_legacy_chunks() and _save_bulk_chunks(stage_dir)
+	var bulk_usec := Time.get_ticks_usec()
+	var mesh_usec := bulk_usec
 	if ok:
-		if not _save_mesh_cache(stage_dir):
+		var mesh_ok := _save_mesh_cache(stage_dir)
+		mesh_usec = Time.get_ticks_usec()
+		if not mesh_ok:
 			# Cache data is optional, but a partial or stale cache must not be promoted.
 			var cache_path := stage_dir.path_join(WorldMeshCacheSaveLoadScript.MESH_CACHE_FILE_NAME)
 			if FileAccess.file_exists(cache_path):
 				ok = DirAccess.remove_absolute(cache_path) == OK
 			mesh_cache_save_load.restore_state(previous_mesh_state)
-		ok = ok and _save_items_and_stockpiles(stage_dir) and _save_workers(stage_dir)
+		ok = ok and _save_items_and_stockpiles(stage_dir) and _save_workers(stage_dir) \
+			and task_save_load.save_tasks(world, stage_dir) and _write_view(stage_dir)
 	if not ok or not save_transaction.promote():
 		bulk_chunk_save_load.restore_state(previous_bulk_state)
 		mesh_cache_save_load.restore_state(previous_mesh_state)
@@ -85,6 +120,11 @@ func save_world(path: String) -> bool:
 	for chunk in world.chunks.values():
 		var entry: ChunkData = chunk
 		entry.dirty = false
+	var end_usec := Time.get_ticks_usec()
+	print("World save: total %.0f ms (begin %.0f, blocks %.0f, mesh cache %.0f [%d entries], rest+promote %.0f)" % [
+		(end_usec - start_usec) / 1000.0, (begin_usec - start_usec) / 1000.0, (bulk_usec - begin_usec) / 1000.0,
+		(mesh_usec - bulk_usec) / 1000.0, int(mesh_cache_save_load.mesh_cache_stats.get("entries_saved", 0)),
+		(end_usec - mesh_usec) / 1000.0])
 	return true
 #endregion
 
@@ -92,6 +132,7 @@ func save_world(path: String) -> bool:
 #region Load
 func load_world(path: String) -> bool:
 	var load_start_usec: int = Time.get_ticks_usec()
+	pending_task_snapshot = {}
 	var world_dir := _world_dir_from_path(path)
 	if not save_transaction.recover(world_dir):
 		return false
@@ -121,6 +162,12 @@ func load_world(path: String) -> bool:
 	var worker_start_usec: int = Time.get_ticks_usec()
 	var worker_snapshot := worker_save_load.read_snapshot(world_dir)
 	if not bool(worker_snapshot.get("ok", false)):
+		return false
+	var task_snapshot := task_save_load.read_snapshot(world, world_dir)
+	if not bool(task_snapshot.get("ok", false)):
+		return false
+	var view_snapshot := _read_view(world_dir)
+	if not bool(view_snapshot.get("ok", false)):
 		return false
 	load_metrics["worker_roles_ms"] = _elapsed_ms(worker_start_usec)
 	var previous_bulk_state := bulk_chunk_save_load.snapshot_state()
@@ -157,6 +204,8 @@ func load_world(path: String) -> bool:
 		world.renderer.clear_chunks()
 		world.renderer.reset_stats()
 	item_stockpile_save_load.apply_snapshot(world, item_snapshot)
+	pending_task_snapshot = task_snapshot
+	world.loaded_view_state = view_snapshot.get("view", {})
 	last_load_metrics["total_save_load_ms"] = _elapsed_ms(load_start_usec)
 	return true
 
@@ -538,6 +587,36 @@ func _save_items_and_stockpiles(world_dir: String) -> bool:
 
 func _load_items_and_stockpiles(world_dir: String) -> bool:
 	return item_stockpile_save_load.load_items_and_stockpiles(world, world_dir)
+
+
+func _write_view(world_dir: String) -> bool:
+	var file := FileAccess.open(world_dir.path_join(VIEW_FILE_NAME), FileAccess.WRITE)
+	if file == null:
+		return false
+	var ok := file.store_32(VIEW_MAGIC) and file.store_var({"view": world.saved_view_state}, false)
+	return WorldSaveTransactionScript.finish_write(file) and ok
+
+
+func _read_view(world_dir: String) -> Dictionary:
+	var path := world_dir.path_join(VIEW_FILE_NAME)
+	if not FileAccess.file_exists(path):
+		return {"ok": true, "view": {}}
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null or file.get_32() != VIEW_MAGIC:
+		return {"ok": false}
+	var value = file.get_var(false)
+	if typeof(value) != TYPE_DICTIONARY or typeof(value.get("view")) != TYPE_DICTIONARY:
+		return {"ok": false}
+	# Field contents are validated when Main applies the view; bad fields only
+	# fall back to the default camera instead of rejecting the save.
+	return {"ok": true, "view": value.view}
+
+
+## Applies designations read by the last successful load. Returns the count.
+func restore_saved_tasks() -> int:
+	var restored: int = task_save_load.apply_snapshot(world, pending_task_snapshot)
+	pending_task_snapshot = {}
+	return restored
 
 
 func _save_workers(world_dir: String) -> bool:

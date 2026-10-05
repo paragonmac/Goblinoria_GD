@@ -94,15 +94,24 @@ func can_move_same_level(world, from: Vector3i, to: Vector3i) -> bool:
 		if StairFlightScript.is_upper(from_block) and StairFlightScript.is_lower(to_block):
 			return StairFlightScript.rotation_for(from_block) == StairFlightScript.rotation_for(to_block) \
 				and from == to + StairFlightScript.direction(StairFlightScript.rotation_for(to_block))
-		# A flight has no same-level side connection through its mid/high edge.
-		if StairFlightScript.is_lower(to_block) and not StairFlightScript.is_flight(from_block):
+		# Matching halves of parallel flights sit at the same height side by side.
+		if StairFlightScript.is_flight(from_block) and StairFlightScript.is_flight(to_block):
+			return StairFlightScript.is_lower(from_block) == StairFlightScript.is_lower(to_block) \
+				and StairFlightScript.rotation_for(from_block) == StairFlightScript.rotation_for(to_block) \
+				and _is_flight_side(dir, StairFlightScript.rotation_for(from_block))
+		# The lower half rises at most half a level above this floor, so it joins
+		# same-level flat floor at its low end and along both sides. The upper
+		# half's sides connect to the level above instead (can_change_level).
+		if StairFlightScript.is_lower(to_block):
 			var to_direction := StairFlightScript.direction(StairFlightScript.rotation_for(to_block))
-			return dir == Vector2i(to_direction.x, to_direction.z) \
-				and (not world.is_ramp_block_id(from_block) or _ramp_edge_has_low(from_block, dir))
-		if StairFlightScript.is_lower(from_block) and not StairFlightScript.is_flight(to_block):
+			if dir == Vector2i(to_direction.x, to_direction.z):
+				return not world.is_ramp_block_id(from_block) or _ramp_edge_has_low(from_block, dir)
+			return _is_flight_side(dir, StairFlightScript.rotation_for(to_block)) and not world.is_ramp_block_id(from_block)
+		if StairFlightScript.is_lower(from_block):
 			var from_direction := StairFlightScript.direction(StairFlightScript.rotation_for(from_block))
-			return dir == Vector2i(-from_direction.x, -from_direction.z) \
-				and (not world.is_ramp_block_id(to_block) or _ramp_edge_has_low(to_block, -dir))
+			if dir == Vector2i(-from_direction.x, -from_direction.z):
+				return not world.is_ramp_block_id(to_block) or _ramp_edge_has_low(to_block, -dir)
+			return _is_flight_side(dir, StairFlightScript.rotation_for(from_block)) and not world.is_ramp_block_id(to_block)
 		return false
 	if world.is_ramp_block_id(from_block) and not _ramp_edge_has_low(from_block, dir):
 		return false
@@ -127,16 +136,22 @@ func can_change_level(world, from: Vector3i, to: Vector3i) -> bool:
 			return false
 		var rotation := StairFlightScript.rotation_for(from_block if StairFlightScript.is_flight(from_block) else to_block)
 		var flight_dir := StairFlightScript.direction(rotation)
+		# The upper half reaches the next floor at its high end and lies within
+		# half a level of it along both sides; both connect to flat floor there.
 		if to.y == from.y + LEVEL_STEP:
+			var up_dir_ok: bool = dir == Vector2i(flight_dir.x, flight_dir.z) and to == from + flight_dir + Vector3i.UP
+			var up_side_ok: bool = _is_flight_side(dir, rotation) and not StairFlightScript.is_flight(to_block) \
+				and not world.is_ramp_block_id(to_block)
 			return StairFlightScript.is_upper(from_block) \
-				and dir == Vector2i(flight_dir.x, flight_dir.z) \
-				and to == from + flight_dir + Vector3i.UP \
+				and (up_dir_ok or up_side_ok) \
 				and not is_blocking(world, world.get_block_no_generate(from.x, to.y, from.z)) \
 				and is_walkable(world, to.x, to.y, to.z)
 		if to.y == from.y - LEVEL_STEP:
+			var down_dir_ok: bool = dir == Vector2i(-flight_dir.x, -flight_dir.z) and from == to + flight_dir + Vector3i.UP
+			var down_side_ok: bool = _is_flight_side(dir, rotation) and not StairFlightScript.is_flight(from_block) \
+				and not world.is_ramp_block_id(from_block)
 			return StairFlightScript.is_upper(to_block) \
-				and dir == Vector2i(-flight_dir.x, -flight_dir.z) \
-				and from == to + flight_dir + Vector3i.UP \
+				and (down_dir_ok or down_side_ok) \
 				and not is_blocking(world, world.get_block_no_generate(to.x, from.y, to.z)) \
 				and is_walkable(world, from.x, from.y, from.z)
 		return false
@@ -149,6 +164,11 @@ func can_change_level(world, from: Vector3i, to: Vector3i) -> bool:
 			return false
 		return world.is_ramp_block_id(to_block) and _ramp_edge_has_high(to_block, -dir)
 	return false
+
+
+func _is_flight_side(dir: Vector2i, rotation: int) -> bool:
+	var flight_dir := StairFlightScript.direction(rotation)
+	return dir.x * flight_dir.x + dir.y * flight_dir.z == 0
 
 
 func _ramp_edge_has_low(block_id: int, dir: Vector2i) -> bool:

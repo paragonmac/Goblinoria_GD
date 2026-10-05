@@ -86,7 +86,7 @@ Choose how the result will be accepted before delegating. Keep this decision bri
 - Streaming logic is in `scripts/world_streaming.gd` and renders via `scripts/rendering/world_renderer.gd`.
 
 ## Save/Load
-- Current V8 saves use bulk chunk data (including two-cell stair identities) plus metadata, named stockpiles/items, worker role templates/work priorities, and optional mesh caches, orchestrated by `scripts/world_save_load.gd`. V4-V7 remain readable with legacy defaults.
+- Current V9 saves use bulk chunk data (including two-cell stair identities) plus metadata, named stockpiles/items, worker role templates/work priorities/positions, pending designations (`tasks.dat`), and optional mesh caches, orchestrated by `scripts/world_save_load.gd`. V4-V8 remain readable with legacy defaults.
 - If the format changes, bump `SAVE_VERSION` and add mismatch checks.
 
 ## Tests / Runs

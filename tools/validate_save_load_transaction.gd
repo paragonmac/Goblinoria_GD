@@ -23,8 +23,8 @@ class FaultTransaction:
 			return ERR_FILE_CANT_WRITE
 		return super._rename_directory(source, destination)
 
-	func _copy_tree(source: String, destination: String) -> bool:
-		return super._copy_tree(source, destination) and not fail_copy
+	func _copy_tree(source: String, destination: String, skip_files: Array = []) -> bool:
+		return super._copy_tree(source, destination, skip_files) and not fail_copy
 
 
 class FaultSaveLoad:
@@ -207,7 +207,9 @@ func _test_save_failures() -> void:
 	_check(persistence.mesh_cache_save_load.snapshot_state() == live["mesh"], "optional cache failure restored cache state")
 	_check(persistence.current_world_dir == slot and not world.chunks[Vector3i.ZERO].dirty, "commit updates directory and dirty flags")
 	_check(FileAccess.get_file_as_bytes(slot.path_join("keep.dat")) == PackedByteArray([1, 2, 3]), "promotion preserved ancillary files")
-	_check(FileAccess.get_file_as_bytes(persistence._chunk_path(slot, Vector3i(2, 0, 0))) == old_bytes["chunks/2_0_0.chunk"], "promotion preserved chunk files")
+	# Legacy chunk files are folded into bulk data, and loads ignore them once
+	# bulk data exists; promotion no longer carries them forward.
+	_check(not FileAccess.file_exists(persistence._chunk_path(slot, Vector3i(2, 0, 0))), "promotion drops redundant legacy chunk files")
 	reader = _new_world()
 	_check(reader.load_world(path), "successful replacement loads")
 	_check(reader.world_seed == 222 and reader.top_render_y == 20, "replacement metadata round trip")
@@ -254,7 +256,7 @@ func _test_failed_loads() -> void:
 
 
 func _test_legacy_chunks() -> void:
-	for version in [4, 5, 6, 7, WorldSaveLoad.SAVE_VERSION]:
+	for version in [4, 5, 6, 7, 8, WorldSaveLoad.SAVE_VERSION]:
 		var world := _new_world()
 		var path := test_root.path_join("legacy_%d.save" % version)
 		var slot := path.get_basename()

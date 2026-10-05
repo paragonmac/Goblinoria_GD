@@ -73,6 +73,7 @@ var key_state: Dictionary = {}
 var input_state = preload("res://scripts/game_input_state.gd").new()
 # Set only by the isolated development bootstrap, before entering the tree.
 var playtest_mode := false
+var save_active := false
 var playtest_controller = null
 #endregion
 
@@ -252,6 +253,7 @@ func _setup_performance_capture() -> void:
 func _setup_live_diagnostics() -> void:
 	diagnostics_controller = MainDiagnosticsControllerScript.new()
 	diagnostics_controller.initialize(self)
+	world.anomaly_watchdog.playtest = playtest_mode
 
 
 func _setup_colony_ui(configure_window: bool = true) -> void:
@@ -297,7 +299,7 @@ func _sync_context_key_state() -> void:
 	# shortcut (especially Escape/W) cannot replay after the popup disappears.
 	for key in [KEY_ESCAPE, KEY_W, KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6, KEY_7,
 		KEY_COMMA, KEY_PERIOD, KEY_BRACKETLEFT, KEY_BRACKETRIGHT, KEY_F2, KEY_F3,
-		KEY_F4, KEY_F5, KEY_F6, KEY_F7, KEY_F8, KEY_F9, KEY_F10, KEY_F11]:
+		KEY_F4, KEY_F5, KEY_F6, KEY_F7, KEY_F8, KEY_F9, KEY_F10, KEY_F11, KEY_QUOTELEFT]:
 		key_state[key] = input_state.is_key_pressed(key)
 
 
@@ -413,6 +415,8 @@ func _handle_camera_rotation() -> void:
 
 
 func _handle_debug_keys() -> void:
+	if is_key_just_pressed(KEY_QUOTELEFT) and OS.is_debug_build():
+		toggle_sim_speed()
 	if debug_overlay == null:
 		return
 	if is_key_just_pressed(KEY_F2):
@@ -454,6 +458,13 @@ func _handle_render_layer_change(delta: int) -> void:
 func _handle_zoom_input(event: InputEvent) -> void:
 	if camera_controller != null:
 		camera_controller.handle_zoom_input(event)
+
+
+## Debug: flips simulation speed between 1x and 10x. Returns the new speed.
+func toggle_sim_speed() -> int:
+	if world == null:
+		return 1
+	return world.set_sim_speed(1 if world.sim_speed > 1 else World.MAX_SIM_SPEED)
 
 
 func is_key_just_pressed(keycode: int) -> bool:
@@ -661,11 +672,20 @@ func _on_save_pressed() -> void:
 		_set_menu_status("Save folder error.")
 		return
 
+	if save_active:
+		return
+	save_active = true
+	# Saving blocks the main thread; draw the status before it starts.
+	_set_menu_status("Saving...")
+	await get_tree().process_frame
+	await get_tree().process_frame
 	if performance_controller != null:
 		performance_controller.begin_operation("saving")
 	if diagnostics_controller != null:
 		diagnostics_controller.set_operation("saving")
+	world.saved_view_state = camera_controller.get_view_state() if camera_controller != null else {}
 	var ok := world.save_world(SAVE_PATH)
+	save_active = false
 	if diagnostics_controller != null:
 		diagnostics_controller.set_operation("")
 	if performance_controller != null:
@@ -762,6 +782,9 @@ func _finish_world_start_or_load(status_prefix: String, schedule_full_map_warmup
 	_set_render_level_base()
 	if camera_controller != null:
 		camera_controller.setup_camera(world)
+		# A loaded save's view replaces the default before the reveal is prepared.
+		camera_controller.apply_view_state(world.loaded_view_state)
+	world.loaded_view_state = {}
 	if render_level_controller != null:
 		render_level_controller.update_world(world)
 		await render_level_controller.prepare_world_for_reveal(status_prefix)

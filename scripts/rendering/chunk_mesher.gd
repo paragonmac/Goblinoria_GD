@@ -194,7 +194,9 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 				var above_id := padded_block(padded_blocks, padded_size, lx + 1, ly + 2, lz + 1, air_id)
 				var below_id := padded_block(padded_blocks, padded_size, lx + 1, ly, lz + 1, air_id)
 				var color_id := block_id
-				if below_id != air_id and not _is_inner_corner_id(block_id):
+				# Slopes, including inner corners, take the supporting block's look so
+				# they blend with the surrounding surface instead of reading as shards.
+				if below_id != air_id:
 					color_id = below_id
 				var color := block_color_from_table(color_table, color_id, wx, wy, wz)
 				var tile_id := color_id

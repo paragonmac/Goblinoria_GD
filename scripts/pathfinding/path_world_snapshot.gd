@@ -61,7 +61,7 @@ func capture_from_world(world, start: Vector3i, goals: Array, margin_xz: int, ma
 					chunk_revisions[coord] = -1
 					continue
 				chunks[coord] = chunk.blocks.duplicate()
-				chunk_revisions[coord] = chunk.mesh_revision
+				chunk_revisions[coord] = chunk.block_revision
 
 
 func is_block_coord_valid(x: int, y: int, z: int) -> bool:
@@ -99,14 +99,19 @@ func is_ramp_block_id(block_id: int) -> bool:
 	return block_id >= 0 and block_id < ramp_table.size() and ramp_table[block_id] != 0
 
 
+## A result stays valid unless terrain it actually searched has been edited.
+## Chunks absent from the snapshot were never traversable to the search, so
+## their later arrival cannot invalidate the route; an unloaded chunk keeps its
+## data in the bulk store, so eviction alone is not an edit either.
 func revisions_match(world) -> bool:
 	for coord: Vector3i in chunk_revisions:
 		var expected_revision: int = int(chunk_revisions[coord])
+		if expected_revision < 0:
+			continue
 		var chunk = world.get_chunk(coord)
-		var current_revision := -1
-		if chunk != null and chunk.generated:
-			current_revision = chunk.mesh_revision
-		if current_revision != expected_revision:
+		if chunk == null or not chunk.generated:
+			continue
+		if chunk.block_revision != expected_revision:
 			return false
 	return true
 

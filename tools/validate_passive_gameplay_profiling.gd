@@ -174,7 +174,7 @@ func _test_lifecycle() -> void:
 	_check(_recorder().segment == "menu", "focus return restores menu")
 	for success in [false, true]:
 		world.save_result = success
-		main._on_save_pressed()
+		await main._on_save_pressed()
 		_check(_recorder().enabled and _recorder().segment == "menu", "save outcome retains menu recording")
 		world.load_result = success
 		await main._load_world_with_loading()

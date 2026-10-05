@@ -13,6 +13,8 @@ var stockpile_name: LineEdit
 var _observed_stockpile_name := ""
 var cancel_job_button: Button
 var rows_signature := ""
+var sim_speed_label: Label
+var worker_count_label: Label
 
 func kind_for(category: String) -> String:
 	return {"workers": "worker", "assignments": "worker", "jobs": "job", "stockpiles": "stockpile", "resources": "resource"}.get(category, "")
@@ -31,7 +33,9 @@ func build(category: String, parent: VBoxContainer) -> void:
 	elif category == "world":
 		H.label(parent, "Seed: %s\nWorld: %d x %d x %d blocks\nInformation [1] selects a cell snapshot." % [ui.main.world.world_seed, ui.main.world.world_size_x, ui.main.world.world_size_y, ui.main.world.world_size_z])
 	elif category == "game":
-		H.label(parent, "Saves restore terrain, items, stockpile names, roles and work priorities. Workers respawn and unfinished jobs reset. Save before starting or loading another world.")
+		H.label(parent, "Saves restore terrain, items, stockpile names, roles, work priorities, worker positions, pending jobs and the camera view. Jobs in progress restart as pending. Save before starting or loading another world.")
+		if OS.is_debug_build():
+			_build_debug_controls(parent)
 	elif category == "defense":
 		H.label(parent, "Combat is not implemented yet. Open Jobs and select a worker to enable hauling, mining or building.")
 	elif category == "build":
@@ -56,6 +60,41 @@ func build(category: String, parent: VBoxContainer) -> void:
 			explanation.focus_entered.connect(ui.show_feedback.bind(str(feature.description)))
 		elif feature.status == "partial":
 			H.label(card, "Prototype: " + str(feature.description))
+
+## Debug builds only: simulation speed and worker roster controls.
+func _build_debug_controls(parent: VBoxContainer) -> void:
+	H.label(parent, "Debug")
+	var speed_row := HBoxContainer.new()
+	parent.add_child(speed_row)
+	sim_speed_label = H.label(speed_row, "")
+	for speed in [1, World.MAX_SIM_SPEED]:
+		H.button(speed_row, "%dx" % speed, _set_sim_speed.bind(speed))
+	var workers_row := HBoxContainer.new()
+	parent.add_child(workers_row)
+	worker_count_label = H.label(workers_row, "")
+	for delta in [-10, -1, 1, 10]:
+		H.button(workers_row, "%+d" % delta, _change_worker_count.bind(delta))
+	refresh_debug_controls()
+
+
+func refresh_debug_controls() -> void:
+	if is_instance_valid(sim_speed_label):
+		sim_speed_label.text = "Simulation speed: %dx  (` toggles)" % ui.main.world.sim_speed
+	if is_instance_valid(worker_count_label):
+		worker_count_label.text = "Workers: %d" % ui.main.world.workers.size()
+
+
+func _set_sim_speed(speed: int) -> void:
+	ui.main.world.set_sim_speed(speed)
+	refresh_debug_controls()
+
+
+func _change_worker_count(delta: int) -> void:
+	var world: World = ui.main.world
+	var changed: int = world.add_workers(delta) if delta > 0 else world.remove_workers(-delta)
+	ui.show_feedback("%s %d worker%s." % ["Added" if delta > 0 else "Removed", changed, "" if changed == 1 else "s"])
+	refresh_debug_controls()
+
 
 func _build_list(category: String, parent: VBoxContainer) -> void:
 	ui.search = LineEdit.new()

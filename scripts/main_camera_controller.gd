@@ -58,6 +58,33 @@ func reset_mouse_state() -> void:
 	free_orbit_prev_mouse_pos = Vector2.ZERO
 
 
+## Camera state persisted with saves (render level is saved separately).
+func get_view_state() -> Dictionary:
+	if camera == null:
+		return {}
+	return {"position": camera.position, "pitch": cam_pitch, "yaw": cam_yaw, "size": camera.size}
+
+
+## Restores a saved view after setup_camera. Returns false for unusable data.
+func apply_view_state(state: Dictionary) -> bool:
+	if camera == null or state.is_empty():
+		return false
+	var position = state.get("position")
+	if typeof(position) != TYPE_VECTOR3 or not position.is_finite():
+		return false
+	for key in ["pitch", "yaw", "size"]:
+		if typeof(state.get(key)) != TYPE_FLOAT or not is_finite(state[key]):
+			return false
+	camera.position = position
+	camera.size = clampf(float(state.size), cam_zoom_min, cam_zoom_max)
+	cam_pitch = float(state.pitch)
+	cam_yaw = float(state.yaw)
+	_apply_camera_rotation()
+	_clamp_camera_to_world()
+	reset_mouse_state()
+	return true
+
+
 func setup_camera(world: World) -> void:
 	if camera == null:
 		return

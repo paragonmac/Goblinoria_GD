@@ -132,6 +132,7 @@ func merge_generation_results_step(max_chunks: int) -> int:
 			if chunk == null:
 				continue
 			chunk.blocks = blocks.duplicate()
+			chunk.block_revision += 1
 			chunk.generated = true
 			chunk.dirty = false
 			chunk.mesh_state = ChunkData.MESH_STATE_NONE

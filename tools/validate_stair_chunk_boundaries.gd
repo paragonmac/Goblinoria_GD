@@ -102,7 +102,11 @@ func _test_flight(anchor: Vector3i, rotation: int, up: bool) -> void:
 	var reader := _new_world()
 	_check(reader.load_world(slot_path), "rotation %d up=%s reloads cross-chunk halves" % [rotation, up])
 	_check(_cell(reader, cells[0]) == Flight.lower_id(rotation) and _cell(reader, cells[1]) == Flight.upper_id(rotation), "rotation %d up=%s restores both saved half identities" % [rotation, up])
-	_check(reader.task_queue.active_count() == 0, "rotation %d up=%s keeps unfinished jobs out of save data" % [rotation, up])
+	# Since V9, pending designations survive save/load (WorldTaskSaveLoad).
+	var restored_dig := reader.task_queue.get_active_tasks_at(anchor + Vector3i(2, 0, 2))
+	_check(reader.task_queue.active_count() == 1 and restored_dig.size() == 1 \
+		and restored_dig[0].type == TaskQueue.TaskType.DIG and restored_dig[0].status == TaskQueue.TaskStatus.PENDING,
+		"rotation %d up=%s restores the unfinished dig as pending" % [rotation, up])
 	_check(reader.pathfinder.is_valid_flight_cell(reader, cells[0]) and reader.pathfinder.is_valid_flight_cell(reader, cells[1]), "rotation %d up=%s restored pair is traversable across chunks" % [rotation, up])
 	_dispose_world(reader)
 

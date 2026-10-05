@@ -14,6 +14,10 @@ const MESH_CACHE_FILE_NAME := "world_mesh_cache.dat"
 #region State
 var pending_mesh_cache_entries: Dictionary = {}
 var mesh_cache_stats: Dictionary = {}
+# Block data cannot change during a synchronous save, so each chunk is hashed
+# once per save instead of once per entry and per neighbor reference.
+var _save_hashes: Dictionary = {}
+var _save_hashes_active := false
 #endregion
 
 
@@ -52,6 +56,15 @@ func restore_state(snapshot: Dictionary) -> void:
 func save_mesh_cache(world: World, world_dir: String, bulk_chunk_blocks: Dictionary, block_table_hash: int) -> bool:
 	if world == null or world.renderer == null:
 		return true
+	_save_hashes.clear()
+	_save_hashes_active = true
+	var ok := _write_mesh_cache(world, world_dir, bulk_chunk_blocks, block_table_hash)
+	_save_hashes_active = false
+	_save_hashes.clear()
+	return ok
+
+
+func _write_mesh_cache(world: World, world_dir: String, bulk_chunk_blocks: Dictionary, block_table_hash: int) -> bool:
 	var path := world_dir.path_join(MESH_CACHE_FILE_NAME)
 	var file := FileAccess.open(path, FileAccess.WRITE)
 	if file == null:
@@ -179,13 +192,14 @@ func _persistent_mesh_cache_entry_for_coord(world: World, bulk_chunk_blocks: Dic
 	if mesh_entry.is_empty() and pending_mesh_cache_entries.has(coord):
 		var pending_entry = pending_mesh_cache_entries[coord]
 		if typeof(pending_entry) == TYPE_DICTIONARY and _is_mesh_cache_entry_shape_valid(pending_entry) and _is_mesh_cache_entry_valid_for_blocks(world, bulk_chunk_blocks, coord, blocks, pending_entry):
-			mesh_entry = pending_entry.duplicate(true)
+			# Only top-level keys are replaced below; packed arrays are copy-on-write.
+			mesh_entry = pending_entry.duplicate()
 	if mesh_entry.is_empty():
 		return {}
 	mesh_entry["cx"] = coord.x
 	mesh_entry["cy"] = coord.y
 	mesh_entry["cz"] = coord.z
-	mesh_entry["block_hash"] = _hash_block_buffer(blocks)
+	mesh_entry["block_hash"] = _hash_for_coord(coord, blocks)
 	mesh_entry["neighbor_hashes"] = _build_neighbor_hashes(world, bulk_chunk_blocks, coord)
 	return mesh_entry
 #endregion
@@ -217,7 +231,7 @@ func _is_mesh_cache_entry_valid_for_chunk(world: World, bulk_chunk_blocks: Dicti
 func _is_mesh_cache_entry_valid_for_blocks(world: World, bulk_chunk_blocks: Dictionary, coord: Vector3i, blocks: PackedByteArray, entry: Dictionary) -> bool:
 	if int(entry.get("local_top", -1)) != _mesh_cache_full_local_top():
 		return false
-	if _hash_block_buffer(blocks) != int(entry.get("block_hash", -1)):
+	if _hash_for_coord(coord, blocks) != int(entry.get("block_hash", -1)):
 		return false
 	var expected_neighbors = entry.get("neighbor_hashes", {})
 	if typeof(expected_neighbors) != TYPE_DICTIONARY:
@@ -245,10 +259,21 @@ func _build_neighbor_hashes(world: World, bulk_chunk_blocks: Dictionary, coord: 
 func _hash_blocks_for_coord_or_missing(world: World, bulk_chunk_blocks: Dictionary, coord: Vector3i) -> int:
 	if world == null or not world.is_chunk_coord_valid(coord):
 		return -1
+	if _save_hashes_active and _save_hashes.has(coord):
+		return _save_hashes[coord]
 	var blocks: PackedByteArray = _get_blocks_for_coord(world, bulk_chunk_blocks, coord)
 	if blocks.size() != World.CHUNK_VOLUME:
 		return -1
-	return _hash_block_buffer(blocks)
+	return _hash_for_coord(coord, blocks)
+
+
+func _hash_for_coord(coord: Vector3i, blocks: PackedByteArray) -> int:
+	if _save_hashes_active and _save_hashes.has(coord):
+		return _save_hashes[coord]
+	var hash_value := _hash_block_buffer(blocks)
+	if _save_hashes_active:
+		_save_hashes[coord] = hash_value
+	return hash_value
 
 
 func _get_blocks_for_coord(world: World, bulk_chunk_blocks: Dictionary, coord: Vector3i) -> PackedByteArray:

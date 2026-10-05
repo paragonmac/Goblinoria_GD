@@ -221,6 +221,7 @@ func tick(dt: float) -> void:
 			_start_filter()
 		_refresh_details()
 		model.refresh_workers()
+		panels.refresh_debug_controls()
 	for mode in _tool_buttons:
 		_tool_buttons[mode].set_pressed_no_signal(mode == main.world.player_mode)
 	level_label.text = "Level %d\nY %d" % [main.world.top_render_y - main.hud_controller.render_level_base_y, main.world.top_render_y]

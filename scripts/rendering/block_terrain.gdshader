@@ -12,6 +12,20 @@ const float ATLAS_COLUMNS = 4.0;
 const float ATLAS_ROWS = 4.0;
 const float GREEDY_UV2_FLAG = 2.0;
 const float COVERED_FROM_ABOVE_FLAG = 256.0;
+// Cut faces through solid ground are darkened and hatched so they read as
+// "inside the ground", not walkable floor.
+const float CUT_FACE_SHADE = 0.6;
+const float CUT_HATCH_SHADE = 0.4;
+const float CUT_HATCH_STRIPES_PER_BLOCK = 3.0;
+const float CUT_HATCH_LINE_WIDTH = 0.35;
+
+float cut_hatch_line() {
+	// preview_world_position comes from the shared vertex() in the include.
+	float coord = (preview_world_position.x + preview_world_position.z) * CUT_HATCH_STRIPES_PER_BLOCK;
+	float dist = abs(fract(coord) - 0.5) * 2.0;
+	float aa = fwidth(coord) * 2.0;
+	return 1.0 - smoothstep(CUT_HATCH_LINE_WIDTH - aa, CUT_HATCH_LINE_WIDTH + aa, dist);
+}
 
 void fragment() {
 	if (inside_excavation_preview()) { discard; }
@@ -45,4 +59,8 @@ void fragment() {
 	}
 	vec3 tex = texture(atlas_texture, texture_uv).rgb;
 	ALBEDO = tex * COLOR.rgb * height_shade;
+	// A surviving top face with top_flag set is a synthetic cut through solid ground.
+	if (top_flag > 0.5) {
+		ALBEDO *= CUT_FACE_SHADE * mix(1.0, CUT_HATCH_SHADE, cut_hatch_line());
+	}
 }

@@ -21,6 +21,21 @@ read-only view snapshots untouched; prior view evidence is not cleared by a togg
 
 Status and chunk inspection expose asynchronous `visibility` / `visibility_state`: renderer-owned epoch, requested/accepted/fully-applied sequences, pending/running/result slots, application backlog, fallback mode, mixed-view flag, and ages measured from the originating requests. Ages continue increasing for an unchanged view; they are not proof of a backlog. These epochs are independent of live-diagnostics epochs. While application is partial or invalidated, `last_frustum_accepted` is unavailable; `effective_eligible` and node visibility describe current state. A last completed view is historical evidence, not proof that the current camera view has caught up. Inspection never drains results or changes the queue.
 
+## Anomaly Watchdog
+
+Debug builds (normal play and playtest runs) always run `AnomalyWatchdog` (`scripts/diagnostics/anomaly_watchdog.gd`), independent of the live-diagnostics toggle. It is log-only: it never pauses, repairs or changes decisions. Release builds skip it.
+
+It appends one JSON object per line to `user://diagnostics/anomalies/<datetime>-<pid>/anomalies.jsonl`. Record kinds:
+
+- `session`: written at startup and on each world epoch change (new world or load).
+- `opened`: a condition held past its threshold; includes worker/task snapshots or chunk render state. Logged once per condition.
+- `resolved`: the condition cleared, its entity disappeared, or the world reset; includes `open_sec`.
+- `event`: immediate occurrences (`worker_fall`, `worker_rescued`, `worker_removed`, `task_cycling`), rate-limited to 20 per check per minute.
+
+Simulation checks run every 0.5 simulated seconds and use simulated time, so paused playtest frames never age them: worker invalid position, out of scene tree, inside solid, unsupported while not falling, no movement progress (30 s), missing current task, task assignment mismatch, in progress over 90 s, pending 60 s while an eligible worker idles, and release/reassign loops. Terrain checks use wall time and skip while visibility application is incomplete: visible generated chunk with no mesh build (30 s, startup and cache rebuilds legitimately take a while), ready without node, geometry hidden, or applied mesh revision behind the chunk revision (5 s each). Thresholds are in `AnomalyWatchdog.THRESHOLDS`; they are first-pass values, and false positives should be tuned there rather than suppressed downstream.
+
+Bounds: 5,000 records or 16 MiB per process, with a `suppressed_before` count on the next record after drops. Old session directories are not deleted automatically. When live diagnostics are enabled, each record also posts an `anomaly` event, so F1 bundles include recent anomalies. `tools/validate_anomaly_watchdog.gd` covers the simulation checks; terrain checks need a graphical renderer and are not covered headlessly.
+
 ## Local Client
 
 Run `tools/diagnostics_client.ps1` from PowerShell. It discovers local descriptors under the project's Godot user-data directory. Use `Get-Help ./tools/diagnostics_client.ps1 -Examples` or read the parameter block for discovery-root and session overrides. Multiple running games require explicit selection; stale descriptors are not trusted merely because they are newest.
