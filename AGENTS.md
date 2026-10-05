@@ -13,8 +13,25 @@ Local instructions for coding agents working in this repo.
 - Use subagents by default for non-trivial work when independent workstreams help. Skip delegation for trivial/tightly coupled work or when coordination costs more than doing the work locally; briefly explain the exception.
 - Keep write scopes disjoint. Give each agent a bounded task, relevant interfaces and constraints, and a concrete validation expectation. The main agent owns integration and final verification.
 - The user authorizes choosing different available subagent models and reasoning efforts without asking for each allocation. Set both explicitly when supported; do not assume the inherited model is cheap.
-- Optimize expected total cost to a verified result, including retries, review, integration, delay and consequences of mistakes. A contained failed Luna attempt can be good value; a successful premium-model attempt can still be poor allocation.
-- Prefer Luna as the first candidate for bounded, recoverable work, including substantial implementation. Do not limit it to documentation or infer a capability ceiling from model-tier branding.
+- Optimize expected total cost to a verified result, including coordination, checking, retries, integration, delay and consequences of mistakes. Delegate when producing, checking and integrating the result is expected to reduce total effort, or when independent challenge justifies the added cost. Expensive routing analysis can outweigh savings from avoiding a few inexpensive attempts.
+- Prefer Luna as the first candidate for bounded, recoverable work, including substantial implementation. Give inexpensive attempts substantial room when failure is cheap to detect and recover from. Do not limit Luna to documentation or infer a capability ceiling from model-tier branding.
+- The user authorizes stronger starting models and higher reasoning effort for open-ended judgment. Requests to question fundamentals, design from scratch, spend time or use a healthy budget favor deeper exploration. Choose the model for the role first, then its effort; a stronger coordinator does not automatically make a cheaper specialist sufficient.
+
+### Route By Acceptance Method
+
+Choose how the result will be accepted before delegating. Keep this decision brief:
+
+| Acceptance situation | Starting approach |
+|---|---|
+| Cheap, decisive validation | Give Luna substantial room to implement or investigate; verify behavior and contain failed attempts. |
+| Evidence can be checked selectively | Use Luna for source inspection, factual research and constrained candidates; the coordinator checks consequential claims. |
+| Quality depends heavily on open-ended judgment | Have the coordinator handle it directly or choose a stronger specialist from the start; no preliminary Luna attempt is required. |
+| Consequential decision with credible competing approaches | Assign independent challenge and verify the claims that distinguish the alternatives. |
+
+- For architectural research, give supporting agents concrete evidence tasks, such as finding dependencies an alternative would break, counterexamples or evidence against a proposal. A useful evidence report need not have the best overall recommendation.
+- Ask independent challengers to develop the strongest competing approach and identify evidence that would change the recommendation. Avoid steering every reviewer toward the same conclusion.
+- Multiple agreeing opinions can share blind spots. Stronger models also require evidence and proportionate review. When checking an opinion requires repeating the analysis, reconsider whether that delegation saves work.
+- Do not routinely score every task or launch agents to decide routing. Reserve a detailed 1-10 rubric for expensive or disputed allocations; treat scores as judgments until calibrated against outcomes.
 
 ### Concurrency Allowance
 
@@ -26,10 +43,10 @@ Local instructions for coding agents working in this repo.
 ### Starting Model And Effort Choices
 
 - `gpt-5.6-luna`, `low`/`medium`: straightforward implementation, mechanical edits, targeted searches, and running/summarizing existing validators.
-- `gpt-5.6-luna`, `high`/`max`: substantial, well-specified implementation or focused debugging with clear interfaces and independently checkable results. Examples include UI editors, filtering/pagination, profiler aggregation, pure culling logic, and regression tests. Use the effort warranted by the reasoning, not automatically Max for everything.
+- `gpt-5.6-luna`, `high`/`xhigh`/`max`: substantial, well-specified implementation or focused debugging with clear interfaces and independently checkable results. Examples include UI editors, filtering/pagination, profiler aggregation, pure culling logic, and regression tests. Use the effort warranted by the reasoning, not automatically Max for everything.
 - `gpt-5.6-terra`, `medium`/`high`: bounded subsystem work needing more discovery or judgment, when Luna's likely retries or integration burden outweigh its savings.
-- `gpt-5.6-sol`, `high`: cross-system ambiguity, hard-to-detect correctness failures, or expensive consequences that justify starting above Luna/Terra. Examples include assignment/pathfinding/hauling interactions and save compatibility design.
-- `gpt-6-astra`, `high`/`xhigh`: especially difficult architectural, concurrency or unresolved integration problems. Give a concrete reason for the premium model and extra effort; do not use it automatically for every review.
+- `gpt-5.6-sol`, `high`/`xhigh`: open-ended subsystem judgment, cross-system ambiguity, hard-to-detect correctness failures, or expensive consequences that justify starting above Luna/Terra. Examples include assignment/pathfinding/hauling interactions and save compatibility design.
+- `gpt-6-astra`, `high`/`xhigh`/`max`: broad architectural synthesis, challenges to foundational assumptions, or especially difficult concurrency and integration problems. Give a concrete reason for the model and effort; do not use it automatically for every review.
 - `gpt-5.5`: an explicitly requested or evidence-backed alternative, not a mandatory escalation tier. Choose a supported effort explicitly.
 - These are starting heuristics, not benchmark-proven capability boundaries or a required escalation ladder. Availability and supported efforts come from the current tool; disclose unavailable choices and fallbacks rather than silently substituting.
 
@@ -50,6 +67,8 @@ Local instructions for coding agents working in this repo.
 - After spawning, map the label to the returned app nickname (and retain the tool's agent ID for routing). These labels do not rename app-generated nicknames when the tool has no rename field.
 - If the model or effort is inherited and its resolved value is unavailable, say so. Use labels such as `Inherited(High)-3` or `Luna(Inherited)-3`; never guess the underlying setting. Announce any configuration change or fallback and update the label accurately.
 - In the final response, briefly report which labeled agents were used and their scopes. Distinguish requested configuration from independently confirmed runtime metadata when only the former is available.
+- Use the existing launch and final summaries as a compact allocation record: task/role, model/effort, acceptance method, outcome (accepted/corrected/reassigned), and integration burden. Include a short routing lesson when the outcome changes an allocation assumption; acceptance records the checks performed, not proof of correctness.
+- Do not create a separate routing log or benchmark project unless requested. Revisit routing rules using observed corrections, reassignments and integration effort; report measured usage when available and keep cost estimates distinct from actual charges.
 
 ## Project Tracking
 - GitHub Issues and the `Goblinoria Roadmap` GitHub Project are the source of truth for active work.
