@@ -171,6 +171,8 @@ const SEA_LEVEL_MIN := 8
 #region Constants - Workers
 const WORKER_SPAWN_HEIGHT_OFFSET := 1.0
 const MAX_WORKERS := 200
+const NEW_WORKER_WORK_PRIORITY := 2
+const ITEM_MAX_FALL_CELLS := 64
 const WORKER_ACTIVITY_GRACE_SEC := 0.75
 const WORKER_SPAWN_OFFSETS := [
 	Vector2i(-10, -10),
@@ -1112,6 +1114,33 @@ func clear_items_and_stockpiles() -> void:
 	refresh_inventory_from_stockpiles()
 
 
+## Where a loose item comes to rest: the first cell at or below pos that a
+## worker can stand on, or the stair/slope surface it lies on. Unloaded terrain
+## and solid cells leave the position unchanged rather than guessing.
+func item_rest_cell(pos: Vector3i) -> Vector3i:
+	if pathfinder == null:
+		return pos
+	# An item embedded in solid terrain stays put; it must not sink through.
+	if _is_loaded_generated_cell(pos) and pathfinder.is_blocking(self, get_block_no_generate(pos.x, pos.y, pos.z)):
+		return pos
+	var cell := pos
+	for _step in ITEM_MAX_FALL_CELLS:
+		if not _is_loaded_generated_cell(cell):
+			return pos
+		if pathfinder.is_walkable(self, cell.x, cell.y, cell.z):
+			return cell
+		var below := cell + Vector3i.DOWN
+		if not is_block_coord_valid(below.x, below.y, below.z) or not _is_loaded_generated_cell(below):
+			return pos
+		var below_id := get_block_no_generate(below.x, below.y, below.z)
+		if is_ramp_block_id(below_id):
+			return below if pathfinder.is_walkable(self, below.x, below.y, below.z) else pos
+		if is_block_solid_id(below_id):
+			return pos
+		cell = below
+	return pos
+
+
 func spawn_mining_drops(source_block_id: int, pos: Vector3i) -> Array[int]:
 	var spawned: Array[int] = []
 	var legacy_drop_id: int = block_registry.get_drop(source_block_id)
@@ -1119,7 +1148,7 @@ func spawn_mining_drops(source_block_id: int, pos: Vector3i) -> Array[int]:
 	for drop: Dictionary in drops:
 		var material_id := int(drop.get("material_id", 0))
 		var count := int(drop.get("count", 0))
-		var item_id := item_store.add_stack(material_id, count, pos)
+		var item_id := item_store.add_stack(material_id, count, item_rest_cell(pos))
 		if item_id < 0:
 			continue
 		spawned.append(item_id)
@@ -1342,13 +1371,19 @@ func spawn_initial_workers() -> void:
 
 ## Debug roster control. New workers appear on an existing worker's cell (or the
 ## spawn point) so they start somewhere reachable. Returns the number added.
-func add_workers(count: int) -> int:
+func add_workers(count: int, near: Variant = null) -> int:
 	var added := 0
+	# Prefer a standable cell near the requested point (the camera focus).
+	var focus_cell: Variant = _find_standable_near(near) if near is Vector3i else null
 	for i in clampi(count, 0, MAX_WORKERS - workers.size()):
 		var worker := Worker.new()
 		worker.worker_id = _next_worker_id()
 		worker.role_id = WorkerRolesScript.default_spawn_role(workers.size())
-		worker.position = _debug_spawn_position(i)
+		# Debug-added workers take every implemented job at the role default level.
+		for work: Dictionary in WorkerRolesScript.WorkPrioritiesScript.entries():
+			if work.implemented:
+				worker.work_priorities[work.id] = NEW_WORKER_WORK_PRIORITY
+		worker.position = Vector3(focus_cell) if focus_cell != null else _debug_spawn_position(i)
 		add_child(worker)
 		workers.append(worker)
 		diagnostics_workers_by_id[worker.worker_id] = worker
@@ -1413,6 +1448,26 @@ func _next_worker_id() -> int:
 	for worker: Worker in workers:
 		max_id = maxi(max_id, worker.worker_id)
 	return max_id + 1
+
+
+## Nearest loaded cell a worker can stand on around `center`, searching outward
+## horizontally and a few levels down/up. Returns null when none is found.
+func _find_standable_near(center: Vector3i) -> Variant:
+	if pathfinder == null:
+		return null
+	for radius in range(0, 13):
+		for dy in [0, -1, -2, -3, 1]:
+			for dx in range(-radius, radius + 1):
+				for dz in range(-radius, radius + 1):
+					if maxi(absi(dx), absi(dz)) != radius:
+						continue
+					var cell := Vector3i(center.x + dx, center.y + dy, center.z + dz)
+					if not is_block_coord_valid(cell.x, cell.y, cell.z) or not _is_loaded_generated_cell(cell) \
+							or not _is_loaded_generated_cell(cell + Vector3i.DOWN):
+						continue
+					if pathfinder.is_walkable(self, cell.x, cell.y, cell.z):
+						return cell
+	return null
 
 
 func _debug_spawn_position(index: int) -> Vector3:

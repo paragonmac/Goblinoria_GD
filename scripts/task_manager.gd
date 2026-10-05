@@ -42,7 +42,23 @@ var priority_choices: Dictionary = {}
 var priority_winner: Dictionary = {}
 var priority_choice_checks: Dictionary = {}
 var assignment_job_context: Dictionary = {}
+# Per auction: start cells whose search already failed (identical searches are
+# skipped) and the number of candidates that failed to reach the task.
+var assignment_failed_starts: Dictionary = {}
+var assignment_failed_count := 0
 const PRIORITY_SCAN_BUDGET := 128
+## Auctions per priority round before committing the best choices found. Full
+## rounds over every pending task needed ~1000 serial path searches with 70
+## tasks and 14 workers, so nobody was assigned for minutes.
+const PRIORITY_ROUND_AUCTION_CAP := 24
+const PRIORITY_REDUCTION_BUDGET := 256
+var priority_scan_offset := 0
+var priority_round_auctions := 0
+var priority_round_capped_at := -1
+# Task ids already examined (auctioned or passed over) this round; rescans
+# after membership changes skip them. Choices only improve within a round, so a
+# task that was not worth bidding stays not worth bidding.
+var priority_examined: Dictionary = {}
 var assist_requests_by_worker: Dictionary = {}
 var assist_requests_by_id: Dictionary = {}
 var next_assist_request_id := 1
@@ -108,8 +124,9 @@ func _on_task_added(task) -> void:
 
 
 func _on_task_removed(task_id: int) -> void:
-	# Do not assume ordered erase versus swap-removal. Retain valid nominations,
-	# but revisit the array under the normal scan budget after membership changes.
+	# Do not assume ordered erase versus swap-removal. Retain valid nominations
+	# and rescan the array, but tasks already auctioned this round are skipped
+	# (priority_examined), so frequent haul churn no longer repeats the scan.
 	priority_task_cursor = 0
 	priority_task_limit = mini(priority_task_limit, task_queue.tasks.size())
 	priority_worker_cursor = 0
@@ -214,7 +231,11 @@ func _classify_task_accessibility(task) -> void:
 
 
 func _mark_task_path_blocked(task, now_msec: int) -> void:
-	var retry_due := now_msec + TaskQueue.TASK_UNREACHABLE_TTL_MSEC
+	# Back off repeated failures (2.5 s doubling to 60 s) so unreachable work
+	# cannot monopolize serial auctions; terrain changes nearby reset it.
+	task.path_block_streak += 1
+	var backoff_msec: int = TaskQueue.TASK_UNREACHABLE_TTL_MSEC << mini(task.path_block_streak - 1, 5)
+	var retry_due := now_msec + mini(backoff_msec, TaskQueue.TASK_UNREACHABLE_MAX_TTL_MSEC)
 	task.retry_due_msec = retry_due
 	task.set_accessibility(
 		TaskQueue.TaskAccessibility.UNREACHABLE,
@@ -349,10 +370,18 @@ func _next_priority_round_task():
 	var started := Time.get_ticks_usec()
 	var steps := 0
 	while priority_task_cursor < mini(priority_task_limit, task_queue.tasks.size()):
+		if priority_round_auctions >= PRIORITY_ROUND_AUCTION_CAP:
+			# Commit what this round found; the next round continues from here.
+			priority_round_capped_at = priority_task_cursor
+			priority_task_cursor = mini(priority_task_limit, task_queue.tasks.size())
+			return null
 		if steps >= PRIORITY_SCAN_BUDGET or Time.get_ticks_usec() - started >= 1000:
 			return null
-		var task = task_queue.tasks[priority_task_cursor]
+		var task = task_queue.tasks[(priority_scan_offset + priority_task_cursor) % task_queue.tasks.size()]
 		priority_task_cursor += 1
+		if priority_examined.has(task.id):
+			continue
+		priority_examined[task.id] = true
 		steps += 1
 		if task.status != TaskQueue.TaskStatus.PENDING \
 				or task.accessibility == TaskQueue.TaskAccessibility.UNREACHABLE:
@@ -370,6 +399,7 @@ func _next_priority_round_task():
 				break
 		if not worth_bidding:
 			continue
+		priority_round_auctions += 1
 		return task
 	return null
 
@@ -415,15 +445,20 @@ func _priority_choice_valid(choice: Dictionary) -> bool:
 
 
 func _finish_priority_round_step() -> void:
-	# Reduction and final validation also advance one worker per frame.
-	if priority_worker_cursor < world.workers.size():
+	# Reduce all workers in one frame (bounded), then commit on the next frame
+	# so a task added in between still participates. Reducing one worker per
+	# frame let routine job churn reset the reduction before it ever finished.
+	var processed := 0
+	while priority_worker_cursor < world.workers.size() and processed < PRIORITY_REDUCTION_BUDGET:
 		var worker: Worker = world.workers[priority_worker_cursor]
 		priority_worker_cursor += 1
+		processed += 1
 		var choice: Dictionary = priority_choices.get(worker.worker_id, {})
 		if _priority_choice_valid(choice):
 			if priority_winner.is_empty() or int(choice["path_length"]) < int(priority_winner["path_length"]) \
 					or (choice["path_length"] == priority_winner["path_length"] and choice["worker_id"] < priority_winner["worker_id"]):
 				priority_winner = choice
+	if processed > 0:
 		return
 	if _priority_choice_valid(priority_winner):
 		var worker: Worker = priority_winner["worker"]
@@ -441,6 +476,13 @@ func _finish_priority_round_step() -> void:
 
 
 func _reset_priority_round() -> void:
+	# Rotate the scan window so capped rounds cover every task over time.
+	var task_count := task_queue.tasks.size() if task_queue != null else 0
+	var examined := priority_round_capped_at if priority_round_capped_at >= 0 else priority_task_cursor
+	priority_scan_offset = (priority_scan_offset + examined) % task_count if task_count > 0 else 0
+	priority_round_capped_at = -1
+	priority_round_auctions = 0
+	priority_examined.clear()
 	priority_round_active = false
 	priority_task_cursor = 0
 	priority_task_limit = 0
@@ -522,6 +564,7 @@ func reset_assignment_auction() -> void:
 func rebuild_haul_tasks() -> void:
 	if world == null or task_queue == null:
 		return
+	_settle_loose_items()
 	_prune_invalid_haul_tasks()
 	for item: Dictionary in world.item_store.loose_items():
 		var item_id := int(item.get("id", -1))
@@ -559,6 +602,33 @@ func rebuild_haul_tasks() -> void:
 				int(destination.get("stockpile_id", -1)),
 				destination.get("pos", Vector3i.ZERO),
 			])
+
+
+## Loose items left floating (support dug out, dropped above stairs) move to
+## where they rest so hauling can reach them. A pending haul for the old cell is
+## cancelled and rebuilt; items a worker is already handling stay put.
+func _settle_loose_items() -> void:
+	for item: Dictionary in world.item_store.loose_items():
+		if bool(item.get("is_carried", false)):
+			continue
+		var pos: Vector3i = item.get("pos", Vector3i.ZERO)
+		var rest: Vector3i = world.item_rest_cell(pos)
+		if rest == pos:
+			continue
+		var item_id := int(item.get("id", -1))
+		var reserved_by := int(item.get("reserved_by_task_id", -1))
+		if reserved_by >= 0:
+			var task = task_queue.get_task(reserved_by)
+			if task != null and (task.type != TaskQueue.TaskType.HAUL or task.status != TaskQueue.TaskStatus.PENDING):
+				continue
+			world.item_store.release_reservation(item_id, reserved_by)
+			if task != null:
+				task_queue.remove_task(task)
+				if task.id == assignment_task_id:
+					_reset_assignment_auction()
+				world.trace_task_event(task, "haul_cancelled", "reason=item_settled")
+		world.item_store.mark_loose(item_id, rest)
+		world.trace_system_event("item_settled", "item_id=%d from=%s to=%s" % [item_id, pos, rest])
 
 
 func _prune_invalid_haul_tasks() -> void:
@@ -758,6 +828,8 @@ func _start_assignment_auction(task) -> void:
 	assignment_bids.clear()
 	assignment_pending_jobs.clear()
 	assignment_job_context.clear()
+	assignment_failed_starts.clear()
+	assignment_failed_count = 0
 	world.trace_task_event(task, "assignment_auction_started", "candidate_workers=%s" % _worker_ids(assignment_workers))
 	if _diagnostics_enabled():
 		world.live_diagnostics.observe("task", str(task.id), "auction_started", {"auction_id": assignment_auction_id, "candidate_count": assignment_workers.size()})
@@ -776,6 +848,11 @@ func _queue_worker_bid(task, worker: Worker) -> void:
 	if task.is_worker_unreachable(worker.worker_id, now_msec):
 		if _diagnostics_enabled():
 			world.live_diagnostics.observe("worker", str(worker.worker_id), "bid_excluded_until_retry", {"task_id": task.id, "marked_msec": int(task.unreachable_workers[worker.worker_id]), "ttl_msec": TaskQueue.WORKER_UNREACHABLE_TTL_MSEC})
+		return
+	if task.id == assignment_task_id and assignment_failed_starts.has(worker.get_block_coord()):
+		# Same start cell, same snapshot terrain: this search would fail identically.
+		world.trace_worker_event(worker, "assignment_bid_skipped", task, "reason=start_cell_already_failed")
+		mark_worker_unreachable_for_task(task, worker)
 		return
 	var job_id: int = path_search_scheduler.enqueue(
 		world,
@@ -1013,6 +1090,9 @@ func _collect_worker_bid_result(task, worker: Worker, result: Dictionary) -> voi
 			int(stats.get("max_iterations", 0)),
 			str(stats.get("hit_iteration_cap", false)),
 		])
+		if task.id == assignment_task_id and not bool(stats.get("hit_iteration_cap", false)):
+			# A capped search proves nothing about other starts; an exhausted one does.
+			assignment_failed_starts[worker.get_block_coord()] = true
 		mark_worker_unreachable_for_task(task, worker)
 		return
 	world.trace_worker_event(worker, "assignment_bid", task, "path_length=%d snapshot_ms=%.3f queue_wait_ms=%.3f search_ms=%.3f" % [
@@ -1021,6 +1101,7 @@ func _collect_worker_bid_result(task, worker: Worker, result: Dictionary) -> voi
 		float(result.get("queue_wait_ms", 0.0)),
 		search_ms,
 	])
+	task.path_block_streak = 0
 	task.set_accessibility(TaskQueue.TaskAccessibility.REACHABLE, Time.get_ticks_msec())
 	if _diagnostics_enabled():
 		world.live_diagnostics.observe("task", str(task.id), "assignment_bid_received", {"worker_id": worker.worker_id, "path_length": maybe_path.size(), "search_ms": search_ms})
@@ -1095,6 +1176,8 @@ func _reset_assignment_auction() -> void:
 	assignment_bids.clear()
 	assignment_pending_jobs.clear()
 	assignment_job_context.clear()
+	assignment_failed_starts.clear()
+	assignment_failed_count = 0
 
 
 func _worker_ids(worker_list: Array) -> String:
@@ -1245,6 +1328,7 @@ func invalidate_task_accessibility(changed_pos: Vector3i) -> void:
 		if task.status != TaskQueue.TaskStatus.PENDING:
 			continue
 		task.unreachable_workers.clear()
+		task.path_block_streak = 0
 		_clear_path_retry(task.id)
 		task.set_accessibility(TaskQueue.TaskAccessibility.UNKNOWN, Time.get_ticks_msec())
 		request_accessibility_check(task.id, "nearby_terrain_changed")
@@ -1260,6 +1344,14 @@ func mark_worker_unreachable_for_task(task, worker: Worker) -> void:
 	if _diagnostics_enabled():
 		world.live_diagnostics.observe("worker", str(worker.worker_id), "task_worker_unreachable", {"task_id": task.id, "marked_msec": now_msec, "ttl_msec": TaskQueue.WORKER_UNREACHABLE_TTL_MSEC})
 	world.trace_worker_event(worker, "task_worker_unreachable", task, "worker excluded from task assignment")
+	# Every candidate of this auction failed: block now. Per-worker marks expire
+	# after a few seconds, so with many workers the loop below alone could never
+	# see all of them unreachable at once.
+	if task.id == assignment_task_id:
+		assignment_failed_count += 1
+		if assignment_failed_count >= assignment_workers.size():
+			_mark_task_path_blocked(task, now_msec)
+			return
 	for candidate: Worker in world.workers:
 		if not candidate.can_accept_task(task):
 			continue

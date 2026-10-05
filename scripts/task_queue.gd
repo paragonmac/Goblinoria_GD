@@ -19,6 +19,7 @@ enum TaskBlockReason {NONE, NO_WORK_POSITION, NO_WORKER_PATH, NO_ELIGIBLE_WORKER
 #region Constants
 const WORKER_UNREACHABLE_TTL_MSEC := 2500
 const TASK_UNREACHABLE_TTL_MSEC := 2500
+const TASK_UNREACHABLE_MAX_TTL_MSEC := 60000
 #endregion
 
 
@@ -65,6 +66,9 @@ class Task:
 			block_reason = value
 			visual_state_changed.emit()
 	var retry_due_msec: int = 0
+	## Consecutive no-path blocks; drives retry backoff until a path succeeds or
+	## nearby terrain changes.
+	var path_block_streak: int = 0
 	var unreachable_workers: Dictionary = {}
 	var data: Dictionary = {}
 	var expected_blocks: Array[int] = []

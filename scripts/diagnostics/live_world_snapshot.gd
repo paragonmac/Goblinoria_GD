@@ -151,9 +151,13 @@ func capture_snapshot() -> Dictionary:
 	if main.loading_active or not main.world_started:
 		result["world_data"] = {"unavailable": "world_reconstruction_or_not_started"}
 		return result
-	var hit := screen_hit(main.input_state.mouse_position(main.get_viewport()))
+	var mouse: Vector2 = main.input_state.mouse_position(main.get_viewport())
+	var hit := screen_hit(mouse)
 	var focus: Vector3i = hit.pos if hit.get("hit", false) else Vector3i(main.get_stream_target().round())
-	result["focus"] = {"source": "cursor_hit" if hit.get("hit", false) else "camera_active_plane", "cell": cell(focus)}
+	# Pointer pixel and active tool let a capture compare what was picked with
+	# what the screenshot shows under the cursor.
+	result["focus"] = {"source": "cursor_hit" if hit.get("hit", false) else "camera_active_plane", "cell": cell(focus),
+		"pointer_screen": [mouse.x, mouse.y], "tool": MainToolCatalog.mode_label(main.world.player_mode)}
 	var coord: Vector3i = main.world.world_to_chunk_coords(focus.x, focus.y, focus.z)
 	var chunks: Array = []
 	for offset in [Vector3i.ZERO, Vector3i.LEFT, Vector3i.RIGHT, Vector3i.UP, Vector3i.DOWN, Vector3i.FORWARD, Vector3i.BACK]:

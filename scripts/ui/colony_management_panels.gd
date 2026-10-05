@@ -91,9 +91,20 @@ func _set_sim_speed(speed: int) -> void:
 
 func _change_worker_count(delta: int) -> void:
 	var world: World = ui.main.world
-	var changed: int = world.add_workers(delta) if delta > 0 else world.remove_workers(-delta)
+	var changed: int = world.add_workers(delta, _camera_focus_cell()) if delta > 0 else world.remove_workers(-delta)
 	ui.show_feedback("%s %d worker%s." % ["Added" if delta > 0 else "Removed", changed, "" if changed == 1 else "s"])
 	refresh_debug_controls()
+
+
+## The cell under the screen center on the current render level, if any.
+func _camera_focus_cell() -> Variant:
+	var main = ui.main
+	if main.camera_controller == null or main.get_viewport() == null:
+		return null
+	var center: Vector2 = main.get_viewport().get_visible_rect().size * 0.5
+	var plane_y := float(main.world.top_render_y)
+	var hit: Vector3 = main.camera_controller.raycast_to_plane(center, plane_y)
+	return Vector3i(int(round(hit.x)), main.world.top_render_y, int(round(hit.z)))
 
 
 func _build_list(category: String, parent: VBoxContainer) -> void:
@@ -186,7 +197,9 @@ func _open_suggestion() -> void:
 
 func update_details(kind: String, row: Dictionary) -> void:
 	var signature := "%s:%s" % [kind, row.get("id", -1)]
-	if kind == "cell": signature += str(row.get("description", ""))
+	if kind == "cell":
+		signature += ":" + str(row.get("workers", [])) + str(row.get("items", [])) \
+			+ str(row.get("stockpile", {})) + str(row.get("jobs", [])) + str(row.get("empty", false))
 	if kind == "worker": signature += ":task=" + str(row.get("task_id", -1))
 	if kind == "resource": signature += str(row.get("stockpile_ids", [])) + str(row.get("worker_ids", [])) + str(row.get("item_ids", []))
 	if signature != ui._detail_signature:
@@ -200,14 +213,35 @@ func update_details(kind: String, row: Dictionary) -> void:
 		cancel_job_button = null
 		if row.has("pos"):
 			H.button(ui.detail_body, "Locate", ui.selection_action(ui.locate_selection))
-		if kind == "worker": _worker_controls(ui.detail_body, row)
+		if kind == "cell":
+			H.label(ui.detail_body, "On this block")
+			if bool(row.get("empty", false)):
+				H.label(ui.detail_body, "Nothing on this block.")
+			else:
+				_cell_group(ui.detail_body, "Workers", row.get("workers", []), "worker")
+				_cell_group(ui.detail_body, "Items", row.get("items", []), "resource")
+				var stockpile: Dictionary = row.get("stockpile", {})
+				if not stockpile.is_empty():
+					H.label(ui.detail_body, "Stockpile")
+					H.button(ui.detail_body, str(stockpile.get("label", "Stockpile")),
+						ui.select_row.bind("stockpile", int(stockpile.id)))
+				_cell_group(ui.detail_body, "Jobs", row.get("jobs", []), "job")
+		elif kind == "worker": _worker_controls(ui.detail_body, row)
 		elif kind == "assignment": _assignment_controls(ui.detail_body, row)
 		elif kind == "job": cancel_job_button = H.button(ui.detail_body, "Cancel pending task", ui.selection_action(ui.cancel_selected_job))
 		elif kind == "stockpile": _stockpile_controls(ui.detail_body, row)
 		elif kind == "resource": _resource_relationships(ui.detail_body, row)
 	var description := str(row.get("description", ""))
 	if kind == "cell":
-		detail_text.text = "Cell snapshot\n" + description + "\nCaptured on selection; not a live terrain reading."
+		var block_kind := "Solid" if bool(row.get("solid", false)) else "Air"
+		var diggable := "Diggable" if bool(row.get("diggable", false)) else "Not diggable"
+		detail_text.text = "%s (ID %d)\nPosition: %s\nLevel %d\n%s | %s\nShape: %s" % [
+			str(row.get("block_name", "Unknown block")), int(row.get("block_id", -1)),
+			str(row.get("pos", Vector3i.ZERO)), int(row.get("level", 0)), block_kind,
+			diggable, str(row.get("shape", "None"))]
+		var protection_reason := str(row.get("protection_reason", ""))
+		if not protection_reason.is_empty():
+			detail_text.text += "\nDig protection: " + protection_reason
 	else:
 		detail_text.text = str(row.get("title", kind.capitalize())) + "\n" + description
 		if row.has("pos"): detail_text.text += "\nPosition: " + str(row.pos)
@@ -228,6 +262,15 @@ func update_details(kind: String, row: Dictionary) -> void:
 	if kind == "job" and cancel_job_button != null:
 		cancel_job_button.disabled = ui._selection_object.status != TaskQueue.TaskStatus.PENDING
 		cancel_job_button.tooltip_text = "Only pending tasks can be cancelled" if cancel_job_button.disabled else "Cancel only this task; release its hauling reservations."
+
+
+func _cell_group(parent: VBoxContainer, title: String, entries: Array, kind: String) -> void:
+	if entries.is_empty():
+		return
+	H.label(parent, title)
+	for entry: Dictionary in entries:
+		H.button(parent, str(entry.get("label", "")),
+			ui.select_row.bind(kind, int(entry.get("id", -1))))
 
 func _worker_controls(parent: VBoxContainer, row: Dictionary) -> void:
 	H.button(parent, "Open Jobs", ui.open_assignments.bind(int(row.id)))

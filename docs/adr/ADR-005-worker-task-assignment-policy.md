@@ -16,6 +16,17 @@ reachable priority 1 work before 2, and so on; Off disables future claims. Equal
 priorities retain cheapest-path selection and deterministic identity tie-breaking.
 Edits invalidate pending decisions but never interrupt the current owned job.
 
+Amended 2026-10-05 (responsiveness): a priority round auctions at most 24 tasks
+before committing the best choices found; the next round continues from where it
+stopped, so every task is still visited over successive rounds. Tasks examined
+in a round are not rescanned after membership changes, winner reduction covers
+all workers in one frame and commits on the next, and repeated no-path blocks
+back off (2.5 s doubling to 60 s, reset by nearby terrain changes or a
+successful bid). Workers on the same cell share one failed search per auction.
+Choices are therefore best among recently scanned tasks rather than globally
+optimal; full rounds over every pending task left workers idle for minutes with
+~70 tasks and steady haul churn.
+
 If a worker reaches a work front where another worker owns a task but has not started working, task ownership may transfer to the arrived worker. If a worker is waiting on an invalid work position, it releases the task back to pending after a short retry interval so the changed world can be re-evaluated.
 
 ## Consequences

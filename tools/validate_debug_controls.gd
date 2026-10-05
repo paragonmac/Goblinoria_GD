@@ -103,6 +103,12 @@ func _test_worker_controls() -> void:
 	var world := _new_world()
 	check(world.add_workers(3) == 3 and world.workers.size() == 7, "Add three workers to the default four")
 	check(_worker_ids(world) == [1, 2, 3, 4, 5, 6, 7], "Added workers receive unique IDs 5, 6, and 7")
+	var all_jobs := true
+	for worker: Worker in world.workers.slice(4):
+		for work_id in ["hauling", "mining", "building"]:
+			all_jobs = all_jobs and worker.get_work_priority(work_id) > 0
+	check(all_jobs, "Added workers have every implemented job enabled")
+	check(world.workers[0].get_work_priority("hauling") == 0, "Default spawned Miner keeps its role defaults")
 	check(world.remove_workers(2) == 2 and world.workers.size() == 5, "Remove two workers")
 	check(_worker_ids(world) == [1, 2, 3, 4, 5], "Removal removes highest IDs first")
 	check(world.add_workers(World.MAX_WORKERS + 1) == World.MAX_WORKERS - 5 and world.workers.size() == World.MAX_WORKERS,

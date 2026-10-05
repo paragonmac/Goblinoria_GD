@@ -379,8 +379,7 @@ func open_assignments(worker_id: int = -1) -> void:
 
 func inspect_cell(block_id: int, pos: Vector3i) -> void:
 	_selection_serial += 1
-	selection = {"kind": "cell", "id": block_id, "pos": pos, "epoch": model.epoch,
-		"description": Tools.format_block_info(main.world, block_id, pos)}
+	selection = {"kind": "cell", "id": block_id, "pos": pos, "epoch": model.epoch}
 	_selection_object = null
 	details.offset_left = -340
 	details.show()
@@ -430,7 +429,9 @@ func _refresh_details() -> void:
 			H.label(detail_body, "No longer available")
 			_detail_signature = "missing"
 		return
-	var row: Dictionary = selection if selection.kind == "cell" else model.get_row(_model_kind(selection.kind), int(selection.id))
+	var row: Dictionary = Model.cell_details(main.world, selection.pos,
+		main.hud_controller.render_level_base_y) if selection.kind == "cell" \
+		else model.get_row(_model_kind(selection.kind), int(selection.id))
 	if row.is_empty():
 		return
 	# Do not rebuild editors or focused controls every activity refresh.

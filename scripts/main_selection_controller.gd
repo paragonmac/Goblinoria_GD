@@ -27,6 +27,8 @@ var released_drag_event_id := 0
 var is_dragging := false
 var drag_start: Vector2
 var drag_plane_y: float = 0.0
+var drag_projection_y: float = 0.0
+const BLOCK_TOP_FACE_OFFSET := 0.5
 var stair_rotation := 0
 
 var info_block_id: int = -1
@@ -113,6 +115,10 @@ func update_hover_preview() -> void:
 		return
 
 	var hit_pos: Vector3i = hit["pos"]
+	if world.player_mode == World.PlayerMode.INFORMATION:
+		# Outline exactly the block a click would inspect.
+		world.set_drag_preview_entries([{"pos": hit_pos, "valid": true}], world.player_mode)
+		return
 	if world.player_mode == World.PlayerMode.DIG:
 		world.set_drag_preview_entries([{
 			"pos": hit_pos,
@@ -162,6 +168,7 @@ func _start_drag(mouse_pos: Vector2) -> void:
 	drag_start = mouse_pos
 	is_dragging = true
 	drag_plane_y = _get_drag_plane_y(drag_start)
+	drag_projection_y = _get_drag_projection_y(drag_start)
 
 
 func _end_drag(drag_end: Vector2) -> void:
@@ -177,6 +184,9 @@ func _update_drag_preview() -> void:
 	if viewport == null or world == null:
 		return
 	var drag_now := input_state.mouse_position(viewport)
+	if world.player_mode == World.PlayerMode.INFORMATION:
+		# Information is click-only; keep the hover outline instead of a rectangle.
+		return
 	if _is_stair_mode():
 		var hit := _raycast_block_from_screen_pos(drag_now)
 		if hit.get("hit", false):
@@ -237,12 +247,23 @@ func _get_drag_plane_y(screen_pos: Vector2) -> float:
 	return float(world.top_render_y) if world != null else 0.0
 
 
+## The height of the surface the player actually sees under the drag start: the
+## clicked block's top face. Projecting onto a block's center instead shifted
+## drag rectangles about 0.7 tiles away from the camera.
+func _get_drag_projection_y(screen_pos: Vector2) -> float:
+	var hit := _raycast_block_from_screen_pos(screen_pos)
+	if hit.get("hit", false):
+		return float(hit.pos.y) + BLOCK_TOP_FACE_OFFSET
+	return float(world.top_render_y) if world != null else 0.0
+
+
 func _get_drag_rect(start: Vector2, end: Vector2, plane_y: float) -> Dictionary:
-	# SEE-ADR-006: Screen drag endpoints are projected into world X/Z coordinates.
+	# SEE-ADR-006: Screen drag endpoints are projected into world X/Z coordinates
+	# on the visible surface; plane_y is the target level stored in the rect.
 	if camera_controller == null:
 		return {}
-	var a: Variant = camera_controller.screen_to_plane(start, plane_y)
-	var b: Variant = camera_controller.screen_to_plane(end, plane_y)
+	var a: Variant = camera_controller.screen_to_plane(start, drag_projection_y)
+	var b: Variant = camera_controller.screen_to_plane(end, drag_projection_y)
 	if a == null or b == null:
 		return {}
 	var a_pos: Vector3 = a
@@ -434,6 +455,7 @@ func _has_place_stock() -> bool:
 func _uses_hover_preview() -> bool:
 	return world != null and (
 		_is_stair_mode()
+		or world.player_mode == World.PlayerMode.INFORMATION
 		or world.player_mode == World.PlayerMode.DIG
 		or world.player_mode == World.PlayerMode.ERASE
 		or world.player_mode == World.PlayerMode.STOCKPILE

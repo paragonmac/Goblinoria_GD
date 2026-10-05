@@ -9,6 +9,105 @@ const MAX_OVERRIDES := 64
 const MAX_REFERENCES := 32
 const KINDS := ["worker", "job", "stockpile", "resource"]
 
+
+static func cell_details(world, pos: Vector3i, level_base_y: int) -> Dictionary:
+	var block_id: int = world.get_block_no_generate(pos.x, pos.y, pos.z)
+	var block_name: String = world.block_registry.get_name(block_id)
+	if block_name.is_empty():
+		block_name = "Block %d" % block_id
+	else:
+		block_name = block_name.capitalize()
+	var solid: bool = world.is_block_solid_id(block_id)
+	var is_ramp_or_stair: bool = World.RAMP_BLOCK_IDS.has(block_id)
+	var occupant_cell := pos + Vector3i.UP if solid and not is_ramp_or_stair else pos
+	var cells: Array[Vector3i] = [pos]
+	if not cells.has(occupant_cell):
+		cells.append(occupant_cell)
+	var protection_reason: String = world.stair_dig_reject_reason(pos)
+	var result := {
+		"kind": "cell",
+		"id": block_id,
+		"pos": pos,
+		"block_id": block_id,
+		"block_name": block_name,
+		"level": pos.y - level_base_y,
+		"solid": solid,
+		"diggable": _cell_is_diggable(world, pos),
+		"shape": "Player stairs" if World.PLAYER_STAIR_BLOCK_IDS.has(block_id) else ("Terrain slope" if World.is_terrain_slope_block_id(block_id) else "None"),
+		"protection_reason": protection_reason,
+		"occupant_cell": occupant_cell,
+		"workers": [],
+		"items": [],
+		"stockpile": {},
+		"jobs": [],
+	}
+	var cell_set := {}
+	for cell: Vector3i in cells:
+		cell_set[cell] = true
+	for worker in world.workers:
+		if not is_instance_valid(worker) or not cell_set.has(worker.get_block_coord()):
+			continue
+		var role := Roles.display_name(worker.role_id)
+		var state: String = Worker.WorkerState.keys()[clampi(worker.state, 0, Worker.WorkerState.size() - 1)].capitalize().replace("_", " ")
+		result.workers.append({"id": int(worker.worker_id), "label": "Worker %d - %s - %s" % [worker.worker_id, role, state]})
+	var seen_items := {}
+	for cell: Vector3i in cells:
+		for item: Dictionary in world.item_store.stored_items_at(cell):
+			_add_cell_item(result.items, seen_items, item, true, world)
+	for item_id in world.item_store.items:
+		var item: Dictionary = world.item_store.items[item_id]
+		if bool(item.get("is_carried", false)) or int(item.get("stored_stockpile_id", -1)) >= 0:
+			continue
+		if not cell_set.has(item.get("pos", Vector3i.ZERO)):
+			continue
+		_add_cell_item(result.items, seen_items, item, false, world)
+	var stockpile_id: int = world.stockpile_store.stockpile_at(occupant_cell)
+	if stockpile_id >= 0:
+		result.stockpile = {"id": stockpile_id, "label": world.stockpile_store.display_name(stockpile_id)}
+	var seen_tasks := {}
+	for cell: Vector3i in cells:
+		for task in world.task_queue.get_active_tasks_at(cell):
+			if seen_tasks.has(task.id):
+				continue
+			seen_tasks[task.id] = true
+			var type_name: String = ["Dig", "Place", "Stairs", "Haul"][clampi(task.type, 0, 3)]
+			var status_name := "assigned" if task.status == TaskQueue.TaskStatus.IN_PROGRESS or is_instance_valid(task.assigned_worker) else "pending"
+			var access_name := "unknown"
+			if task.accessibility == TaskQueue.TaskAccessibility.REACHABLE:
+				access_name = "reachable"
+			elif task.accessibility == TaskQueue.TaskAccessibility.UNREACHABLE:
+				access_name = "blocked"
+			result.jobs.append({"id": int(task.id), "label": "%s - %s - %s" % [type_name, status_name, access_name]})
+	result["empty"] = result.workers.is_empty() and result.items.is_empty() \
+		and result.stockpile.is_empty() and result.jobs.is_empty()
+	return result
+
+
+static func _cell_is_diggable(world, pos: Vector3i) -> bool:
+	if not world.is_block_coord_valid(pos.x, pos.y, pos.z):
+		return false
+	if not world.stair_dig_reject_reason(pos).is_empty():
+		return false
+	# Match is_diggable_at() using its current loaded block without requesting generation.
+	var block_id: int = world.get_block_no_generate(pos.x, pos.y, pos.z)
+	return world.block_registry.get_hardness(block_id) > 0.0
+
+
+static func _add_cell_item(output: Array, seen: Dictionary, item: Dictionary, stored: bool, world) -> void:
+	var item_id: int = int(item.get("id", -1))
+	if bool(item.get("is_carried", false)) or seen.has(item_id):
+		return
+	seen[item_id] = true
+	var material_id: int = int(item.get("material_id", 0))
+	var material_name: String = world.block_registry.get_name(material_id)
+	if material_name.is_empty():
+		material_name = "Material %d" % material_id
+	else:
+		material_name = material_name.capitalize()
+	var count: int = int(item.get("count", 0))
+	output.append({"id": material_id, "item_id": item_id, "count": count,
+		"stored": stored, "label": "%s x%d - %s" % [material_name, count, "stored" if stored else "loose"]})
+
 # A suspended native iterator retains its cursor without keys()/values() copies.
 # On invalidation close() returns BEFORE advancing a mutated dictionary iterator.
 class DictionaryCursor extends RefCounted:

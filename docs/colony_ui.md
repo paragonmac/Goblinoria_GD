@@ -15,8 +15,9 @@ every system in the game design document. Management panels do not pause the wor
 - Click an already-open category or the same selected information row again to
   close its panel; no timed double-click is needed. Programmatic open/refresh
   operations (including Open Workers in the context menu) remain idempotent.
-- Right: selected worker, task, stockpile, material or explicitly labeled cell
-  snapshot. Selection does not move the camera or change a role. Use Locate to
+- Right: selected worker, task, stockpile, material or live cell details. Cell
+  terrain and occupants refresh every 0.2 seconds with clickable related entries.
+  Selection does not move the camera or change a role. Use Locate to
   center the target and request its level through the normal render controller.
 - Bottom: Information [1], Dig [2], Place [3], Up Stairs [4], Down Stairs [5],
   Erase [6], Stockpile [7], and level controls ([ / ]). W opens Workers.
