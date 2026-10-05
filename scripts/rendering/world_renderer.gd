@@ -10,6 +10,7 @@ const WorldRendererRenderLevelScript = preload("res://scripts/rendering/world_re
 const WorldRendererMaterialsScript = preload("res://scripts/rendering/world_renderer_materials.gd")
 const WorldRendererStatsScript = preload("res://scripts/rendering/world_renderer_stats.gd")
 const OverlayRendererScript = preload("res://scripts/rendering/overlay_renderer.gd")
+const StairExcavationMeshScript = preload("res://scripts/rendering/stair_excavation_mesh.gd")
 const FrustumCullerScript = preload("res://scripts/rendering/frustum_culler.gd")
 const ChunkMeshJobBuilderScript = preload("res://scripts/rendering/chunk_mesh_job_builder.gd")
 const WorldRendererMeshCacheStoreScript = preload("res://scripts/rendering/world_renderer_mesh_cache_store.gd")
@@ -40,6 +41,7 @@ var render_level_helper = WorldRendererRenderLevelScript.new()
 var material_helper = WorldRendererMaterialsScript.new()
 var render_stats = WorldRendererStatsScript.new()
 var overlay_renderer = OverlayRendererScript.new()
+var excavation_preview_lining: MeshInstance3D
 var frustum_culler = FrustumCullerScript.new()
 var mesh_job_builder = ChunkMeshJobBuilderScript.new()
 var mesh_cache_store = WorldRendererMeshCacheStoreScript.new()
@@ -67,6 +69,8 @@ func initialize(world_ref: World) -> void:
 		add_child(overlay_renderer)
 	overlay_renderer.initialize(world_ref)
 	material_helper.initialize(world_ref)
+	if not overlay_renderer.excavation_preview_changed.is_connected(_set_excavation_preview):
+		overlay_renderer.excavation_preview_changed.connect(_set_excavation_preview)
 	_ensure_block_tables()
 	mesh_job_builder.configure(world_ref, mesher)
 	mesh_scheduler.configure(Callable(self, "_build_mesh_result_on_worker"), MESH_RESULT_BACKLOG_MAX, MESH_RESULT_BACKLOG_SLEEP_USEC)
@@ -95,6 +99,7 @@ func reset_stats() -> void:
 	overlay_renderer.clear_task_overlays()
 
 func clear_chunks() -> void:
+	clear_drag_preview()
 	visibility_state.clear()
 	diagnostics_render_bounds = {}
 	chunk_cache.clear()
@@ -1121,6 +1126,25 @@ func set_drag_preview(rect: Dictionary, mode: int) -> void:
 	if overlay_renderer == null:
 		return
 	overlay_renderer.set_drag_preview(rect, mode)
+
+
+func _set_excavation_preview(cells: Array[Vector3i]) -> void:
+	material_helper.set_excavation_preview(cells)
+	if cells.is_empty():
+		if excavation_preview_lining != null:
+			excavation_preview_lining.visible = false
+			excavation_preview_lining.mesh = null
+		return
+	if excavation_preview_lining == null:
+		excavation_preview_lining = MeshInstance3D.new()
+		excavation_preview_lining.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		excavation_preview_lining.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
+		add_child(excavation_preview_lining)
+	# Greedy terrain meshes omit buried faces. Supply only the newly exposed
+	# neighbors so the cutout shows a cavity, not a hole through the world.
+	excavation_preview_lining.mesh = StairExcavationMeshScript.build(world, cells)
+	excavation_preview_lining.material_override = get_block_material()
+	excavation_preview_lining.visible = true
 
 
 func set_drag_preview_entries(entries: Array, mode: int) -> void:

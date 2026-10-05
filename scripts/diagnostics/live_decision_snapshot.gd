@@ -10,11 +10,17 @@ static func worker_snapshot(worker) -> Dictionary:
 		return {}
 	var data := {
 		"worker_id": worker.worker_id,
+		"instance_id": worker.get_instance_id(),
+		"inside_tree": worker.is_inside_tree(),
+		"visible": worker.visible,
+		"visible_in_tree": worker.is_visible_in_tree(),
 		"role_id": worker.role_id,
 		"work_priorities": worker.get_work_configuration(),
 		"state": worker.state,
 		"current_task_id": worker.current_task_id,
 		"position": worker.position,
+		"block_coord": worker.get_block_coord() if worker.position.is_finite() else null,
+		"fall_target_y": worker.fall_target_y,
 		"target_pos": worker.target_pos,
 		"movement_intent": worker.movement_intent,
 		"path_length": worker.path.size(),
@@ -31,11 +37,29 @@ static func worker_snapshot(worker) -> Dictionary:
 		"carried_source_item_id": worker.carried_source_item_id,
 	}
 	var world = worker.get_parent()
+	if world is World and data.block_coord != null:
+		data["terrain_support"] = {
+			"cell": _loaded_cell(world, data.block_coord),
+			"below": _loaded_cell(world, data.block_coord + Vector3i.DOWN),
+			"render_level": world.top_render_y,
+			"level_visible": world.is_visible_at_level(worker.position.y),
+		}
 	var manager = world.get("task_manager") if world != null else null
 	if manager != null:
 		data["auction"] = _auction_snapshot(manager)
 		data["pending_assist_path"] = _request_snapshot(manager.assist_requests_by_worker.get(worker.worker_id, {}))
 		data["pending_haul_path"] = _request_snapshot(manager.haul_path_requests_by_worker.get(worker.worker_id, {}))
+	return data
+
+
+static func _loaded_cell(world: World, pos: Vector3i) -> Dictionary:
+	# Raw evidence only: do not generate terrain or re-run movement decisions.
+	var chunk := world.get_chunk(world.world_to_chunk_coords(pos.x, pos.y, pos.z))
+	var known := chunk != null and chunk.generated
+	var data := {"pos": pos, "loaded": chunk != null, "generated": known, "block_id": null}
+	if known and world.is_block_coord_valid(pos.x, pos.y, pos.z):
+		var local := world.chunk_to_local_coords(pos.x, pos.y, pos.z)
+		data.block_id = int(chunk.blocks[world.chunk_index(local.x, local.y, local.z)])
 	return data
 
 

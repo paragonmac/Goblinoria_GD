@@ -125,7 +125,7 @@ func _run() -> void:
 	check(not invalid[0].valid and not invalid[1].valid, "Blocked headroom marks the whole ghost invalid")
 	world.set_player_mode(World.PlayerMode.DIG)
 	selection.update_hover_preview()
-	check(world.preview_entries.is_empty(), "Changing tool clears stair ghost")
+	check(world.preview_entries.size() == 1 and not world.preview_entries[0].has("stair_material"), "Dig replaces stair ghost with a block hover highlight")
 	motion(point)
 	mouse(point, MOUSE_BUTTON_WHEEL_UP, true)
 	check(main.camera.size != zoom, "Non-stair tools retain wheel zoom")

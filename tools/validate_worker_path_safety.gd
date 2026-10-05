@@ -464,6 +464,11 @@ func _init() -> void:
 	var worker_two := Worker.new()
 	worker_two.worker_id = 2
 	var reservation_world := World.new()
+	reservation_world._init_ramp_lookup()
+	reservation_world.block_registry.load_from_csv(World.BLOCK_DATA_PATH)
+	for floor_x in range(-1, 7):
+		for floor_z in range(-1, 2):
+			reservation_world.set_block_raw(floor_x, 0, floor_z, World.BLOCK_ID_GRANITE, true)
 	reservation_world.workers = [worker, worker_two]
 	var blockers := reservation_world.get_workers_blocking_dig(Vector3i(2, 0, 0))
 	var support_reserved := blockers.has(worker)

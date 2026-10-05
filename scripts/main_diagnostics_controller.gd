@@ -4,9 +4,9 @@ const Service = preload("res://scripts/diagnostics/live_diagnostics_service.gd")
 const Snapshot = preload("res://scripts/diagnostics/live_world_snapshot.gd")
 const Transport = preload("res://scripts/diagnostics/live_diagnostics_transport.gd")
 const Writer = preload("res://scripts/diagnostics/bug_capture_writer.gd")
+const FrameCapture = preload("res://scripts/diagnostics/frame_capture.gd")
 const ErrorLogger = preload("res://scripts/diagnostics/live_diagnostics_logger.gd")
 const CAPTURE_COOLDOWN_USEC := 5000000
-const SCREENSHOT_MAX_PIXELS := 8 * 1024 * 1024
 var main
 var service = Service.new()
 var inspector = Snapshot.new()
@@ -195,14 +195,11 @@ func _post_draw() -> void:
 	elif DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_MINIMIZED:
 		reason = "minimized"
 	else:
-		var size: Vector2 = main.get_viewport().get_visible_rect().size
-		if size.x * size.y > SCREENSHOT_MAX_PIXELS:
-			reason = "pixel_limit"
-		else:
-			pixels = main.get_viewport().get_texture().get_image()
-			if pixels == null or pixels.is_empty():
-				pixels = null
-				reason = "image_unavailable"
+		var readback: Dictionary = FrameCapture.read_viewport_image(main)
+		var readback_metadata: Dictionary = readback.get("metadata", {}) if readback.get("metadata", {}) is Dictionary else {}
+		pixels = readback.get("image") as Image
+		if pixels == null:
+			reason = str(readback_metadata.get("reason", "image_unavailable"))
 	_snapshot["screenshot"] = {"available": pixels != null, "reason": reason,
 		"post_draw_frame": Engine.get_frames_drawn(), "main_frame_id": service.frame_id,
 		"readback_usec": Time.get_ticks_usec() - start}

@@ -88,6 +88,7 @@ func _run() -> void:
 		return
 	_test_save_failures()
 	_test_failed_loads()
+	_test_invalid_item_records()
 	_test_legacy_chunks()
 	_test_short_write()
 	for path in ["", "/", "C:/", "C:", "res://", "user://", "res://scripts/..", "//server/share"]:
@@ -292,6 +293,70 @@ func _test_legacy_chunks() -> void:
 	_check(DirAccess.remove_absolute(path.get_basename().path_join(WorldWorkerSaveLoad.WORKER_FILE_NAME)) == OK, "remove V5 workers fixture")
 	_check(world.load_world(path) and world.workers[0].role_id == WorkerRolesScript.Role.MINER, "V5 bulk without workers loads default roster")
 	world.free()
+
+
+func _test_invalid_item_records() -> void:
+	var world := _new_world()
+	var path := test_root.path_join("invalid_items.save")
+	var slot := path.get_basename()
+	_check(world.save_world(path), "create invalid-item fixture")
+	var item := world.item_store.as_save_array()[0] as Dictionary
+	var duplicate := item.duplicate(true)
+	duplicate["count"] = 7
+	var stockpile := {"id": 1, "cells": [Vector3i(0, 1, 0)]}
+	var cases := [{"label": "duplicate item IDs", "items": [item, duplicate], "stockpiles": []}]
+	for field in ["id", "material_id", "count"]:
+		for invalid in [0, -1, "2", 1.5]:
+			var malformed := item.duplicate(true)
+			malformed[field] = invalid
+			cases.append({"label": "invalid item %s=%s" % [field, invalid], "items": [malformed], "stockpiles": []})
+	for invalid in [null, "0,1,0", Vector3(0, 1, 0)]:
+		var malformed := item.duplicate(true)
+		malformed["pos"] = invalid
+		cases.append({"label": "invalid item position %s" % invalid, "items": [malformed], "stockpiles": []})
+	for field in ["reserved_by_task_id", "stored_stockpile_id"]:
+		var malformed := item.duplicate(true)
+		malformed[field] = []
+		cases.append({"label": "invalid item " + field, "items": [malformed], "stockpiles": []})
+	var stale_reservation := item.duplicate(true)
+	stale_reservation["reserved_by_task_id"] = 1
+	cases.append({"label": "stale saved task reservation", "items": [stale_reservation], "stockpiles": []})
+	cases.append({"label": "duplicate stockpile IDs", "items": [item], "stockpiles": [stockpile, stockpile.duplicate(true)]})
+	var overlapping := stockpile.duplicate(true)
+	overlapping["id"] = 2
+	cases.append({"label": "overlapping stockpile cells", "items": [item], "stockpiles": [stockpile, overlapping]})
+	for field in ["id", "cells", "material_overrides", "allowed_categories"]:
+		var malformed := stockpile.duplicate(true)
+		malformed[field] = "invalid"
+		cases.append({"label": "invalid stockpile " + field, "items": [item], "stockpiles": [malformed]})
+	for field in ["material_overrides", "allowed_categories"]:
+		var malformed := stockpile.duplicate(true)
+		malformed[field] = {"soil": []}
+		cases.append({"label": "invalid stockpile flag " + field, "items": [item], "stockpiles": [malformed]})
+	var malformed := stockpile.duplicate(true)
+	malformed["cells"] = ["invalid"]
+	cases.append({"label": "invalid stockpile cell", "items": [item], "stockpiles": [malformed]})
+	world.world_seed = 9876
+	var live := _live_state(world)
+	var epoch := world.runtime_epoch
+	for definition: Dictionary in cases:
+		_write_item_snapshot(slot, definition)
+		var label: String = definition["label"]
+		_check(not world.load_world(path), label + " rejected before replacing live state")
+		_check(_live_state(world) == live and world.runtime_epoch == epoch, label + " preserved the live world")
+	# Older records may omit display names, filters, carry and reservation fields.
+	var legacy_item := {"id": 1, "material_id": World.BLOCK_ID_DIRT, "count": 3, "pos": Vector3i(0, 1, 0)}
+	_write_item_snapshot(slot, {"items": [legacy_item], "stockpiles": [stockpile]})
+	_check(world.load_world(path), "legacy item and stockpile defaults remain readable")
+	_check(world.item_store.get_item(1)["count"] == 3 and world.stockpile_store.display_name(1) == "Stockpile 1", "legacy defaults preserve material and zone identity")
+	world.free()
+
+
+func _write_item_snapshot(slot: String, data: Dictionary) -> void:
+	var file := FileAccess.open(slot.path_join(WorldItemStockpileSaveLoad.ITEM_STOCKPILE_FILE_NAME), FileAccess.WRITE)
+	file.store_32(WorldItemStockpileSaveLoad.ITEM_STOCKPILE_MAGIC)
+	file.store_var({"items": data["items"], "stockpiles": data["stockpiles"]})
+	file.close()
 
 
 func _test_short_write() -> void:

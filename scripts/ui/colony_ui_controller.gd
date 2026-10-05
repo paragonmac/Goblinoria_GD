@@ -201,7 +201,7 @@ func tick(dt: float) -> void:
 	window_policy.tick(dt)
 	# Native/embedded text menus can consume releases in another viewport.
 	for button in [MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT, MOUSE_BUTTON_MIDDLE]:
-		if _held_buttons.has(button) and not Input.is_mouse_button_pressed(button):
+		if _held_buttons.has(button) and not main.input_state.is_mouse_button_pressed(button):
 			_held_buttons.erase(button)
 	if main.loading_active and not _was_loading:
 		reset_world()

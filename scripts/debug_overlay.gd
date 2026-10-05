@@ -225,6 +225,14 @@ func step_world(dt: float) -> void:
 	world.update_world(dt)
 
 
+func step_world_controlled(dt: float, advance_simulation: bool) -> void:
+	if world == null:
+		return
+	if advance_simulation:
+		_record_frame_timing(dt)
+	world.update_world_controlled(dt, advance_simulation)
+
+
 ## Main calls this once, after prewarm and all timed Main updates.
 func finish_timed_frame() -> void:
 	if debug_profiler != null:

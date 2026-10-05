@@ -376,8 +376,7 @@ func _worker_row(world, worker) -> Dictionary:
 	if default_fighter:
 		description += "; combat not implemented yet"
 	if worker.current_task_id >= 0:
-		description += "; Task %d: %s" % [worker.current_task_id,
-			_task_type_name(task.type) if task != null else "no longer queued"]
+		description += "; Task %d: %s" % [worker.current_task_id, _task_display_name(task)]
 	if worker.carried_count > 0:
 		description += "; Carrying %d %s" % [worker.carried_count, _material_name(world, worker.carried_material_id)]
 	var row := {"kind": "worker", "id": int(worker.worker_id),
@@ -397,7 +396,7 @@ func _job_row(task) -> Dictionary:
 	var unknown: bool = task.accessibility == TaskQueue.TaskAccessibility.UNKNOWN
 	var blocked: bool = task.accessibility == TaskQueue.TaskAccessibility.UNREACHABLE
 	var stale: bool = not unknown and task.retry_due_msec > 0 and now >= task.retry_due_msec
-	var type_name := _task_type_name(task.type)
+	var type_name := _task_display_name(task)
 	var status_name: String = ["Pending", "In progress", "Completed"][clampi(task.status, 0, 2)]
 	var reason := "Not evaluated" if unknown else "Reachable"
 	if blocked:
@@ -513,6 +512,14 @@ func _append_reference(row: Dictionary, field: String, id: int) -> void:
 
 func _task_type_name(type: int) -> String:
 	return ["Dig", "Place", "Stairs", "Haul"][clampi(type, 0, 3)]
+
+
+func _task_display_name(task) -> String:
+	if task == null:
+		return "no longer queued"
+	if task.type == TaskQueue.TaskType.STAIRS and bool(task.data.get("remove_stairs", false)):
+		return "Remove stairs"
+	return _task_type_name(task.type)
 
 
 func _material_name(world, material: int) -> String:

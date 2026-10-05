@@ -26,6 +26,7 @@ const DUMMY_FLOAT := 666.0
 #region State
 var camera: Camera3D
 var viewport: Viewport
+var input_state = preload("res://scripts/game_input_state.gd").new()
 var world_ref: World
 
 var cam_speed := CAM_SPEED_DEFAULT
@@ -198,11 +199,11 @@ func _update_free_orbit() -> void:
 	if camera == null or viewport == null or world_ref == null:
 		free_orbit_dragging = false
 		return
-	var drag_requested := Input.is_key_pressed(KEY_SHIFT) and Input.is_mouse_button_pressed(MOUSE_BUTTON_MIDDLE)
+	var drag_requested := input_state.is_key_pressed(KEY_SHIFT) and input_state.is_mouse_button_pressed(MOUSE_BUTTON_MIDDLE)
 	if not drag_requested:
 		free_orbit_dragging = false
 		return
-	var mouse_pos := viewport.get_mouse_position()
+	var mouse_pos := input_state.mouse_position(viewport)
 	if not free_orbit_dragging:
 		free_orbit_dragging = true
 		free_orbit_prev_mouse_pos = mouse_pos
@@ -276,7 +277,7 @@ func _update_camera_keyboard_movement(dt: float) -> void:
 		return
 
 	var speed := cam_speed
-	if Input.is_key_pressed(KEY_SHIFT):
+	if input_state.is_key_pressed(KEY_SHIFT):
 		speed *= cam_fast_multiplier
 	camera.position += move_dir.normalized() * speed * dt
 
@@ -295,17 +296,17 @@ func _get_keyboard_movement_direction() -> Vector3:
 	var forward := _get_camera_forward_flat()
 	var right := _get_camera_right_flat()
 
-	if Input.is_key_pressed(KEY_E) or Input.is_key_pressed(KEY_UP):
+	if input_state.is_key_pressed(KEY_E) or input_state.is_key_pressed(KEY_UP):
 		move_dir += forward
-	if Input.is_key_pressed(KEY_D) or Input.is_key_pressed(KEY_DOWN):
+	if input_state.is_key_pressed(KEY_D) or input_state.is_key_pressed(KEY_DOWN):
 		move_dir -= forward
-	if Input.is_key_pressed(KEY_F) or Input.is_key_pressed(KEY_RIGHT):
+	if input_state.is_key_pressed(KEY_F) or input_state.is_key_pressed(KEY_RIGHT):
 		move_dir += right
-	if Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_LEFT):
+	if input_state.is_key_pressed(KEY_S) or input_state.is_key_pressed(KEY_LEFT):
 		move_dir -= right
-	if Input.is_key_pressed(KEY_R) or Input.is_key_pressed(KEY_PAGEUP):
+	if input_state.is_key_pressed(KEY_R) or input_state.is_key_pressed(KEY_PAGEUP):
 		move_dir.y += MOVE_VERTICAL_UNIT
-	if Input.is_key_pressed(KEY_Q) or Input.is_key_pressed(KEY_PAGEDOWN):
+	if input_state.is_key_pressed(KEY_Q) or input_state.is_key_pressed(KEY_PAGEDOWN):
 		move_dir.y -= MOVE_VERTICAL_UNIT
 
 	return move_dir

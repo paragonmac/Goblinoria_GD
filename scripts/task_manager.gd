@@ -182,7 +182,8 @@ func _classify_task_accessibility(task) -> void:
 	if task.type == TaskQueue.TaskType.STAIRS:
 		has_work_position = not _stair_work_positions_for_task(task).is_empty()
 	elif task.type != TaskQueue.TaskType.HAUL:
-		has_work_position = world.pathfinder.has_walkable_adjacent_on_level(world, task.pos, task.pos.y)
+		has_work_position = not TaskWorkPositionRulesScript.task_work_positions(
+			world, world.pathfinder, task.pos, task.type).is_empty()
 	if not has_work_position:
 		_clear_path_retry(task.id)
 		task.set_accessibility(
@@ -1134,6 +1135,8 @@ func reassess_waiting_tasks() -> void:
 func queue_task_request(task_type: int, pos: Vector3i, material: int) -> bool:
 	if world == null or not world.is_block_coord_valid(pos.x, pos.y, pos.z):
 		return false
+	if task_type == TaskQueue.TaskType.DIG and not world.stair_dig_reject_reason(pos).is_empty():
+		return false
 	if is_task_already_queued(task_type, pos):
 		return false
 	if task_type == TaskQueue.TaskType.STAIRS \
@@ -1206,6 +1209,8 @@ func _finish_player_cancellation(task) -> void:
 func add_task_to_queue(task_type: int, pos: Vector3i, material: int) -> bool:
 	match task_type:
 		TaskQueue.TaskType.DIG:
+			if not world.stair_dig_reject_reason(pos).is_empty():
+				return false
 			return task_queue.add_dig_task(pos) >= 0
 		TaskQueue.TaskType.PLACE:
 			return task_queue.add_place_task(pos, material) >= 0
@@ -1224,7 +1229,8 @@ func _stair_work_positions_for_task(task) -> Array[Vector3i]:
 		world,
 		world.pathfinder,
 		task.pos,
-		rotation
+		rotation,
+		TaskWorkPositionRulesScript.stair_excluded_cells_for_task(task)
 	)
 #endregion
 

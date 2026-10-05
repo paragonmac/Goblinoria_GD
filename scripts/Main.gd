@@ -70,6 +70,10 @@ var colony_ui
 
 #region Input State
 var key_state: Dictionary = {}
+var input_state = preload("res://scripts/game_input_state.gd").new()
+# Set only by the isolated development bootstrap, before entering the tree.
+var playtest_mode := false
+var playtest_controller = null
 #endregion
 
 #region Game State
@@ -97,7 +101,8 @@ var generation_status_timer: Timer
 
 #region Lifecycle
 func _ready() -> void:
-	Engine.max_fps = ENGINE_MAX_FPS
+	Engine.max_fps = 60 if playtest_mode else ENGINE_MAX_FPS
+	input_state.synthetic = playtest_mode
 	_initialize_controllers()
 	_setup_camera()
 	_setup_hud()
@@ -114,6 +119,8 @@ func _ready() -> void:
 
 
 func _process(dt: float) -> void:
+	if playtest_controller != null:
+		playtest_controller.begin_frame()
 	if diagnostics_controller != null:
 		diagnostics_controller.service.tick()
 	if performance_controller != null:
@@ -137,6 +144,8 @@ func _process(dt: float) -> void:
 		performance_controller.end_frame(update_ms)
 	if diagnostics_controller != null:
 		diagnostics_controller.process_frame()
+	if playtest_controller != null:
+		playtest_controller.end_frame()
 
 
 func _process_game_frame(dt: float) -> void:
@@ -160,6 +169,9 @@ func _process_game_frame(dt: float) -> void:
 
 
 func _input(event: InputEvent) -> void:
+	if playtest_controller != null and playtest_controller.observe_physical_input(event):
+		get_viewport().set_input_as_handled()
+		return
 	if colony_ui != null and colony_ui.observe_input(event):
 		# The UI owns this gesture itself. Do not install context-popup guards
 		# whose release would never reach that controller.
@@ -222,6 +234,8 @@ func _notification(what: int) -> void:
 
 
 func _exit_tree() -> void:
+	if playtest_controller != null:
+		playtest_controller.shutdown()
 	if colony_ui != null:
 		colony_ui.shutdown()
 	if diagnostics_controller != null:
@@ -242,7 +256,7 @@ func _setup_live_diagnostics() -> void:
 
 func _setup_colony_ui(configure_window: bool = true) -> void:
 	colony_ui = ColonyUIScript.new()
-	colony_ui.setup(self, configure_window)
+	colony_ui.setup(self, configure_window and not playtest_mode)
 #endregion
 
 
@@ -251,6 +265,7 @@ func _setup_context_menu() -> void:
 	context_menu_controller = MainContextMenuControllerScript.new()
 	context_menu_controller.initialize(world, camera, get_viewport(), hud_layer,
 		selection_controller, camera_controller, worker_window_controller)
+	context_menu_controller.input_state = input_state
 	context_menu_controller.input_barrier_changed.connect(_sync_context_key_state)
 	if not get_viewport().size_changed.is_connected(_on_context_viewport_resized):
 		get_viewport().size_changed.connect(_on_context_viewport_resized)
@@ -283,14 +298,16 @@ func _sync_context_key_state() -> void:
 	for key in [KEY_ESCAPE, KEY_W, KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6, KEY_7,
 		KEY_COMMA, KEY_PERIOD, KEY_BRACKETLEFT, KEY_BRACKETRIGHT, KEY_F2, KEY_F3,
 		KEY_F4, KEY_F5, KEY_F6, KEY_F7, KEY_F8, KEY_F9, KEY_F10, KEY_F11]:
-		key_state[key] = Input.is_key_pressed(key)
+		key_state[key] = input_state.is_key_pressed(key)
 
 
 func _initialize_controllers() -> void:
 	var viewport := get_viewport()
 	camera_controller = MainCameraControllerScript.new()
+	camera_controller.input_state = input_state
 	camera_controller.initialize(camera, viewport)
 	selection_controller = MainSelectionControllerScript.new()
+	selection_controller.input_state = input_state
 	selection_controller.initialize(world, camera, viewport, camera_controller)
 	hud_controller = MainHudControllerScript.new()
 	worker_window_controller = MainWorkerWindowControllerScript.new()
@@ -440,7 +457,7 @@ func _handle_zoom_input(event: InputEvent) -> void:
 
 
 func is_key_just_pressed(keycode: int) -> bool:
-	var down := Input.is_key_pressed(keycode)
+	var down := input_state.is_key_pressed(keycode)
 	var was_down := bool(key_state.get(keycode, false))
 	key_state[keycode] = down
 	return down and not was_down
@@ -477,9 +494,17 @@ func _run_shared_updates(dt: float) -> void:
 		debug_overlay.update_draw_burden()
 		debug_overlay.update_streaming_stats()
 		debug_overlay.update_streaming_capture(dt)
-		debug_overlay.step_world(dt)
+		if playtest_mode:
+			debug_overlay.step_world_controlled(1.0 / 60.0, playtest_controller != null and playtest_controller.advance_this_frame)
+		else:
+			debug_overlay.step_world(dt)
 	else:
-		world.update_world(dt)
+		if playtest_mode:
+			world.update_world_controlled(1.0 / 60.0, playtest_controller != null and playtest_controller.advance_this_frame)
+		else:
+			world.update_world(dt)
+	if playtest_controller != null and playtest_controller.advance_this_frame:
+		playtest_controller.did_advance()
 	_update_depth_limit_background()
 #endregion
 

@@ -485,16 +485,34 @@ func _move_to_work_front(world, task_queue, pathfinder) -> bool:
 			continue
 		if task.type != TaskQueue.TaskType.DIG and task.type != TaskQueue.TaskType.STAIRS:
 			continue
-		var work_level: int = _work_level_for_task(task.type, task.pos, world)
 		var work_positions: Array = []
 		if task.type == TaskQueue.TaskType.STAIRS:
 			var flight_rotation := int(task.data.get("rotation", -1)) if task.data is Dictionary else -1
-			work_positions = TaskWorkPositionRulesScript.stair_work_positions(world, pathfinder, task.pos, flight_rotation)
+			work_positions = TaskWorkPositionRulesScript.stair_work_positions(
+				world,
+				pathfinder,
+				task.pos,
+				flight_rotation,
+				_stair_excluded_cells_for_task(task)
+			)
 		else:
-			work_positions = pathfinder.get_walkable_adjacent_on_level(world, task.pos, work_level)
+			work_positions = TaskWorkPositionRulesScript.task_work_positions(
+				world,
+				pathfinder,
+				task.pos,
+				task.type
+			)
 		for pos in work_positions:
 			var work_rotation := int(task.data.get("rotation", -1)) if task.type == TaskQueue.TaskType.STAIRS and task.data is Dictionary else -1
-			if not _can_work_task_from_coord(task.type, pos, task.pos, world, pathfinder, work_rotation):
+			if not _can_work_task_from_coord(
+				task.type,
+				pos,
+				task.pos,
+				world,
+				pathfinder,
+				work_rotation,
+				_stair_excluded_cells_for_task(task)
+			):
 				continue
 			if pos == start:
 				continue
@@ -556,7 +574,8 @@ func can_work_task(task, world = null, pathfinder = null) -> bool:
 			pathfinder,
 			get_block_coord(),
 			task.pos,
-			int(task.data.get("rotation", -1)) if task.data is Dictionary else -1
+			int(task.data.get("rotation", -1)) if task.data is Dictionary else -1,
+			_stair_excluded_cells_for_task(task)
 		)
 	return true
 #endregion
@@ -787,6 +806,20 @@ func update_working(dt: float, world, task_queue, pathfinder) -> void:
 		var task = task_queue.get_task(current_task_id)
 		if task != null:
 			if task.type == TaskQueue.TaskType.DIG:
+				# A pending DIG can become stale when a player stair or its
+				# protected support is placed before the worker reaches it. Never
+				# mutate protected infrastructure or emit a mining drop here.
+				var stair_dig_reject_reason := ""
+				if world != null and world.has_method("stair_dig_reject_reason"):
+					stair_dig_reject_reason = world.stair_dig_reject_reason(task.pos)
+				if not stair_dig_reject_reason.is_empty():
+					task_queue.remove_task(task)
+					_trace(world, "task_cancelled", task, "reason=%s" % stair_dig_reject_reason)
+					current_task_id = -1
+					active_work_anim = &""
+					set_state(WorkerState.IDLE, world)
+					idle_timer = IDLE_PAUSE
+					return
 				var blocking_workers: Array = world.get_workers_blocking_dig(task.pos)
 				if not blocking_workers.is_empty():
 					work_timer = DIG_OCCUPIED_RETRY_INTERVAL
@@ -815,10 +848,20 @@ func update_working(dt: float, world, task_queue, pathfinder) -> void:
 					world.set_block(task.pos.x, task.pos.y, task.pos.z, task.material)
 				TaskQueue.TaskType.STAIRS:
 					if bool(task.data.get("flight", false)):
+						# Transient blockers keep this worker on the job, like occupied
+						# digs. Releasing it would let workers cycle through it forever.
+						var stair_wait_reason: String = world.stair_task_wait_reason(task)
+						if not stair_wait_reason.is_empty():
+							work_timer = DIG_OCCUPIED_RETRY_INTERVAL
+							if _diagnostics_enabled(world):
+								world.live_diagnostics.observe("worker", str(worker_id), "stairs_deferred", {"task_id": task.id, "reason": stair_wait_reason, "retry_seconds": work_timer})
+							_trace(world, "stairs_deferred", task, "reason=%s" % stair_wait_reason)
+							return
 						if not world.complete_stair_flight(task):
-							task.status = TaskQueue.TaskStatus.PENDING
-							task.accessibility = TaskQueue.TaskAccessibility.UNKNOWN
-							task.assigned_worker = null
+							# Nothing transient blocked it, so the site changed underneath
+							# the job (support dug out, stairs already gone, ...).
+							task_queue.remove_task(task)
+							_trace(world, "task_cancelled", task, "reason=stair_site_invalid")
 							current_task_id = -1
 							active_work_anim = &""
 							idle_timer = IDLE_PAUSE
@@ -826,6 +869,7 @@ func update_working(dt: float, world, task_queue, pathfinder) -> void:
 							return
 					else:
 						world.set_block(task.pos.x, task.pos.y, task.pos.z, task.material)
+						world.cancel_digs_protected_by_stairs([task.pos])
 				TaskQueue.TaskType.HAUL:
 					if not _advance_haul_task(world, task_queue, task):
 						return
@@ -1063,11 +1107,12 @@ func find_path_to_work_position(
 	pathfinder,
 	max_iterations_cap: int
 ) -> Array:
-	var work_positions: Array[Vector3i] = []
-	var work_level: int = _work_level_for_task(task_type, target, world)
-	for candidate in pathfinder.get_walkable_adjacent_on_level(world, target, work_level):
-		if _can_work_task_from_coord(task_type, candidate, target, world, pathfinder):
-			work_positions.append(candidate)
+	var work_positions: Array[Vector3i] = TaskWorkPositionRulesScript.task_work_positions(
+		world,
+		pathfinder,
+		target,
+		task_type
+	)
 	if work_positions.is_empty():
 		pathfinder.last_search_stats = {
 			"start": start,
@@ -1089,8 +1134,21 @@ func find_path_to_work_position(
 	return pathfinder.find_path_to_any(world, start, work_positions, max_iterations_cap)
 
 
-func find_path_to_stairs(world, start: Vector3i, target: Vector3i, pathfinder, flight_rotation: int = -1) -> Array:
-	var candidates := TaskWorkPositionRulesScript.stair_work_positions(world, pathfinder, target, flight_rotation)
+func find_path_to_stairs(
+	world,
+	start: Vector3i,
+	target: Vector3i,
+	pathfinder,
+	flight_rotation: int = -1,
+	excluded_cells: Array = []
+) -> Array:
+	var candidates := TaskWorkPositionRulesScript.stair_work_positions(
+		world,
+		pathfinder,
+		target,
+		flight_rotation,
+		excluded_cells
+	)
 	return pathfinder.find_path_to_any(world, start, candidates, WORKER_PATH_SEARCH_MAX_ITERATIONS)
 #endregion
 
@@ -1099,6 +1157,10 @@ func _current_task(task_queue):
 	if current_task_id < 0 or task_queue == null:
 		return null
 	return task_queue.get_task(current_task_id)
+
+
+func _stair_excluded_cells_for_task(task) -> Array[Vector3i]:
+	return TaskWorkPositionRulesScript.stair_excluded_cells_for_task(task)
 
 
 func _assist_task(task_queue):
@@ -1121,22 +1183,31 @@ func _can_work_task_from_coord(
 	task_pos: Vector3i,
 	world,
 	pathfinder,
-	flight_rotation: int = -1
+	flight_rotation: int = -1,
+	stair_excluded_cells: Array = []
 ) -> bool:
 	# SEE-ADR-001: Normal DIG/PLACE work is same-level and cardinal-adjacent.
 	if task_type == TaskQueue.TaskType.STAIRS:
-		return TaskWorkPositionRulesScript.can_work_stairs_from(world, pathfinder, worker_pos, task_pos, flight_rotation)
+		return TaskWorkPositionRulesScript.can_work_stairs_from(
+			world,
+			pathfinder,
+			worker_pos,
+			task_pos,
+			flight_rotation,
+			stair_excluded_cells
+		)
 	if task_type != TaskQueue.TaskType.DIG and task_type != TaskQueue.TaskType.PLACE:
 		return true
-	if worker_pos.y != _work_level_for_task(task_type, task_pos, world):
-		return false
-	var dx: int = abs(worker_pos.x - task_pos.x)
-	var dz: int = abs(worker_pos.z - task_pos.z)
-	if dx + dz != ADJACENT_MANHATTAN_DISTANCE:
-		return false
 	if world == null or pathfinder == null:
-		return true
-	return pathfinder.can_move_same_level(world, worker_pos, task_pos)
+		return worker_pos.y == _work_level_for_task(task_type, task_pos, world) \
+			and abs(worker_pos.x - task_pos.x) + abs(worker_pos.z - task_pos.z) == ADJACENT_MANHATTAN_DISTANCE
+	return TaskWorkPositionRulesScript.can_work_task_from(
+		world,
+		pathfinder,
+		worker_pos,
+		task_pos,
+		task_type
+	)
 
 
 func _work_level_for_task(_task_type: int, task_pos: Vector3i, _world = null) -> int:

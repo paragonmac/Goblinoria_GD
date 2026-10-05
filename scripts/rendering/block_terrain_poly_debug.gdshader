@@ -1,6 +1,8 @@
 shader_type spatial;
 render_mode unshaded, cull_back, depth_draw_opaque;
 
+#include "terrain_excavation_preview.gdshaderinc"
+
 uniform float top_render_y = 0.0;
 uniform float min_render_y = -1e20;
 
@@ -30,6 +32,7 @@ vec3 debug_palette(float bucket) {
 }
 
 void fragment() {
+	if (inside_excavation_preview()) { discard; }
 	float encoded_uv2_y = UV2.y;
 	bool covered_from_above = encoded_uv2_y >= COVERED_FROM_ABOVE_FLAG;
 	if (covered_from_above) {

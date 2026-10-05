@@ -151,7 +151,7 @@ func capture_snapshot() -> Dictionary:
 	if main.loading_active or not main.world_started:
 		result["world_data"] = {"unavailable": "world_reconstruction_or_not_started"}
 		return result
-	var hit := screen_hit(main.get_viewport().get_mouse_position())
+	var hit := screen_hit(main.input_state.mouse_position(main.get_viewport()))
 	var focus: Vector3i = hit.pos if hit.get("hit", false) else Vector3i(main.get_stream_target().round())
 	result["focus"] = {"source": "cursor_hit" if hit.get("hit", false) else "camera_active_plane", "cell": cell(focus)}
 	var coord: Vector3i = main.world.world_to_chunk_coords(focus.x, focus.y, focus.z)

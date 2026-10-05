@@ -61,17 +61,63 @@ func read_snapshot(world_dir: String) -> Dictionary:
 		return {"ok": false}
 	var items: Array = items_value
 	var stockpiles: Array = stockpiles_value
+	# Reject records that would overwrite stacks or fail during the live swap.
+	var item_ids := {}
 	for item in items:
-		if typeof(item) != TYPE_DICTIONARY:
+		if not _valid_item_record(item) or item_ids.has(item["id"]):
 			return {"ok": false}
+		item_ids[item["id"]] = true
+	var stockpile_ids := {}
+	var occupied_cells := {}
 	for stockpile in stockpiles:
-		if typeof(stockpile) != TYPE_DICTIONARY:
+		if not _valid_stockpile_record(stockpile) or stockpile_ids.has(stockpile["id"]):
 			return {"ok": false}
+		stockpile_ids[stockpile["id"]] = true
+		for cell in stockpile.get("cells", []):
+			if occupied_cells.has(cell):
+				return {"ok": false}
+			occupied_cells[cell] = true
 	return {
 		"ok": true,
 		"items": items.duplicate(true),
 		"stockpiles": stockpiles.duplicate(true),
 	}
+
+
+func _valid_item_record(value: Variant) -> bool:
+	if typeof(value) != TYPE_DICTIONARY:
+		return false
+	for key in ["id", "material_id", "count"]:
+		if typeof(value.get(key)) != TYPE_INT or int(value[key]) <= 0:
+			return false
+	if typeof(value.get("pos")) != TYPE_VECTOR3I:
+		return false
+	for key in ["reserved_by_task_id", "stored_stockpile_id"]:
+		if typeof(value.get(key, -1)) != TYPE_INT:
+			return false
+	# Tasks reset on load, and every supported writer clears this reservation.
+	if int(value.get("reserved_by_task_id", -1)) != -1:
+		return false
+	return true
+
+
+func _valid_stockpile_record(value: Variant) -> bool:
+	if typeof(value) != TYPE_DICTIONARY:
+		return false
+	if typeof(value.get("id")) != TYPE_INT or int(value["id"]) <= 0:
+		return false
+	if typeof(value.get("cells", [])) != TYPE_ARRAY:
+		return false
+	for cell in value.get("cells", []):
+		if typeof(cell) != TYPE_VECTOR3I:
+			return false
+	for key in ["allowed_categories", "material_overrides"]:
+		if typeof(value.get(key, {})) != TYPE_DICTIONARY:
+			return false
+		for enabled in value.get(key, {}).values():
+			if typeof(enabled) != TYPE_BOOL:
+				return false
+	return true
 
 
 func apply_snapshot(world: World, snapshot: Dictionary) -> void:

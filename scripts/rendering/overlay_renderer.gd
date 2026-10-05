@@ -5,6 +5,8 @@ class_name OverlayRenderer
 const ChunkMesherScript = preload("res://scripts/rendering/chunk_mesher.gd")
 const StairFlightScript = preload("res://scripts/stair_flight.gd")
 
+signal excavation_preview_changed(cells: Array[Vector3i])
+
 #region Constants
 const TASK_OVERLAY_SIZE := Vector3(1.0, 1.0, 1.0)
 const DRAG_PREVIEW_SIZE := Vector3(1.0, 1.0, 1.0)
@@ -143,6 +145,7 @@ var item_atlas_texture: Texture2D
 var stockpile_material: ShaderMaterial
 var stair_preview_mesher = ChunkMesherScript.new()
 var stair_preview_mesh_cache: Dictionary = {}
+var excavation_preview_cells: Array[Vector3i] = []
 #endregion
 
 
@@ -221,6 +224,7 @@ func update_overlay_visibility() -> void:
 			int(metadata.get("z", overlay.position.z))
 		)
 		overlay.visible = _drag_preview_visible(pos, int(metadata.get("mode", drag_preview_mode)))
+	_update_excavation_preview()
 
 
 func _drag_preview_visible(pos: Vector3i, mode: int) -> bool:
@@ -541,7 +545,9 @@ func get_drag_material(mode: int, valid: bool = true) -> ShaderMaterial:
 	var render_margin := STORAGE_RENDER_MARGIN if mode == World.PlayerMode.STOCKPILE else 0.0
 	if mode == World.PlayerMode.UP_STAIRS or mode == World.PlayerMode.DOWN_STAIRS:
 		render_margin = _stair_render_margin(mode)
-	var material := _create_overlay_shader_material(color, 0.0, render_margin, mode == World.PlayerMode.DOWN_STAIRS)
+	# Valid downward ghosts sit inside a terrain cutout. Invalid proposals remain
+	# visible in red through terrain without suggesting a valid excavation.
+	var material := _create_overlay_shader_material(color, 0.0, render_margin, mode == World.PlayerMode.DOWN_STAIRS and not valid)
 	drag_materials[key] = material
 	return material
 
@@ -626,7 +632,7 @@ func set_drag_preview_entries(entries: Array, mode: int) -> void:
 		var desired := get_drag_material(mode, valid)
 		if overlay.material_override != desired:
 			overlay.material_override = desired
-		overlay.set_meta("drag_preview", {"x": pos.x, "y": pos.y, "z": pos.z, "mode": mode})
+		overlay.set_meta("drag_preview", {"x": pos.x, "y": pos.y, "z": pos.z, "mode": mode, "valid": valid, "stair_material": stair_material})
 		if mode == World.PlayerMode.UP_STAIRS or mode == World.PlayerMode.DOWN_STAIRS:
 			overlay.mesh = _get_stair_preview_mesh(stair_material)
 			overlay.position = Vector3(pos)
@@ -642,6 +648,24 @@ func set_drag_preview_entries(entries: Array, mode: int) -> void:
 		if not live_ids.has(key):
 			drag_previews[key].queue_free()
 			drag_previews.erase(key)
+	_update_excavation_preview()
+
+
+func _update_excavation_preview() -> void:
+	var cells: Array[Vector3i] = []
+	if world != null and drag_preview_mode == World.PlayerMode.DOWN_STAIRS and drag_previews.size() == 2:
+		for node: MeshInstance3D in drag_previews.values():
+			var metadata: Dictionary = node.get_meta("drag_preview", {})
+			var pos := Vector3i(int(metadata.x), int(metadata.y), int(metadata.z))
+			if not bool(metadata.get("valid", false)) or not StairFlightScript.is_flight(int(metadata.get("stair_material", -1))) \
+					or not node.visible or pos.y > world.top_render_y or pos.y < world.get_min_render_y():
+				cells.clear()
+				break
+			cells.append(pos)
+	if cells == excavation_preview_cells:
+		return
+	excavation_preview_cells = cells
+	excavation_preview_changed.emit(cells)
 
 
 func clear_drag_preview() -> void:
@@ -649,6 +673,7 @@ func clear_drag_preview() -> void:
 		drag_previews[key].queue_free()
 	drag_previews.clear()
 	drag_preview_mode = -1
+	_update_excavation_preview()
 #endregion
 
 

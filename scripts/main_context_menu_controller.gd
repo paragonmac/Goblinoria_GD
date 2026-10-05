@@ -14,6 +14,7 @@ const ACTION_INSPECT := 100
 const ACTION_CANCEL_TASKS := 101
 const ACTION_REMOVE_STOCKPILE := 102
 const ACTION_WORKERS := 103
+const ACTION_REMOVE_STAIRS := 104
 
 # Embedded windows receive their own input before the main viewport does.
 class ContextPopup extends PopupMenu:
@@ -26,6 +27,7 @@ class ContextPopup extends PopupMenu:
 var world: World
 var camera: Camera3D
 var viewport: Viewport
+var input_state = preload("res://scripts/game_input_state.gd").new()
 var selection: MainSelectionController
 var camera_controller: MainCameraController
 var workers: MainWorkerWindowController
@@ -50,6 +52,7 @@ var _action_dispatched := false
 var _hit: Dictionary = {}
 var _pending_target: Dictionary = {}
 var _stockpile_target: Dictionary = {}
+var _stair_target: Dictionary = {}
 
 
 func initialize(world_ref: World, camera_ref: Camera3D, viewport_ref: Viewport,
@@ -213,6 +216,7 @@ func cancel(clear_snapshot: bool = false) -> void:
 	_hit.clear()
 	_pending_target.clear()
 	_stockpile_target.clear()
+	_stair_target.clear()
 	_action_dispatched = true
 	if clear_snapshot:
 		if is_instance_valid(snapshot_panel):
@@ -267,7 +271,7 @@ func _pressed_mouse_buttons() -> Dictionary:
 	var result: Dictionary = {}
 	for button in [MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT, MOUSE_BUTTON_MIDDLE,
 			MOUSE_BUTTON_XBUTTON1, MOUSE_BUTTON_XBUTTON2]:
-		if Input.is_mouse_button_pressed(button):
+		if input_state.is_mouse_button_pressed(button):
 			result[button] = true
 	return result
 
@@ -346,6 +350,7 @@ func _rebuild_menu() -> void:
 	_add_context_item("Inspect clicked cell", ACTION_INSPECT, not _hit.is_empty(), "No visible loaded block here.")
 	_add_context_item("Cancel pending tasks", ACTION_CANCEL_TASKS, not _pending_target.is_empty(), "No pending tasks at this location.")
 	_add_context_item("Remove stockpile designation", ACTION_REMOVE_STOCKPILE, not _stockpile_target.is_empty(), "No stockpile designation at this location.")
+	_add_context_item("Remove stairs", ACTION_REMOVE_STAIRS, not _stair_target.is_empty(), "No player stairs at this location.")
 	popup.add_separator("Colony")
 	popup.add_item("Open Workers [W]", ACTION_WORKERS)
 
@@ -362,12 +367,20 @@ func _capture_targets(screen_pos: Vector2) -> void:
 	_hit.clear()
 	_pending_target.clear()
 	_stockpile_target.clear()
+	_stair_target.clear()
 	var hit := world.raycast_block(camera.project_ray_origin(screen_pos),
 		camera.project_ray_normal(screen_pos), RAYCAST_DISTANCE, false)
 	if not hit.get("hit", false):
 		return
 	var pos: Vector3i = hit.pos
 	_hit = _capture_cell(pos)
+	# SEE-ADR-006: Stair removal uses the visible hit, then the cell above it,
+	# matching other destructive context actions without screen-space retargeting.
+	for candidate: Vector3i in [pos, pos + Vector3i.UP]:
+		if _stair_target.is_empty():
+			var spec := _get_stair_removal_spec(candidate)
+			if not spec.is_empty():
+				_stair_target = _capture_stair_target(candidate, spec)
 	# SEE-ADR-006: Destructive tools prefer the hit, then the cell above it.
 	for candidate: Vector3i in [pos, pos + Vector3i.UP]:
 		if not world.is_block_coord_valid(candidate.x, candidate.y, candidate.z):
@@ -395,6 +408,54 @@ func _cell_unchanged(captured: Dictionary) -> bool:
 	var pos: Vector3i = captured.pos
 	var current := _capture_cell(pos)
 	return current.block_id == captured.block_id and current.chunk_id == captured.chunk_id
+
+
+func _get_stair_removal_spec(pos: Vector3i) -> Dictionary:
+	if world == null:
+		return {}
+	return world.get_stair_removal_spec(pos)
+
+
+func _capture_stair_target(request_pos: Vector3i, spec: Dictionary) -> Dictionary:
+	var footprint: Array = spec.get("footprint", [])
+	if footprint.is_empty():
+		return {}
+	var cells: Array = []
+	for raw_pos in footprint:
+		if not raw_pos is Vector3i:
+			return {}
+		cells.append(_capture_cell(raw_pos))
+	return {
+		"request_pos": request_pos,
+		"anchor": spec.get("anchor", request_pos),
+		"footprint": footprint.duplicate(),
+		"materials": (spec.get("materials", []) as Array).duplicate(),
+		"rotation": int(spec.get("rotation", -1)),
+		"cells": cells,
+	}
+
+
+func _stair_target_unchanged() -> bool:
+	if _stair_target.is_empty():
+		return false
+	var current_spec := _get_stair_removal_spec(_stair_target.request_pos)
+	if current_spec.is_empty():
+		return false
+	if current_spec.get("anchor", null) != _stair_target.anchor \
+			or current_spec.get("footprint", []) != _stair_target.footprint \
+			or current_spec.get("materials", []) != _stair_target.materials \
+			or int(current_spec.get("rotation", -1)) != int(_stair_target.rotation):
+		return false
+	var current_target := _capture_stair_target(_stair_target.request_pos, current_spec)
+	if current_target.is_empty() or current_target.cells.size() != _stair_target.cells.size():
+		return false
+	for index in range(_stair_target.cells.size()):
+		var captured: Dictionary = _stair_target.cells[index]
+		var current: Dictionary = current_target.cells[index]
+		if current.pos != captured.pos or current.block_id != captured.block_id \
+				or current.chunk_id != captured.chunk_id:
+			return false
+	return true
 
 
 func _pending_tasks_at(pos: Vector3i) -> Array:
@@ -444,15 +505,26 @@ func _on_action_selected(id: int) -> void:
 				return
 			var cells: Array[Vector3i] = [_stockpile_target.pos]
 			world.remove_stockpile_cells(cells)
+		ACTION_REMOVE_STAIRS:
+			if not _stair_target_unchanged():
+				_target_changed()
+				return
+			var queued: bool = world.queue_stair_removal(_stair_target.anchor)
+			if not queued:
+				_action_failed("Could not queue stair removal; the stairs changed or already have an active task.")
 		ACTION_WORKERS:
 			workers.open()
 
 
 func _target_changed() -> void:
+	_action_failed("Target changed; reopen the menu")
+
+
+func _action_failed(message: String) -> void:
 	if external_inspector:
-		action_feedback.emit("Target changed; reopen the menu")
+		action_feedback.emit(message)
 		return
-	status_label.text = "Target changed; reopen the menu"
+	status_label.text = message
 	status_label.show()
 	status_timer.start()
 

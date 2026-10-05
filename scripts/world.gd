@@ -574,7 +574,25 @@ func is_empty(x: int, y: int, z: int) -> bool:
 func is_diggable_at(x: int, y: int, z: int) -> bool:
 	if not is_block_coord_valid(x, y, z):
 		return false
+	if not stair_dig_reject_reason(Vector3i(x, y, z)).is_empty():
+		return false
 	return block_registry.get_hardness(get_block(x, y, z)) > 0.0
+
+
+func stair_dig_reject_reason(pos: Vector3i) -> String:
+	if PLAYER_STAIR_BLOCK_IDS.has(get_block_no_generate(pos.x, pos.y, pos.z)):
+		return "stairs_require_removal"
+	if PLAYER_STAIR_BLOCK_IDS.has(get_block_no_generate(pos.x, pos.y + 1, pos.z)):
+		return "stair_support_protected"
+	return ""
+
+
+func get_stair_removal_spec(pos: Vector3i) -> Dictionary:
+	return preload("res://scripts/stair_removal.gd").get_spec(self, pos)
+
+
+func queue_stair_removal(pos: Vector3i) -> bool:
+	return preload("res://scripts/stair_removal.gd").queue(self, pos)
 
 
 func can_place_stairs_at(x: int, y: int, z: int) -> bool:
@@ -634,6 +652,8 @@ func _is_loaded_generated_cell(pos: Vector3i) -> bool:
 func complete_stair_flight(task) -> bool:
 	if task == null or task.type != TaskQueue.TaskType.STAIRS:
 		return false
+	if bool(task.data.get("remove_stairs", false)):
+		return preload("res://scripts/stair_removal.gd").complete(self, task)
 	if task_queue.get_task(task.id) != task:
 		return false
 	if not bool(task.data.get("flight", false)):
@@ -659,7 +679,43 @@ func complete_stair_flight(task) -> bool:
 	# on the main thread and use the task's immutable footprint/material pair.
 	set_block(flight_cells[0].x, flight_cells[0].y, flight_cells[0].z, int(materials[0]))
 	set_block(flight_cells[1].x, flight_cells[1].y, flight_cells[1].z, int(materials[1]))
+	cancel_digs_protected_by_stairs(flight_cells)
 	return true
+
+
+## Returns why a flight task cannot complete yet even though its site may still
+## be valid. Workers wait in place on a reason; an empty reason followed by a
+## failed completion means the site itself changed and the task is stale.
+func stair_task_wait_reason(task) -> String:
+	var removal := bool(task.data.get("remove_stairs", false))
+	for cell: Vector3i in task.data.get("footprint", [task.pos]):
+		for probe: Vector3i in [cell, cell + Vector3i.DOWN, cell + Vector3i.UP]:
+			if is_block_coord_valid(probe.x, probe.y, probe.z) and not _is_loaded_generated_cell(probe):
+				return "chunk_unloaded"
+		if removal:
+			if preload("res://scripts/stair_removal.gd").is_cell_occupied(self, cell):
+				return "occupied"
+		elif not get_workers_blocking_dig(cell).is_empty():
+			return "occupied"
+		if task_queue != null:
+			for other in task_queue.get_active_tasks_at(cell):
+				if other != task and other.status == TaskQueue.TaskStatus.IN_PROGRESS:
+					return "task_in_progress"
+	return ""
+
+
+## Finished stairs make pending digs on their cells and supports stale; drop
+## them now instead of after a worker walks over and spends a full dig timer.
+func cancel_digs_protected_by_stairs(cells: Array) -> void:
+	if task_queue == null:
+		return
+	for cell: Vector3i in cells:
+		for target: Vector3i in [cell, cell + Vector3i.DOWN]:
+			var reason := stair_dig_reject_reason(target)
+			if reason.is_empty():
+				continue
+			for removed in task_queue.remove_pending_tasks_at(target, [TaskQueue.TaskType.DIG]):
+				trace_task_event(removed, "task_cancelled", "reason=%s" % reason)
 
 
 func is_stairs_at(x: int, y: int, z: int) -> bool:
@@ -765,14 +821,19 @@ func get_generation_stats() -> Dictionary:
 
 #region World Update Loop
 func update_world(dt: float) -> void:
+	update_world_controlled(dt, true)
+
+
+func update_world_controlled(dt: float, advance_simulation: bool) -> void:
 	# SEE-ADR-013: Keep one phase sequence, independent of either timing sink.
 	run_performance_timed("World.process_generation_results", process_generation_results)
 	run_performance_timed("World.update_render_height_queue", update_render_height_queue)
-	run_performance_timed("World.update_task_assignments", update_task_assignments)
-	run_performance_timed("World.update_workers", update_workers.bind(dt))
-	run_performance_timed("World.update_task_queue", update_task_queue)
-	run_performance_timed("World.update_task_accessibility", update_task_accessibility)
-	run_performance_timed("World.update_reassign_tasks", update_reassign_tasks.bind(dt))
+	if advance_simulation:
+		run_performance_timed("World.update_task_assignments", update_task_assignments)
+		run_performance_timed("World.update_workers", update_workers.bind(dt))
+		run_performance_timed("World.update_task_queue", update_task_queue)
+		run_performance_timed("World.update_task_accessibility", update_task_accessibility)
+		run_performance_timed("World.update_reassign_tasks", update_reassign_tasks.bind(dt))
 	run_performance_timed("World.update_task_overlays", update_task_overlays_phase)
 
 
@@ -1368,6 +1429,14 @@ func get_workers_blocking_dig(pos: Vector3i) -> Array:
 		if worker_pos.x == pos.x and worker_pos.y == pos.y + 1 and worker_pos.z == pos.z:
 			blocking_workers.append(worker)
 			continue
+		# Movement finishes a validated step before checking support again.
+		if worker.state == Worker.WorkerState.MOVING and worker.path_segment_validated \
+				and worker.path_index > 0 and worker.path_index < worker.path.size():
+			var standing_cell := pos + Vector3i.UP
+			if worker.path[worker.path_index - 1] == standing_cell \
+					or worker.path[worker.path_index] == standing_cell:
+				blocking_workers.append(worker)
+				continue
 		if worker.current_task_id < 0 or worker.path.is_empty():
 			continue
 		var work_pos: Vector3i = worker.path[worker.path.size() - 1]

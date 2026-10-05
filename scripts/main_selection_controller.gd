@@ -17,6 +17,7 @@ const Flight = preload("res://scripts/stair_flight.gd")
 var world: World
 var camera: Camera3D
 var viewport: Viewport
+var input_state = preload("res://scripts/game_input_state.gd").new()
 var camera_controller: MainCameraController
 #endregion
 
@@ -112,6 +113,12 @@ func update_hover_preview() -> void:
 		return
 
 	var hit_pos: Vector3i = hit["pos"]
+	if world.player_mode == World.PlayerMode.DIG:
+		world.set_drag_preview_entries([{
+			"pos": hit_pos,
+			"valid": _dig_preview_is_currently_workable(hit_pos),
+		}], world.player_mode)
+		return
 	if _is_stair_mode():
 		var anchor := _up_stair_target_from_hit(hit_pos) if world.player_mode == World.PlayerMode.UP_STAIRS else _down_stair_target_from_hit(hit_pos)
 		world.set_drag_preview_entries(_flight_preview_entries(anchor), world.player_mode)
@@ -169,7 +176,7 @@ func _end_drag(drag_end: Vector2) -> void:
 func _update_drag_preview() -> void:
 	if viewport == null or world == null:
 		return
-	var drag_now := viewport.get_mouse_position()
+	var drag_now := input_state.mouse_position(viewport)
 	if _is_stair_mode():
 		var hit := _raycast_block_from_screen_pos(drag_now)
 		if hit.get("hit", false):
@@ -197,7 +204,7 @@ func _update_drag_preview() -> void:
 func _raycast_block_at_mouse() -> Dictionary:
 	if viewport == null:
 		return {"hit": false}
-	var mouse_pos := viewport.get_mouse_position()
+	var mouse_pos := input_state.mouse_position(viewport)
 	return _raycast_block_from_screen_pos(mouse_pos)
 
 
@@ -337,6 +344,8 @@ func _enqueue_task_at(x: int, y: int, z: int) -> Dictionary:
 				result["reason"] = "queued" if result["queued"] else "duplicate"
 			else:
 				result["reason"] = reject_reason
+				if reject_reason == "stairs_require_removal" or reject_reason == "stair_support_protected":
+					result["feedback"] = "Right-click the stairs and choose Remove stairs first"
 		World.PlayerMode.PLACE:
 			if world.is_empty(x, y, z) and _has_place_stock():
 				result["queued"] = world.queue_task_request(TaskQueue.TaskType.PLACE, pos, PLACE_MATERIAL_ID)
@@ -425,6 +434,7 @@ func _has_place_stock() -> bool:
 func _uses_hover_preview() -> bool:
 	return world != null and (
 		_is_stair_mode()
+		or world.player_mode == World.PlayerMode.DIG
 		or world.player_mode == World.PlayerMode.ERASE
 		or world.player_mode == World.PlayerMode.STOCKPILE
 	)
@@ -498,6 +508,9 @@ func _dig_selection_reject_reason(pos: Vector3i) -> String:
 		return "missing_world"
 	if not _is_valid_position(pos.x, pos.y, pos.z):
 		return "invalid_position"
+	var stair_reason := world.stair_dig_reject_reason(pos)
+	if not stair_reason.is_empty():
+		return stair_reason
 	if not world.is_diggable_at(pos.x, pos.y, pos.z):
 		return "not_diggable"
 	if world.task_queue != null and world.task_queue.has_active_task_at(pos, TaskQueue.TaskType.DIG):
@@ -513,7 +526,8 @@ func _dig_preview_is_currently_workable(pos: Vector3i) -> bool:
 func _has_horizontal_dig_work_position(pos: Vector3i) -> bool:
 	if world == null or world.pathfinder == null:
 		return false
-	return world.pathfinder.has_walkable_adjacent_on_level(world, pos, pos.y)
+	return not preload("res://scripts/task_work_position_rules.gd").task_work_positions(
+		world, world.pathfinder, pos, TaskQueue.TaskType.DIG).is_empty()
 
 
 func _stair_preview_is_valid(pos: Vector3i) -> bool:

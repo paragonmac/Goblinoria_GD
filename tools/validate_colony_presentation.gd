@@ -90,7 +90,9 @@ func _test_roles_and_read_only() -> void:
 	stale.unreachable_workers[1] = -10000
 	world.task_manager.path_retry_due_by_task[stale_id] = 1
 	var structural_id := world.task_queue.add_stairs_task(Vector3i(5, 1, 0), 2)
-	world.task_queue.get_task(structural_id).set_accessibility(TaskQueue.TaskAccessibility.UNREACHABLE, 1, TaskQueue.TaskBlockReason.NO_WORK_POSITION)
+	var structural_task = world.task_queue.get_task(structural_id)
+	structural_task.data.remove_stairs = true
+	structural_task.set_accessibility(TaskQueue.TaskAccessibility.UNREACHABLE, 1, TaskQueue.TaskBlockReason.NO_WORK_POSITION)
 	var assigned_id := world.task_queue.add_place_task(Vector3i(6, 1, 0), 2)
 	var assigned = world.task_queue.get_task(assigned_id)
 	assigned.status = TaskQueue.TaskStatus.IN_PROGRESS
@@ -113,6 +115,8 @@ func _test_roles_and_read_only() -> void:
 		and model.get_row("worker", 3).description.contains("Waiting for path") \
 		and model.get_row("worker", 3).description.contains("Carrying 3 dirt"), "Worker task, waiting reason, or carried material is missing")
 	_expect(model.get_row("job", haul_id).block_reason == TaskQueue.TaskBlockReason.NO_ELIGIBLE_WORKER, "Missing actual role block reason")
+	_expect(model.get_row("job", structural_id).title.begins_with("Remove stairs ") \
+		and model.get_row("job", structural_id).task_type == TaskQueue.TaskType.STAIRS, "Stair removal keeps STAIRS filtering while using its own job label")
 	var unknown: Dictionary = model.get_row("job", unknown_id)
 	_expect(unknown.accessibility_age_msec == -1 and not unknown.accessibility_stale \
 		and not unknown.blocked and unknown.description.contains("Not evaluated"), "Unknown accessibility was presented as stale or blocked")

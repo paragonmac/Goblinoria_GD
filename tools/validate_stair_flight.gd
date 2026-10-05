@@ -24,6 +24,7 @@ func _init() -> void:
 	_test_path_contract()
 	_test_queue_and_atomic_completion()
 	_test_worker_completion()
+	_test_worker_blocked_and_stale_flights()
 	if failures == 0:
 		print("Stair flight contract OK (%d checks)" % checks)
 		quit(0)
@@ -221,3 +222,78 @@ func _test_worker_completion() -> void:
 			worker.free()
 			world.task_manager.shutdown()
 			world.free()
+
+
+func _start_flight_worker(world: World, anchor: Vector3i, rotation: int) -> Array:
+	var task = world.task_queue.find_nearest(TaskQueue.TaskType.STAIRS, Vector3(anchor))
+	var goals := TaskWorkPositionRules.stair_work_positions(world, world.pathfinder, anchor, rotation)
+	_check(task != null and not goals.is_empty(), "Blocked flight test setup")
+	if task == null or goals.is_empty():
+		return []
+	var worker := Worker.new()
+	worker.worker_id = 1
+	worker.position = Vector3(goals[0])
+	worker.path = [goals[0]]
+	worker.current_task_id = task.id
+	worker.state = Worker.WorkerState.WORKING
+	task.assigned_worker = worker
+	task.status = TaskQueue.TaskStatus.IN_PROGRESS
+	world.workers.append(worker)
+	return [worker, task]
+
+
+func _test_worker_blocked_and_stale_flights() -> void:
+	var world := _make_world()
+	world.task_manager = TaskManager.new(world, world.task_queue)
+	for x in range(-3, 4):
+		for z in range(-3, 4):
+			_load_cell(world, Vector3i(x, 1, z), World.BLOCK_ID_GRANITE)
+			_load_cell(world, Vector3i(x, 2, z), World.BLOCK_ID_AIR)
+	var anchor := Vector3i(0, 2, 0)
+	var rotation := 0
+	var cells := StairFlightScript.cells(anchor, rotation)
+	_prepare_flight_area(world, anchor, rotation, true)
+	_check(world.queue_stair_flight(anchor, rotation, true), "Queue blocked flight")
+	var support_dig_id := world.task_queue.add_dig_task(anchor + Vector3i.DOWN)
+	var started := _start_flight_worker(world, anchor, rotation)
+	if started.is_empty():
+		world.task_manager.shutdown()
+		world.free()
+		return
+	var worker: Worker = started[0]
+	var task = started[1]
+	var occupant := Worker.new()
+	occupant.worker_id = 2
+	occupant.position = Vector3(cells[1] + Vector3i.UP)
+	world.workers.append(occupant)
+	worker.update_working(1.0, world, world.task_queue, world.pathfinder)
+	_check(world.task_queue.get_task(task.id) == task and task.status == TaskQueue.TaskStatus.IN_PROGRESS, "Occupied flight stays assigned instead of cycling")
+	_check(worker.state == Worker.WorkerState.WORKING and worker.current_task_id == task.id, "Builder waits in place while flight is occupied")
+	_check(world.get_block_no_generate(anchor.x, anchor.y, anchor.z) == World.BLOCK_ID_AIR, "Occupied flight is not built")
+	world.workers.erase(occupant)
+	occupant.free()
+	worker.update_working(1.0, world, world.task_queue, world.pathfinder)
+	_check(world.task_queue.get_task(task.id) == null, "Flight completes once the occupant leaves")
+	_check(world.get_block_no_generate(anchor.x, anchor.y, anchor.z) == StairFlightScript.lower_id(rotation), "Flight built after waiting")
+	_check(world.task_queue.get_task(support_dig_id) == null, "Completed flight cancels pending dig on its support")
+
+	# A flight whose support is dug out after queueing is cancelled, not retried.
+	var stale_anchor := Vector3i(0, 2, -2)
+	_prepare_flight_area(world, stale_anchor, rotation, true)
+	_check(world.queue_stair_flight(stale_anchor, rotation, true), "Queue stale flight")
+	world.workers.erase(worker)
+	worker.free()
+	started = _start_flight_worker(world, stale_anchor, rotation)
+	if not started.is_empty():
+		worker = started[0]
+		task = started[1]
+		_load_cell(world, stale_anchor + Vector3i.DOWN, World.BLOCK_ID_AIR)
+		worker.update_working(1.0, world, world.task_queue, world.pathfinder)
+		_check(world.task_queue.get_task(task.id) == null, "Flight with lost support is cancelled")
+		_check(worker.state == Worker.WorkerState.IDLE and worker.current_task_id == -1, "Builder is released from stale flight")
+		_check(world.get_block_no_generate(stale_anchor.x, stale_anchor.y, stale_anchor.z) == World.BLOCK_ID_AIR, "Stale flight builds nothing")
+	for remaining: Worker in world.workers:
+		remaining.free()
+	world.workers.clear()
+	world.task_manager.shutdown()
+	world.free()

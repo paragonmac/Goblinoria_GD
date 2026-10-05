@@ -13,6 +13,7 @@ var block_atlas_texture: Texture2D
 var poly_wire_material: ShaderMaterial
 var debug_normals_enabled: bool = false
 var poly_debug_enabled: bool = false
+var excavation_preview_cells: Array[Vector3i] = []
 
 
 func initialize(world_ref: World) -> void:
@@ -32,6 +33,7 @@ func get_block_material() -> Material:
 			shader_material.set_shader_parameter("top_render_y", float(world.top_render_y))
 			shader_material.set_shader_parameter("min_render_y", float(world.get_min_render_y()))
 		_apply_next_pass(shader_material)
+		_apply_excavation_preview(shader_material)
 		block_material = shader_material
 	return block_material
 
@@ -47,6 +49,23 @@ func set_top_render_y(value: int) -> void:
 			shader_material.set_shader_parameter("min_render_y", float(world.get_min_render_y()))
 			if poly_wire_material != null:
 				poly_wire_material.set_shader_parameter("min_render_y", float(world.get_min_render_y()))
+
+
+func set_excavation_preview(cells: Array[Vector3i]) -> void:
+	excavation_preview_cells = cells.duplicate()
+	_apply_excavation_preview(get_block_material() as ShaderMaterial)
+	if poly_wire_material != null:
+		_apply_excavation_preview(poly_wire_material)
+
+
+func _apply_excavation_preview(material: ShaderMaterial) -> void:
+	material.set_shader_parameter("excavation_preview_enabled", excavation_preview_cells.size() == 2)
+	if excavation_preview_cells.size() != 2:
+		return
+	var first := Vector3(excavation_preview_cells[0])
+	var second := Vector3(excavation_preview_cells[1])
+	material.set_shader_parameter("excavation_preview_min", first.min(second) - Vector3.ONE * 0.5)
+	material.set_shader_parameter("excavation_preview_max", first.max(second) + Vector3.ONE * 0.5)
 
 
 func set_min_render_y(value: int) -> void:
@@ -88,6 +107,7 @@ func _apply_active_shader() -> void:
 			shader_material.set_shader_parameter("top_render_y", float(world.top_render_y))
 			shader_material.set_shader_parameter("min_render_y", float(world.get_min_render_y()))
 		_apply_next_pass(shader_material)
+		_apply_excavation_preview(shader_material)
 
 
 func _apply_next_pass(shader_material: ShaderMaterial) -> void:
@@ -104,6 +124,7 @@ func _get_poly_wire_material() -> ShaderMaterial:
 	if world != null:
 		poly_wire_material.set_shader_parameter("top_render_y", float(world.top_render_y))
 		poly_wire_material.set_shader_parameter("min_render_y", float(world.get_min_render_y()))
+	_apply_excavation_preview(poly_wire_material)
 	return poly_wire_material
 
 

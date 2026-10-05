@@ -67,6 +67,7 @@ func enqueue(world, auction_id: int, task, worker: Worker, max_iterations: int) 
 		"start": start,
 		"target": task.pos,
 		"flight_rotation": int(task.data.get("rotation", -1)) if task.data is Dictionary else -1,
+		"stair_excluded_cells": _stair_excluded_cells_for_task(task),
 		"max_iterations": max_iterations,
 		"snapshot": snapshot,
 		"snapshot_ms": float(Time.get_ticks_usec() - snapshot_started_usec) / 1000.0,
@@ -212,11 +213,19 @@ func _run_search(job: Dictionary) -> Dictionary:
 	elif kind == "haul_delivery":
 		path = pathfinder.find_path(snapshot, start, target, false, false, max_iterations)
 	elif task_type == TaskQueue.TaskType.STAIRS:
-		path = _find_stairs_path(snapshot, pathfinder, start, target, max_iterations, int(job.get("flight_rotation", -1)))
+		path = _find_stairs_path(
+			snapshot,
+			pathfinder,
+			start,
+			target,
+			max_iterations,
+			int(job.get("flight_rotation", -1)),
+			job.get("stair_excluded_cells", [])
+		)
 	elif task_type == TaskQueue.TaskType.HAUL:
 		path = pathfinder.find_path(snapshot, start, target, false, false, max_iterations)
 	else:
-		path = _find_work_path(snapshot, pathfinder, start, target, max_iterations)
+		path = _find_work_path(snapshot, pathfinder, start, target, task_type, max_iterations)
 	return {
 		"job_id": int(job["job_id"]),
 		"kind": String(job.get("kind", "assignment")),
@@ -238,12 +247,15 @@ func _find_work_path(
 	pathfinder: Pathfinder,
 	start: Vector3i,
 	target: Vector3i,
+	task_type: int,
 	max_iterations: int
 ) -> Array:
-	var work_positions: Array[Vector3i] = []
-	for candidate in pathfinder.get_walkable_adjacent_on_level(snapshot, target, target.y):
-		if pathfinder.can_move_same_level(snapshot, candidate, target):
-			work_positions.append(candidate)
+	var work_positions: Array[Vector3i] = TaskWorkPositionRulesScript.task_work_positions(
+		snapshot,
+		pathfinder,
+		target,
+		task_type
+	)
 	if work_positions.is_empty():
 		pathfinder.last_search_stats = {
 			"start": start,
@@ -270,7 +282,18 @@ func _find_stairs_path(
 	start: Vector3i,
 	target: Vector3i,
 	max_iterations: int,
-	flight_rotation: int = -1
+	flight_rotation: int = -1,
+	excluded_cells: Array = []
 ) -> Array:
-	var candidates := TaskWorkPositionRulesScript.stair_work_positions(snapshot, pathfinder, target, flight_rotation)
+	var candidates := TaskWorkPositionRulesScript.stair_work_positions(
+		snapshot,
+		pathfinder,
+		target,
+		flight_rotation,
+		excluded_cells
+	)
 	return pathfinder.find_path_to_any(snapshot, start, candidates, max_iterations)
+
+
+func _stair_excluded_cells_for_task(task) -> Array[Vector3i]:
+	return TaskWorkPositionRulesScript.stair_excluded_cells_for_task(task)

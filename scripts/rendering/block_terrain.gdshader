@@ -1,6 +1,8 @@
 shader_type spatial;
 render_mode cull_back, depth_draw_opaque;
 
+#include "terrain_excavation_preview.gdshaderinc"
+
 uniform float top_render_y = 0.0;
 uniform float min_render_y = -1e20;
 uniform sampler2D atlas_texture;
@@ -12,6 +14,7 @@ const float GREEDY_UV2_FLAG = 2.0;
 const float COVERED_FROM_ABOVE_FLAG = 256.0;
 
 void fragment() {
+	if (inside_excavation_preview()) { discard; }
 	float encoded_uv2_y = UV2.y;
 	bool covered_from_above = encoded_uv2_y >= COVERED_FROM_ABOVE_FLAG;
 	if (covered_from_above) {

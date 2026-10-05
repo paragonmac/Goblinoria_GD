@@ -3,6 +3,7 @@ extends SceneTree
 const SelectionFixture = preload("res://tools/validate_selection_input.gd")
 const Catalog = preload("res://scripts/main_tool_catalog.gd")
 const Context = preload("res://scripts/main_context_menu_controller.gd")
+const StairFlight = preload("res://scripts/stair_flight.gd")
 
 
 class MenuWorld:
@@ -308,6 +309,48 @@ func _test_context_actions() -> void:
 	await _escape()
 	main.camera.position = Vector3(0, 20, 0)
 
+	# Stair removal captures the complete player-stair footprint and queues the
+	# real World action, while preserving STAIRS task classification.
+	var stair_anchor := Vector3i(-9, 1, 6)
+	var stair_cells := StairFlight.cells(stair_anchor, 0)
+	world.task_queue.clear()
+	_set_stair_pair(stair_anchor, 0)
+	await _right_click(_screen(stair_anchor))
+	_check(not _disabled(Context.ACTION_REMOVE_STAIRS), "Player stair pair enables Remove stairs")
+	await _choose(Context.ACTION_REMOVE_STAIRS)
+	var removal_task = world.task_queue.find_nearest(TaskQueue.TaskType.STAIRS, Vector3(stair_anchor))
+	_check(removal_task != null and bool(removal_task.data.get("remove_stairs", false)) \
+		and removal_task.data.get("footprint", []) == stair_cells, "Context action queues real stair-removal task")
+	_check(not world.queue_stair_removal(stair_anchor), "Duplicate stair removal is rejected")
+
+	# Either half selects the same flight. Cancel through the upper half to
+	# exercise the existing footprint-aware pending-task path.
+	await _right_click(_screen(stair_cells[1]))
+	_check(not _disabled(Context.ACTION_REMOVE_STAIRS), "Upper stair half enables Remove stairs")
+	await _choose(Context.ACTION_CANCEL_TASKS)
+	_check(world.task_queue.get_task(removal_task.id) == null, "Pending stair removal can be cancelled from upper half")
+	_set_stair_pair(stair_anchor, 0)
+	await _right_click(_screen(stair_cells[1]))
+	await _choose(Context.ACTION_REMOVE_STAIRS)
+	removal_task = world.task_queue.find_nearest(TaskQueue.TaskType.STAIRS, Vector3(stair_anchor))
+	_check(removal_task != null and removal_task.pos == stair_anchor, "Upper-half selection queues the flight anchor")
+
+	# A changed second half invalidates the menu snapshot instead of retargeting
+	# the remaining half as a legacy/orphan stair.
+	world.task_queue.clear()
+	_set_stair_pair(stair_anchor, 0)
+	await _right_click(_screen(stair_anchor))
+	world.set_block_raw(stair_cells[1].x, stair_cells[1].y, stair_cells[1].z, World.BLOCK_ID_DIRT, true)
+	await _choose(Context.ACTION_REMOVE_STAIRS)
+	_check(world.task_queue.active_count() == 0 and str(_menu().status_label.text).contains("Target changed"), "Changed stair half rejects stale removal")
+
+	# Generated terrain slopes are deliberately unavailable to player-stair removal.
+	world.task_queue.clear()
+	world.set_block_raw(stair_anchor.x, stair_anchor.y, stair_anchor.z, World.TERRAIN_SLOPE_NORTH_ID, true)
+	await _right_click(_screen(stair_anchor))
+	_check(_disabled(Context.ACTION_REMOVE_STAIRS), "Natural terrain slope has no Remove stairs action")
+	await _escape()
+
 
 func _test_lifecycle_and_bounds() -> void:
 	for point in [Vector2(3, 3), Vector2(997, 3), Vector2(3, 797), Vector2(997, 797)]:
@@ -426,6 +469,12 @@ func _choose(id: int) -> void:
 
 func _screen(pos: Vector3i) -> Vector2:
 	return main.camera.unproject_position(Vector3(pos))
+
+
+func _set_stair_pair(anchor: Vector3i, rotation: int) -> void:
+	var cells := StairFlight.cells(anchor, rotation)
+	world.set_block_raw(cells[0].x, cells[0].y, cells[0].z, StairFlight.lower_id(rotation), true)
+	world.set_block_raw(cells[1].x, cells[1].y, cells[1].z, StairFlight.upper_id(rotation), true)
 
 
 func _key(code: int, pressed: bool) -> void:

@@ -186,20 +186,20 @@ func _assert_flight_render(
 		_check(task_node.position == ghost_node.position, label + ": task half %d position differs from ghost" % index)
 		_check(task_node.visible == ghost_node.visible, label + ": task half %d visibility differs from ghost" % index)
 		_check(ghost_node.visible, label + ": ghost half %d is not visible at its matching render slice" % index)
-		_assert_render_settings(task_node, mode, label + " task half %d" % index)
-		_assert_render_settings(ghost_node, mode, label + " ghost half %d" % index)
+		_assert_render_settings(task_node, mode, label + " task half %d" % index, true)
+		_assert_render_settings(ghost_node, mode, label + " ghost half %d" % index, false)
 		var material: ShaderMaterial = task_node.material_override
 		_check(material.get_shader_parameter("albedo_color") == overlay.task_state_color(overlay.task_overlay_state(task)), label + ": job-state color is preserved")
 
 
-func _assert_render_settings(node: MeshInstance3D, mode: int, label: String) -> void:
+func _assert_render_settings(node: MeshInstance3D, mode: int, label: String, designation: bool) -> void:
 	var material := node.material_override as ShaderMaterial
 	_check(material != null and material.shader != null, label + ": missing shader material")
 	if material == null or material.shader == null:
 		return
 	var depth_disabled := material.shader.get_code().contains("depth_test_disabled")
-	var expected_depth_disabled := mode == World.PlayerMode.DOWN_STAIRS
-	_check(depth_disabled == expected_depth_disabled, label + ": depth-test mode does not match ghost")
+	var expected_depth_disabled := designation and mode == World.PlayerMode.DOWN_STAIRS
+	_check(depth_disabled == expected_depth_disabled, label + ": depth-test mode does not match preview/designation policy")
 	var expected_margin := 1.0 if mode == World.PlayerMode.UP_STAIRS else 0.0
 	_check(is_equal_approx(float(material.get_shader_parameter("top_render_margin")), expected_margin), label + ": render margin does not match ghost")
 	_check(is_equal_approx(float(material.get_shader_parameter("top_render_y")), float(world.top_render_y)), label + ": shader slice is current")
