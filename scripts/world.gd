@@ -34,6 +34,7 @@ const AnomalyWatchdogScript = preload("res://scripts/diagnostics/anomaly_watchdo
 const WorkerRolesScript = preload("res://scripts/worker_roles.gd")
 const StairFlightScript = preload("res://scripts/stair_flight.gd")
 const LightFieldScript = preload("res://scripts/world/light_field.gd")
+const GoblinLightScript = preload("res://scripts/world/goblin_light.gd")
 const ChunkDataType = ChunkDataScript
 #endregion
 
@@ -222,6 +223,7 @@ var arena_cooker: WorldArenaCookerScript
 var light_field: LightFieldScript = LightFieldScript.new()
 var light_field_built: bool = false
 var light_field_arena_cook_seen: bool = false
+var goblin_light: GoblinLightScript = GoblinLightScript.new()
 var streaming: WorldStreamingScript
 var raycaster: WorldRaycasterScript
 var debug_profiler: DebugProfiler
@@ -302,6 +304,7 @@ func _ready() -> void:
 
 #region World Initialization
 func init_world(seed_world_flag: bool = true) -> void:
+	goblin_light = GoblinLightScript.new()
 	light_field_built = false
 	light_field_arena_cook_seen = false
 	runtime_epoch += 1
@@ -359,6 +362,7 @@ func save_world(path: String) -> bool:
 
 
 func load_world(path: String) -> bool:
+	goblin_light = GoblinLightScript.new()
 	if live_diagnostics != null:
 		live_diagnostics.mark_event("loading_started")
 	var ok := save_load.load_world(path)
@@ -524,6 +528,8 @@ func set_block_raw(x: int, y: int, z: int, value: int, mark_dirty: bool) -> void
 	chunk.blocks[idx] = value
 	if light_field != null and light_field_built:
 		light_field.notify_block_changed(x, y, z, prev, value)
+	if goblin_light != null and light_field_built:
+		goblin_light.notify_block_changed(x, y, z)
 	# Path snapshots key on block content, not on render state.
 	chunk.block_revision += 1
 	if mark_dirty:
@@ -873,6 +879,8 @@ func update_world_controlled(dt: float, advance_simulation: bool) -> void:
 		light_field_arena_cook_seen = false
 	if light_field != null:
 		run_performance_timed("World.process_light_events", light_field.process_events)
+	if light_field_built and goblin_light != null:
+		run_performance_timed("World.update_goblin_light", goblin_light.update.bind(self))
 	run_performance_timed("World.update_render_height_queue", update_render_height_queue)
 	if advance_simulation:
 		# Debug speed runs whole extra steps rather than scaling dt, so movement,

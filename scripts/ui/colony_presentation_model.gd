@@ -26,6 +26,7 @@ static func cell_details(world, pos: Vector3i, level_base_y: int) -> Dictionary:
 	var protection_reason: String = world.stair_dig_reject_reason(pos)
 	var sky_light: int = world.light_field.get_sky(pos.x, pos.y, pos.z) if world.light_field != null else 0
 	var block_light: int = world.light_field.get_block_light(pos.x, pos.y, pos.z) if world.light_field != null else 0
+	var goblin_light: int = world.goblin_light.get_level(pos.x, pos.y, pos.z) if world.goblin_light != null else 0
 	var explored: bool = world.light_field.is_explored(pos.x, pos.y, pos.z) if world.light_field != null else false
 	var result := {
 		"kind": "cell",
@@ -40,6 +41,7 @@ static func cell_details(world, pos: Vector3i, level_base_y: int) -> Dictionary:
 		"protection_reason": protection_reason,
 		"sky_light": sky_light,
 		"block_light": block_light,
+		"goblin_light": goblin_light,
 		"explored": explored,
 		"occupant_cell": occupant_cell,
 		"workers": [],

@@ -1039,6 +1039,31 @@ func pump_light() -> void:
 		})
 		_apply_light_switches()
 	light_sync.pump(field, world.top_render_y)
+	_pump_goblin_light()
+
+
+var _goblin_atlas: ImageTexture
+var goblin_light_uploads := 0
+
+
+## Goblin light grids (SEE-ADR-021 phase 3): one atlas + cell array for the
+## goblins nearest the view, re-uploaded only when a goblin's light changed.
+func _pump_goblin_light() -> void:
+	var goblins = world.get("goblin_light")
+	if goblins == null or not goblins.gpu_dirty:
+		return
+	var focus := Vector3i(0, world.top_render_y, 0)
+	if world.streaming != null and world.streaming.last_stream_target_valid:
+		var target: Vector3 = world.streaming.last_stream_target
+		focus = Vector3i(int(target.x), world.top_render_y, int(target.z))
+	var data: Dictionary = goblins.build_gpu_data(focus)
+	var image := Image.create_from_data(11 * 11, 11 * goblins.MAX_GPU_GOBLINS, false, Image.FORMAT_R8, data["atlas"])
+	if _goblin_atlas == null:
+		_goblin_atlas = ImageTexture.create_from_image(image)
+	else:
+		_goblin_atlas.update(image)
+	goblin_light_uploads += 1
+	material_helper.set_light_params({"goblin_atlas": _goblin_atlas, "goblin_cells": data["cells"], "goblin_count": int(data["count"])})
 
 
 func _apply_light_switches() -> void:

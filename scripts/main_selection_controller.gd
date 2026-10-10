@@ -117,7 +117,7 @@ func update_hover_preview() -> void:
 	var hit_pos: Vector3i = hit["pos"]
 	if world.player_mode == World.PlayerMode.INFORMATION:
 		# Outline exactly the block a click would inspect.
-		world.set_drag_preview_entries([{"pos": hit_pos, "valid": true}], world.player_mode)
+		world.set_drag_preview_entries([{"pos": hit_pos, "valid": _is_explored(hit_pos)}], world.player_mode)
 		return
 	if world.player_mode == World.PlayerMode.DIG:
 		world.set_drag_preview_entries([{
@@ -304,10 +304,17 @@ func _enqueue_rect_tasks(rect: Dictionary) -> void:
 	var results: Array = []
 	if world != null and world.player_mode == World.PlayerMode.STOCKPILE:
 		var cells: Array[Vector3i] = []
+		var unexplored_cells := 0
 		for pos: Vector3i in _rect_positions(rect):
-			if _can_create_stockpile_at(pos):
+			if not _is_explored(pos):
+				unexplored_cells += 1
+			elif _can_create_stockpile_at(pos):
 				cells.append(pos)
 		var result := _stockpile_result(cells)
+		if unexplored_cells > 0:
+			result["unexplored_count"] = unexplored_cells
+			if cells.is_empty():
+				result["reason"] = "unexplored"
 		_trace_selection("drag", min_x, max_x, min_z, max_z, y, [result])
 		return
 
@@ -335,6 +342,9 @@ func _handle_click(screen_pos: Vector2) -> void:
 	elif world != null and world.player_mode == World.PlayerMode.STOCKPILE:
 		pos = _stockpile_target_from_hit(pos)
 	if world.player_mode == World.PlayerMode.INFORMATION:
+		if not _is_explored(pos):
+			selection_feedback.emit("Unexplored")
+			return
 		cell_inspected.emit(world.get_block_no_generate(pos.x, pos.y, pos.z), pos)
 		return
 	var result := _enqueue_task_at(pos.x, pos.y, pos.z)
@@ -356,6 +366,14 @@ func _enqueue_task_at(x: int, y: int, z: int) -> Dictionary:
 		return result
 	var block_id := world.get_block_no_generate(x, y, z) if _is_stair_mode() else world.get_block(x, y, z)
 	result["block_id"] = block_id
+	# Fog of war: unexplored cells cannot be designated; stairs check both cells.
+	var footprint: Array = [pos]
+	if _is_stair_mode():
+		footprint = Flight.cells(pos, stair_rotation)
+	for cell: Vector3i in footprint:
+		if not _is_explored(cell):
+			result["reason"] = "unexplored"
+			return result
 
 	match world.player_mode:
 		World.PlayerMode.DIG:
@@ -425,9 +443,16 @@ func _trace_selection(
 		else:
 			rejected.append("%s:reason=%s" % [entry, result.get("reason", "unknown")])
 	var message := "%d accepted, %d rejected" % [queued.size(), rejected.size()]
-	if results.size() == 1 and queued.is_empty():
-		var reasons := {"no_stock": "Requires one stored iron ore", "not_empty": "Target is occupied", "no_valid_stockpile_cells": "No valid stockpile cells", "duplicate": "Already designated", "nothing_to_erase": "No pending designation to erase"}
+	var unexplored := 0
+	for result: Dictionary in results:
+		unexplored += _unexplored_count(result)
+	if unexplored > 0 and queued.is_empty() and kind == "drag":
+		message = "%d cells unexplored" % unexplored
+	elif results.size() == 1 and queued.is_empty():
+		var reasons := {"no_stock": "Requires one stored iron ore", "not_empty": "Target is occupied", "no_valid_stockpile_cells": "No valid stockpile cells", "duplicate": "Already designated", "nothing_to_erase": "No pending designation to erase", "unexplored": "Unexplored"}
 		message = str(results[0].get("feedback", reasons.get(results[0].get("reason", ""), "Action unavailable: " + str(results[0].get("reason", "unknown")))))
+	elif unexplored > 0:
+		message += ", %d cells unexplored" % unexplored
 	selection_feedback.emit(message)
 	var mode_name := str(World.PlayerMode.keys()[world.player_mode])
 	world.trace_system_event("selection_committed", "kind=%s mode=%s bounds=%d..%d:%d:%d..%d requested=%d queued=%d rejected=%d queued_positions=%s rejected_positions=%s" % [
@@ -541,7 +566,8 @@ func _dig_selection_reject_reason(pos: Vector3i) -> String:
 
 
 func _dig_preview_is_currently_workable(pos: Vector3i) -> bool:
-	return _dig_selection_reject_reason(pos).is_empty() \
+	return _is_explored(pos) \
+		and _dig_selection_reject_reason(pos).is_empty() \
 		and _has_horizontal_dig_work_position(pos)
 
 
@@ -555,6 +581,9 @@ func _has_horizontal_dig_work_position(pos: Vector3i) -> bool:
 func _stair_preview_is_valid(pos: Vector3i) -> bool:
 	if world == null:
 		return false
+	for cell: Vector3i in Flight.cells(pos, stair_rotation):
+		if not _is_explored(cell):
+			return false
 	if world.player_mode == World.PlayerMode.UP_STAIRS:
 		return _can_place_up_stairs_at(pos)
 	if world.player_mode == World.PlayerMode.DOWN_STAIRS:
@@ -591,7 +620,7 @@ func _erase_target_from_hit(hit_pos: Vector3i) -> Vector3i:
 
 
 func _can_erase_at(pos: Vector3i) -> bool:
-	return world != null and (world.has_pending_task_request_at(pos) or world.is_stockpile_cell(pos))
+	return world != null and _is_explored(pos) and (world.has_pending_task_request_at(pos) or world.is_stockpile_cell(pos))
 
 
 func _stockpile_target_from_hit(hit_pos: Vector3i) -> Vector3i:
@@ -605,6 +634,7 @@ func _stockpile_target_from_hit(hit_pos: Vector3i) -> Vector3i:
 
 func _can_create_stockpile_at(pos: Vector3i) -> bool:
 	return world != null \
+		and _is_explored(pos) \
 		and world.pathfinder != null \
 		and world.is_block_coord_valid(pos.x, pos.y, pos.z) \
 		and world.pathfinder.is_walkable(world, pos.x, pos.y, pos.z) \
@@ -627,6 +657,18 @@ func _stockpile_result(cells: Array[Vector3i]) -> Dictionary:
 	result["queued"] = stockpile_id > 0
 	result["reason"] = "stockpile:%d cells:%d" % [stockpile_id, cells.size()] if result["queued"] else "stockpile_failed"
 	return result
+
+
+func _unexplored_count(result: Dictionary) -> int:
+	if result.has("unexplored_count"):
+		return int(result["unexplored_count"])
+	return 1 if str(result.get("reason", "")) == "unexplored" else 0
+
+
+func _is_explored(pos: Vector3i) -> bool:
+	if world == null or world.light_field == null or not world.light_field_built:
+		return true
+	return world.light_field.is_explored(pos.x, pos.y, pos.z)
 
 
 func _is_valid_position(x: int, y: int, z: int) -> bool:

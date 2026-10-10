@@ -83,6 +83,28 @@ func _run() -> void:
 	renderer.set_render_debug("fog", true)
 	renderer.set_render_debug("light_view", false)
 
+	# Goblin light (phase 3): one goblin in the dug shaft reaches the shader,
+	# and the atlas re-uploads only when its light changed.
+	var worker := Worker.new()
+	worker.worker_id = 1
+	worker.position = Vector3(0, 221, 0)
+	world.workers.append(worker)
+	world.goblin_light.update(world)
+	var uploads_before: int = renderer.goblin_light_uploads
+	renderer.pump_light()
+	_check(renderer.goblin_light_uploads == uploads_before + 1 and int(material.get_shader_parameter("goblin_count")) == 1
+		and material.get_shader_parameter("goblin_atlas") is Texture2D, "A lit goblin uploads its atlas and count")
+	var cells: PackedVector4Array = material.get_shader_parameter("goblin_cells")
+	_check(cells.size() == world.goblin_light.MAX_GPU_GOBLINS and cells[0] == Vector4(0, 221, 0, 0), "Goblin cell reaches the shader")
+	world.goblin_light.update(world)
+	renderer.pump_light()
+	_check(renderer.goblin_light_uploads == uploads_before + 1, "An unchanged goblin does not re-upload")
+	world.workers.clear()
+	world.goblin_light.update(world)
+	renderer.pump_light()
+	_check(int(material.get_shader_parameter("goblin_count")) == 0, "A removed goblin clears its light")
+	worker.free()
+
 	# A rebuilt field (new world / load) rebinds fresh textures.
 	world.light_field.build(world)
 	renderer.pump_light()
@@ -92,7 +114,8 @@ func _run() -> void:
 	var names := []
 	for uniform in (load("res://scripts/rendering/block_terrain.gdshader") as Shader).get_shader_uniform_list():
 		names.append(uniform.name)
-	_check(names.has("light_tex") and names.has("darkness_enabled") and names.has("fog_enabled"), "Terrain shader exposes darkness uniforms")
+	_check(names.has("light_tex") and names.has("darkness_enabled") and names.has("fog_enabled")
+		and names.has("goblin_atlas") and names.has("goblin_cells"), "Terrain shader exposes darkness uniforms")
 
 	print("Light render: %d checks, %d failures" % [checks, failures])
 	world.free()

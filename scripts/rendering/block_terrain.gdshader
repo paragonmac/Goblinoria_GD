@@ -15,6 +15,11 @@ uniform bool fog_enabled = true;
 uniform bool light_view = false;
 uniform ivec2 light_origin = ivec2(-128, -128);
 uniform int light_layers = 256;
+// Goblin light (SEE-ADR-021 phase 3): per goblin an 11x11x11 wall-aware light
+// grid in an atlas (row = dz + 5 + 11 * i, column = dx + 5 + 11 * (dy + 5)).
+uniform sampler2D goblin_atlas : filter_nearest;
+uniform vec4 goblin_cells[64];
+uniform int goblin_count = 0;
 const float UNLIT_DIM = 0.28;
 const float LEVEL_FALLOFF = 0.8;
 const float HEIGHT_SHADE_FACTOR = 0.15;
@@ -82,6 +87,13 @@ void fragment() {
 		if (texel.x >= 0 && texel.x < 256 && texel.y >= 0 && texel.y < 256 && texel.z >= 0 && texel.z < light_layers) {
 			level = texelFetch(light_tex, texel, 0).r * 15.0;
 			explored = texelFetch(explored_tex, texel, 0).r;
+		}
+		for (int i = 0; i < goblin_count; i++) {
+			ivec3 d = cell - ivec3(goblin_cells[i].xyz);
+			if (abs(d.x) <= 5 && abs(d.y) <= 5 && abs(d.z) <= 5) {
+				float g = texelFetch(goblin_atlas, ivec2(d.x + 5 + 11 * (d.y + 5), d.z + 5 + 11 * i), 0).r * 15.0;
+				level = max(level, g);
+			}
 		}
 		if (light_view) {
 			ALBEDO = vec3(level / 15.0);

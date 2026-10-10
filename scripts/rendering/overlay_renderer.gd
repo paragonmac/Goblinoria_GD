@@ -686,6 +686,12 @@ func update_stockpile_overlays(stockpiles: Dictionary) -> void:
 	_update_stockpile_overlays(stockpiles)
 
 
+func _is_explored(pos: Vector3i) -> bool:
+	if world == null or world.light_field == null or not world.light_field_built:
+		return true
+	return world.light_field.is_explored(pos.x, pos.y, pos.z)
+
+
 func _update_item_overlays(items: Dictionary) -> void:
 	var live_ids: Dictionary = {}
 	for item_id in items.keys():
@@ -693,6 +699,8 @@ func _update_item_overlays(items: Dictionary) -> void:
 		if bool(item.get("is_carried", false)):
 			continue
 		var pos: Vector3i = item.get("pos", Vector3i.ZERO)
+		if not _is_explored(pos):
+			continue
 		live_ids[item_id] = true
 		var overlay: MeshInstance3D
 		if not item_overlays.has(item_id):
@@ -717,6 +725,8 @@ func _update_stockpile_overlays(stockpiles: Dictionary) -> void:
 			if typeof(cell) != TYPE_VECTOR3I:
 				continue
 			var pos: Vector3i = cell
+			if not _is_explored(pos):
+				continue
 			var key := "%d:%d:%d" % [pos.x, pos.y, pos.z]
 			live_ids[key] = true
 			var overlay: MeshInstance3D

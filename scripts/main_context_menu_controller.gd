@@ -361,10 +361,12 @@ func _rebuild_menu() -> void:
 		popup.set_item_icon(popup.item_count - 1, UiIconAtlas.texture(tool_icon))
 		popup.set_item_checked(popup.item_count - 1, tool.mode == world.player_mode)
 	popup.add_separator("This location")
-	_add_context_item("Inspect clicked cell", ACTION_INSPECT, not _hit.is_empty(), "No visible loaded block here.", "inspect")
-	_add_context_item("Cancel pending tasks", ACTION_CANCEL_TASKS, not _pending_target.is_empty(), "No pending tasks at this location.", "erase")
-	_add_context_item("Remove stockpile designation", ACTION_REMOVE_STOCKPILE, not _stockpile_target.is_empty(), "No stockpile designation at this location.", "stockpile")
-	_add_context_item("Remove stairs", ACTION_REMOVE_STAIRS, not _stair_target.is_empty(), "No player stairs at this location.", "stairs")
+	# Fog of war: unexplored hits expose no cell information or cell actions.
+	var hit_unexplored := not _hit.is_empty() and not _is_explored(_hit["pos"])
+	_add_context_item("Inspect clicked cell", ACTION_INSPECT, not _hit.is_empty() and not hit_unexplored, "Unexplored" if hit_unexplored else "No visible loaded block here.", "inspect")
+	_add_context_item("Cancel pending tasks", ACTION_CANCEL_TASKS, not _pending_target.is_empty() and not hit_unexplored, "Unexplored" if hit_unexplored else "No pending tasks at this location.", "erase")
+	_add_context_item("Remove stockpile designation", ACTION_REMOVE_STOCKPILE, not _stockpile_target.is_empty() and not hit_unexplored, "Unexplored" if hit_unexplored else "No stockpile designation at this location.", "stockpile")
+	_add_context_item("Remove stairs", ACTION_REMOVE_STAIRS, not _stair_target.is_empty() and not hit_unexplored, "Unexplored" if hit_unexplored else "No player stairs at this location.", "stairs")
 	popup.add_separator("Colony")
 	popup.add_item("Open Workers [W]", ACTION_WORKERS)
 	popup.set_item_icon(popup.item_count - 1, UiIconAtlas.texture("workers"))
@@ -407,6 +409,12 @@ func _capture_targets(screen_pos: Vector2) -> void:
 		if _stockpile_target.is_empty() and world.is_stockpile_cell(candidate):
 			_stockpile_target = _capture_cell(candidate)
 			_stockpile_target["stockpile_id"] = world.stockpile_store.stockpile_at(candidate)
+
+
+func _is_explored(pos: Vector3i) -> bool:
+	if world == null or world.light_field == null or not world.light_field_built:
+		return true
+	return world.light_field.is_explored(pos.x, pos.y, pos.z)
 
 
 func _capture_cell(pos: Vector3i) -> Dictionary:

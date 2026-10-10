@@ -196,6 +196,14 @@ func mark_explored(x: int, y: int, z: int) -> void:
 	_set_explored(_world_index(x, y, z))
 
 
+## Marks raw field indices explored (goblin light batches its cells).
+func mark_explored_indices(indices: PackedInt32Array) -> void:
+	if explored.size() != VOLUME:
+		return
+	for idx in indices:
+		_set_explored(idx)
+
+
 func pending_events() -> int:
 	return _events.size()
 
