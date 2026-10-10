@@ -1321,6 +1321,15 @@ func toggle_debug_normals() -> void:
 
 func set_poly_debug_enabled(enabled: bool) -> void:
 	material_helper.set_poly_debug_enabled(enabled)
+
+
+## F7 draw modes that need terrain materials: "normal", "polygons", "hidden_line".
+func set_terrain_view(view: String) -> bool:
+	return material_helper.set_terrain_view(view)
+
+
+func get_terrain_view() -> String:
+	return material_helper.terrain_view
 #endregion
 
 

@@ -13,6 +13,11 @@ var block_atlas_texture: Texture2D
 var poly_wire_material: ShaderMaterial
 var debug_normals_enabled: bool = false
 var poly_debug_enabled: bool = false
+# F7 terrain view: "normal", "polygons" (coloured fill + visible edges) or
+# "hidden_line" (flat fill + light edges). The fill is opaque and the wire pass
+# is depth tested against it, so only edges of visible surfaces are drawn.
+const TERRAIN_VIEWS := ["normal", "polygons", "hidden_line"]
+var terrain_view := "normal"
 var excavation_preview_cells: Array[Vector3i] = []
 
 
@@ -89,10 +94,24 @@ func set_poly_debug_enabled(enabled: bool) -> void:
 	_apply_active_shader()
 
 
+func set_terrain_view(view: String) -> bool:
+	if not TERRAIN_VIEWS.has(view):
+		return false
+	if terrain_view == view:
+		return true
+	terrain_view = view
+	_apply_active_shader()
+	return true
+
+
+func _poly_view_active() -> bool:
+	return poly_debug_enabled or terrain_view != "normal"
+
+
 func _active_shader() -> Shader:
 	if debug_normals_enabled:
 		return BlockTerrainDebugShader
-	if poly_debug_enabled:
+	if _poly_view_active():
 		return BlockTerrainPolyDebugShader
 	return BlockTerrainShader
 
@@ -111,8 +130,12 @@ func _apply_active_shader() -> void:
 
 
 func _apply_next_pass(shader_material: ShaderMaterial) -> void:
-	if poly_debug_enabled and not debug_normals_enabled:
-		shader_material.next_pass = _get_poly_wire_material()
+	var hidden_line := terrain_view == "hidden_line"
+	shader_material.set_shader_parameter("flat_fill", hidden_line)
+	if _poly_view_active() and not debug_normals_enabled:
+		var wire := _get_poly_wire_material()
+		wire.set_shader_parameter("wire_color", Color(0.86, 0.78, 0.62) if hidden_line else Color(0.02, 0.025, 0.03))
+		shader_material.next_pass = wire
 	else:
 		shader_material.next_pass = null
 

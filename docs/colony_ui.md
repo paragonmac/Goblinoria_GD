@@ -20,7 +20,8 @@ warm brass accents) and keeps the top of the screen clear for the world.
   More and Menu. More lists the remaining categories (Dig & Build, Zones & Rooms,
   Production, Needs & Health, Defense, World & Environment, Game & Diagnostics).
 - Right edge: depth gauge with up/down buttons, the level relative to the
-  starting level and the absolute Y ([ / ] still work).
+  starting level and the absolute Y ([ / ] and Shift + mouse wheel also step
+  the level; Shift + wheel takes priority over stair rotation and zoom).
 - A warning toast above the bar reports jobs no worker can reach; it opens Tasks
   filtered to Blocked.
 - Left: one scrollable management panel above the bar. Workers and Tasks have
@@ -58,7 +59,9 @@ warm brass accents) and keeps the top of the screen clear for the world.
   bakes the code-drawn `UiIcon` vectors into one SubViewport (no image assets).
 - F1-F12 retain their existing diagnostic meanings. In debug builds the backtick
   key toggles 1x/10x simulation speed (also under More > Game & Diagnostics).
-  In debug builds F7 opens the Rendering debug panel (non-modal, runtime only),
+  In debug builds F7 opens the Rendering debug panel (non-modal, runtime only;
+  its Draw mode includes "Wireframe (visible only)" - opaque fill with depth-tested
+  edges, no see-through wires - and "Polygons"),
   which holds the ramp-count dump (`Dump ramp counts`) and live renderer switches.
 
 Text fields and popups own their keys; typing a tool or diagnostic shortcut does

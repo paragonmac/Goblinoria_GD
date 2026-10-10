@@ -9,8 +9,12 @@ const DEPTH_VALUES := [0, 1, 2, 4, 8]
 const DEPTH_LABELS := ["All layers", "1 layer", "2 layers", "4 layers", "8 layers"]
 const UPDATE_LABELS := ["Every frame", "Every 50 ms"]
 const DRAW_MODES := [Viewport.DEBUG_DRAW_DISABLED, Viewport.DEBUG_DRAW_UNSHADED,
-		Viewport.DEBUG_DRAW_OVERDRAW, Viewport.DEBUG_DRAW_WIREFRAME]
-const DRAW_LABELS := ["Normal", "Unshaded", "Overdraw", "Wireframe"]
+		Viewport.DEBUG_DRAW_OVERDRAW, Viewport.DEBUG_DRAW_WIREFRAME,
+		Viewport.DEBUG_DRAW_DISABLED, Viewport.DEBUG_DRAW_DISABLED]
+const DRAW_LABELS := ["Normal", "Unshaded", "Overdraw", "Wireframe (see-through)",
+		"Wireframe (visible only)", "Polygons"]
+## Terrain material view per draw item ("normal" for the viewport debug modes).
+const DRAW_TERRAIN_VIEWS := ["normal", "normal", "normal", "normal", "hidden_line", "polygons"]
 const LOOK_AHEAD_MAX := 0.5
 
 var main
@@ -206,7 +210,9 @@ func _sync_controls() -> void:
 		_update_option.select(0 if bool(settings["refresh_every_frame"]) else 1)
 		_freeze_check.button_pressed = bool(settings["freeze"])
 	var mode: int = main.get_viewport().debug_draw if main != null else Viewport.DEBUG_DRAW_DISABLED
-	_draw_option.select(maxi(DRAW_MODES.find(mode), 0))
+	var view: String = renderer.get_terrain_view() if renderer != null and renderer.has_method("get_terrain_view") else "normal"
+	var index: int = DRAW_TERRAIN_VIEWS.find(view) if view != "normal" else maxi(DRAW_MODES.find(mode), 0)
+	_draw_option.select(index)
 	_wireframe_caption.visible = mode == Viewport.DEBUG_DRAW_WIREFRAME
 	_syncing = false
 
@@ -282,6 +288,9 @@ func _on_draw_selected(index: int) -> void:
 		_wireframe_enabled = true
 		RenderingServer.set_debug_generate_wireframes(true)
 	main.get_viewport().debug_draw = mode
+	var renderer = _renderer()
+	if renderer != null and renderer.has_method("set_terrain_view"):
+		renderer.set_terrain_view(DRAW_TERRAIN_VIEWS[index])
 
 
 func _on_dump_pressed() -> void:

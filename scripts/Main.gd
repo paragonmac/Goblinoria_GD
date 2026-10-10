@@ -194,6 +194,9 @@ func _input(event: InputEvent) -> void:
 		return
 	if menu_open or loading_active:
 		return
+	if _handle_level_wheel(event):
+		get_viewport().set_input_as_handled()
+		return
 	if not selection_controller._is_stair_mode() and not _context_blocks_world_input() and (colony_ui == null or not colony_ui.pointer_owned()):
 		_handle_zoom_input(event)
 
@@ -450,6 +453,20 @@ func _handle_render_layer_keys() -> void:
 		_handle_render_layer_change(-1)
 	elif is_key_just_pressed(KEY_BRACKETRIGHT):
 		_handle_render_layer_change(1)
+
+
+## Shift + mouse wheel steps the render level (wheel up = up), before zoom and
+## stair rotation see the event. UI under the pointer keeps the wheel.
+func _handle_level_wheel(event: InputEvent) -> bool:
+	if not event is InputEventMouseButton or not event.shift_pressed:
+		return false
+	if event.button_index != MOUSE_BUTTON_WHEEL_UP and event.button_index != MOUSE_BUTTON_WHEEL_DOWN:
+		return false
+	if _context_blocks_world_input() or (colony_ui != null and colony_ui.pointer_owned()):
+		return false
+	if event.pressed:
+		_handle_render_layer_change(1 if event.button_index == MOUSE_BUTTON_WHEEL_UP else -1)
+	return true
 
 
 func _handle_render_layer_change(delta: int) -> void:

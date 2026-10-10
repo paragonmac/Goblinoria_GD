@@ -5,6 +5,9 @@ render_mode unshaded, cull_back, depth_draw_opaque;
 
 uniform float top_render_y = 0.0;
 uniform float min_render_y = -1e20;
+// Hidden-line view: one flat fill instead of per-polygon colours.
+uniform bool flat_fill = false;
+uniform vec3 flat_fill_color = vec3(0.10, 0.11, 0.13);
 
 const float GREEDY_UV2_FLAG = 2.0;
 const float COVERED_FROM_ABOVE_FLAG = 256.0;
@@ -73,5 +76,5 @@ void fragment() {
 		bucket = fallback_bucket;
 	}
 	float shade = clamp(dot(normalize(NORMAL), LIGHT_DIR) * 0.45 + 0.65, 0.35, 1.0);
-	ALBEDO = debug_palette(bucket) * shade;
+	ALBEDO = (flat_fill ? flat_fill_color : debug_palette(bucket)) * shade;
 }

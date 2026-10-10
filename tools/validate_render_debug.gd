@@ -76,6 +76,7 @@ func _run() -> void:
 	_test_modes_depth_freeze()
 	_test_look_ahead_switch()
 	_test_void_meter_and_stats()
+	_test_terrain_views()
 	print("Render debug: %d checks, %d failures" % [checks, failures])
 	quit(1 if failures > 0 else 0)
 
@@ -156,6 +157,26 @@ func _test_look_ahead_switch() -> void:
 	renderer.set_render_debug("look_ahead", true)
 	renderer.set_render_debug("look_ahead_sec", 0.3)
 	_check(is_equal_approx(renderer.get_look_ahead_sec(), 0.3), "Lead seconds follow the slider value")
+	world.free()
+
+
+## Hidden-line view: opaque flat fill plus a depth-tested wire pass (no
+## see-through edges); polygons view keeps per-polygon colours; normal restores.
+func _test_terrain_views() -> void:
+	var world := _world()
+	var renderer = world.renderer
+	var material: ShaderMaterial = renderer.get_block_material()
+	_check(not renderer.set_terrain_view("xray"), "Unknown terrain view is rejected")
+	_check(renderer.set_terrain_view("hidden_line"), "Hidden-line view accepted")
+	_check(material.shader == renderer.material_helper.BlockTerrainPolyDebugShader and material.next_pass != null
+		and bool(material.get_shader_parameter("flat_fill")), "Hidden-line view uses an opaque flat fill with a wire pass")
+	var wire: ShaderMaterial = material.next_pass
+	_check(not wire.shader.code.contains("depth_test_disabled") and wire.shader.code.contains("depth_draw_opaque"),
+		"Wire pass is depth tested, so hidden edges stay hidden")
+	_check(renderer.set_terrain_view("polygons") and not bool(material.get_shader_parameter("flat_fill"))
+		and material.next_pass != null, "Polygons view keeps per-polygon colours and edges")
+	_check(renderer.set_terrain_view("normal") and material.shader == renderer.material_helper.BlockTerrainShader
+		and material.next_pass == null, "Normal view restores the terrain shader")
 	world.free()
 
 

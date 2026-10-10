@@ -5,6 +5,7 @@ render_mode unshaded, wireframe, cull_back, depth_draw_opaque;
 
 uniform float top_render_y = 0.0;
 uniform float min_render_y = -1e20;
+uniform vec3 wire_color = vec3(0.02, 0.025, 0.03);
 
 const float GREEDY_UV2_FLAG = 2.0;
 const float COVERED_FROM_ABOVE_FLAG = 256.0;
@@ -31,5 +32,5 @@ void fragment() {
 	if (top_flag > 0.5 && top_render_y >= UV2.x + 1.0) {
 		discard;
 	}
-	ALBEDO = vec3(0.02, 0.025, 0.03);
+	ALBEDO = wire_color;
 }

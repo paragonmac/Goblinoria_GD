@@ -204,6 +204,35 @@ func _check_gauge() -> void:
 	press(button_named(ui.command_bar.gauge, "LevelDown"))
 	await settle()
 	check(world.top_render_y == 0, "LevelDown respects lower bound")
+	# Shift + mouse wheel steps the level (wheel up = up), even in a stairs mode
+	# where the plain wheel rotates the flight; plain wheel still zooms.
+	world.set_player_mode(World.PlayerMode.DOWN_STAIRS)
+	var rotation_before: int = main.selection_controller.stair_rotation
+	world.set_top_render_y(10)
+	for pair in [[MOUSE_BUTTON_WHEEL_UP, 11], [MOUSE_BUTTON_WHEEL_DOWN, 10]]:
+		for pressed in [true, false]:
+			var wheel := InputEventMouseButton.new()
+			wheel.button_index = pair[0]
+			wheel.pressed = pressed
+			wheel.shift_pressed = true
+			wheel.position = Vector2(960, 300)
+			wheel.global_position = wheel.position
+			main._input(wheel)
+		check(world.top_render_y == pair[1], "Shift + wheel steps the render level to %d (got %d)" % [pair[1], world.top_render_y])
+	check(main.selection_controller.stair_rotation == rotation_before, "Shift + wheel does not rotate a stair flight")
+	world.set_player_mode(World.PlayerMode.INFORMATION)
+	# Either direction may sit at a zoom limit; one of them must change the zoom.
+	var zoom_changed := false
+	for button in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]:
+		var zoom_before: float = main.camera.size
+		var plain := InputEventMouseButton.new()
+		plain.button_index = button
+		plain.pressed = true
+		plain.position = Vector2(960, 300)
+		plain.global_position = plain.position
+		main._input(plain)
+		zoom_changed = zoom_changed or main.camera.size != zoom_before
+	check(world.top_render_y == 10 and zoom_changed, "Plain wheel zooms and leaves the level alone (zoom changed %s)" % str(zoom_changed))
 
 func _check_more() -> void:
 	var secondary := ""
