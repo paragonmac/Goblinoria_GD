@@ -40,12 +40,21 @@ var priority_task_limit := 0
 var priority_worker_cursor := 0
 var priority_choices: Dictionary = {}
 var priority_winner: Dictionary = {}
+# Every bid of the round per worker (not only the best), so the round can be
+# committed as a greedy matching instead of one claim per round.
+var priority_alternates: Dictionary = {}
 var priority_choice_checks: Dictionary = {}
 var assignment_job_context: Dictionary = {}
 # Per auction: start cells whose search already failed (identical searches are
 # skipped) and the number of candidates that failed to reach the task.
 var assignment_failed_starts: Dictionary = {}
 var assignment_failed_count := 0
+# Grid auction (SEE-ADR-005 amendment 2026-10-10): candidates near the task
+# share one reverse navigation-grid search; far ones keep per-worker searches.
+const GRID_AUCTION_RADIUS_XZ := 64
+const GRID_AUCTION_RADIUS_Y := 24
+var assignment_auction_dispatched := false
+var assignment_legacy_workers: Array[Worker] = []
 const PRIORITY_SCAN_BUDGET := 128
 ## Auctions per priority round before committing the best choices found. Full
 ## rounds over every pending task needed ~1000 serial path searches with 70
@@ -352,12 +361,15 @@ func update_task_assignments() -> void:
 
 	# One in-flight assignment path bounds snapshot/result retention independent of
 	# task count. Delivery/assist paths retain their own existing handoff contracts.
+	if not assignment_auction_dispatched:
+		assignment_auction_dispatched = true
+		_dispatch_grid_auction(task)
 	if not assignment_pending_jobs.is_empty():
 		if _diagnostics_enabled():
 			world.live_diagnostics.observe("task", str(task.id), "auction_waiting_for_bids", {"auction_id": assignment_auction_id, "pending_jobs": assignment_pending_jobs.size(), "received_bids": assignment_bids.size()})
 		return
-	if assignment_worker_index < assignment_workers.size():
-		var worker: Worker = assignment_workers[assignment_worker_index]
+	if assignment_worker_index < assignment_legacy_workers.size():
+		var worker: Worker = assignment_legacy_workers[assignment_worker_index]
 		assignment_worker_index += 1
 		_queue_worker_bid(task, worker)
 		return
@@ -408,6 +420,14 @@ func _remember_priority_bid(task, worker: Worker, bid: Dictionary) -> void:
 	if not priority_round_active:
 		return
 	var priority := worker.get_work_priority(Worker.WorkPrioritiesScript.task_work_id(task.type))
+	var alternate := bid.duplicate()
+	alternate["task"] = task
+	alternate["priority"] = priority
+	alternate["configuration"] = worker.get_work_configuration()
+	alternate["start"] = worker.get_block_coord()
+	if not priority_alternates.has(worker.worker_id):
+		priority_alternates[worker.worker_id] = []
+	priority_alternates[worker.worker_id].append(alternate)
 	var previous: Dictionary = priority_choices.get(worker.worker_id, {})
 	if not previous.is_empty():
 		if priority > int(previous["priority"]):
@@ -426,6 +446,13 @@ func _remember_priority_bid(task, worker: Worker, bid: Dictionary) -> void:
 
 
 func _priority_choice_valid(choice: Dictionary) -> bool:
+	if not _priority_choice_valid_except_snapshot(choice):
+		return false
+	var snapshot = choice.get("snapshot")
+	return snapshot != null and snapshot.revisions_match(world)
+
+
+func _priority_choice_valid_except_snapshot(choice: Dictionary) -> bool:
 	if choice.is_empty():
 		return false
 	var worker: Worker = choice["worker"]
@@ -440,8 +467,7 @@ func _priority_choice_valid(choice: Dictionary) -> bool:
 		return false
 	if worker.get_block_coord() != choice["start"]:
 		return false
-	var snapshot = choice.get("snapshot")
-	return snapshot != null and snapshot.revisions_match(world)
+	return true
 
 
 func _finish_priority_round_step() -> void:
@@ -460,19 +486,49 @@ func _finish_priority_round_step() -> void:
 				priority_winner = choice
 	if processed > 0:
 		return
-	if _priority_choice_valid(priority_winner):
-		var worker: Worker = priority_winner["worker"]
-		var task = priority_winner["task"]
-		if _diagnostics_enabled():
-			world.live_diagnostics.observe("task", str(task.id), "auction_winner", {"worker_id": worker.worker_id, "priority": priority_winner["priority"], "path_length": priority_winner["path_length"], "tie_break": "worker_priority_then_path_then_worker_id"})
-		worker.assign_task_with_path(world, task_queue, task, priority_winner["path"], priority_winner["search_ms"])
-		priority_choices.erase(worker.worker_id)
-		priority_winner = {}
-		priority_worker_cursor = 0
-		return
-	# Independent nominations can claim without repeating searches. Once exhausted,
-	# recompute losers against unclaimed jobs, including their lower priorities.
+	_commit_priority_matching()
+	# Recompute losers against unclaimed jobs, including their lower priorities.
 	_reset_priority_round()
+
+
+## SEE-ADR-005 (amendment 2026-10-10): commit the round as a greedy matching over
+## every bid it collected, ordered by worker priority, path length, worker ID and
+## task ID. Each worker and task is used once. One claim per round left most
+## workers idle when they all nominated the same nearest task.
+func _commit_priority_matching() -> void:
+	var pairs: Array = []
+	for worker_id in priority_alternates:
+		pairs.append_array(priority_alternates[worker_id])
+	if pairs.is_empty():
+		return
+	pairs.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		if int(a["priority"]) != int(b["priority"]):
+			return int(a["priority"]) < int(b["priority"])
+		if int(a["path_length"]) != int(b["path_length"]):
+			return int(a["path_length"]) < int(b["path_length"])
+		if int(a["worker_id"]) != int(b["worker_id"]):
+			return int(a["worker_id"]) < int(b["worker_id"])
+		return a["task"].id < b["task"].id)
+	var used_workers := {}
+	var used_tasks := {}
+	var snapshot_valid := {}
+	for choice: Dictionary in pairs:
+		var worker_id := int(choice["worker_id"])
+		var task = choice["task"]
+		if used_workers.has(worker_id) or used_tasks.has(task.id):
+			continue
+		# Bids of one grid auction share a snapshot: validate it once.
+		var snapshot = choice.get("snapshot")
+		if snapshot != null and not snapshot_valid.has(snapshot):
+			snapshot_valid[snapshot] = snapshot.revisions_match(world)
+		if snapshot == null or not snapshot_valid[snapshot] or not _priority_choice_valid_except_snapshot(choice):
+			continue
+		var worker: Worker = choice["worker"]
+		if _diagnostics_enabled():
+			world.live_diagnostics.observe("task", str(task.id), "auction_winner", {"worker_id": worker_id, "priority": choice["priority"], "path_length": choice["path_length"], "tie_break": "priority_then_path_then_worker_id_then_task_id"})
+		worker.assign_task_with_path(world, task_queue, task, choice["path"], choice["search_ms"])
+		used_workers[worker_id] = true
+		used_tasks[task.id] = true
 
 
 func _reset_priority_round() -> void:
@@ -488,6 +544,7 @@ func _reset_priority_round() -> void:
 	priority_task_limit = 0
 	priority_worker_cursor = 0
 	priority_choices.clear()
+	priority_alternates.clear()
 	priority_choice_checks.clear()
 	priority_winner = {}
 
@@ -830,29 +887,71 @@ func _start_assignment_auction(task) -> void:
 	assignment_job_context.clear()
 	assignment_failed_starts.clear()
 	assignment_failed_count = 0
+	assignment_auction_dispatched = false
+	assignment_legacy_workers.clear()
 	world.trace_task_event(task, "assignment_auction_started", "candidate_workers=%s" % _worker_ids(assignment_workers))
 	if _diagnostics_enabled():
 		world.live_diagnostics.observe("task", str(task.id), "auction_started", {"auction_id": assignment_auction_id, "candidate_count": assignment_workers.size()})
 
 
-func _queue_worker_bid(task, worker: Worker) -> void:
+## Filters shared by grid and per-worker bids. False means no search is needed
+## (ineligible, outranked, or already proven unreachable).
+func _bid_precheck(task, worker: Worker) -> bool:
 	if not worker.can_accept_task(task) or not _is_worker_available(worker):
 		if _diagnostics_enabled():
 			world.live_diagnostics.observe("worker", str(worker.worker_id), "bid_ineligible", {"task_id": task.id, "role_id": worker.role_id, "state": worker.state, "current_task_id": worker.current_task_id})
-		return
+		return false
 	if not _task_material_available(task) or not _can_improve_priority_choice(task, worker):
 		# A proven higher-priority choice makes this path unnecessary this round.
 		# If it goes stale before commit, the next round retries all candidates.
-		return
+		return false
 	var now_msec := Time.get_ticks_msec()
 	if task.is_worker_unreachable(worker.worker_id, now_msec):
 		if _diagnostics_enabled():
 			world.live_diagnostics.observe("worker", str(worker.worker_id), "bid_excluded_until_retry", {"task_id": task.id, "marked_msec": int(task.unreachable_workers[worker.worker_id]), "ttl_msec": TaskQueue.WORKER_UNREACHABLE_TTL_MSEC})
-		return
+		return false
 	if task.id == assignment_task_id and assignment_failed_starts.has(worker.get_block_coord()):
 		# Same start cell, same snapshot terrain: this search would fail identically.
 		world.trace_worker_event(worker, "assignment_bid_skipped", task, "reason=start_cell_already_failed")
 		mark_worker_unreachable_for_task(task, worker)
+		return false
+	return true
+
+
+## One reverse navigation-grid search for every eligible candidate near the
+## task; candidates farther away fall back to per-worker searches.
+func _dispatch_grid_auction(task) -> void:
+	var near: Array = []
+	assignment_legacy_workers.clear()
+	assignment_worker_index = 0
+	# Test doubles that only implement per-worker jobs keep the per-worker path.
+	var grid_supported: bool = path_search_scheduler.has_method("enqueue_auction")
+	for worker: Worker in assignment_workers:
+		if not grid_supported:
+			assignment_legacy_workers.append(worker)
+			continue
+		var start := worker.get_block_coord()
+		if absi(start.x - task.pos.x) > GRID_AUCTION_RADIUS_XZ or absi(start.z - task.pos.z) > GRID_AUCTION_RADIUS_XZ \
+				or absi(start.y - task.pos.y) > GRID_AUCTION_RADIUS_Y:
+			assignment_legacy_workers.append(worker)
+			continue
+		if _bid_precheck(task, worker):
+			near.append(worker)
+	if near.is_empty():
+		return
+	var job_id: int = path_search_scheduler.enqueue_auction(world, assignment_auction_id, task, near)
+	var workers := {}
+	for worker: Worker in near:
+		workers[worker.worker_id] = {"worker": worker, "configuration": worker.get_work_configuration(), "start": worker.get_block_coord()}
+		world.trace_worker_event(worker, "assignment_bid_queued", task, "job_id=%d grid=true" % job_id)
+	assignment_pending_jobs[job_id] = null
+	assignment_job_context[job_id] = {"task": task, "workers": workers}
+	if _diagnostics_enabled():
+		world.live_diagnostics.observe("task", str(task.id), "grid_auction_queued", {"auction_id": assignment_auction_id, "job_id": job_id, "workers": near.size(), "legacy_workers": assignment_legacy_workers.size()})
+
+
+func _queue_worker_bid(task, worker: Worker) -> void:
+	if not _bid_precheck(task, worker):
 		return
 	var job_id: int = path_search_scheduler.enqueue(
 		world,
@@ -886,6 +985,10 @@ func _process_path_results() -> void:
 			_observe_path_result(result, "assignment_result_cancelled", "auction_replaced")
 			_record_path_disposition("assignment", "cancelled")
 			continue
+		if kind == "auction":
+			if _process_grid_auction_result(result):
+				restart_auction = true
+			continue
 		var job_id: int = int(result.get("job_id", -1))
 		var worker: Worker = assignment_pending_jobs.get(job_id, null)
 		assignment_pending_jobs.erase(job_id)
@@ -916,6 +1019,47 @@ func _process_path_results() -> void:
 	if restart_auction:
 		_reset_assignment_auction()
 		_reset_priority_round()
+
+
+## Splits a grid auction result into per-worker bids for the unchanged ADR-005
+## collection/priority path. Returns true when the auction must restart.
+func _process_grid_auction_result(result: Dictionary) -> bool:
+	var job_id: int = int(result.get("job_id", -1))
+	assignment_pending_jobs.erase(job_id)
+	var context: Dictionary = assignment_job_context.get(job_id, {})
+	assignment_job_context.erase(job_id)
+	var task = task_queue.get_task(int(result.get("task_id", -1)))
+	if task == null or context.is_empty() or context["task"] != task:
+		_observe_path_result(result, "assignment_result_cancelled", "task_missing")
+		_record_path_disposition("assignment", "cancelled")
+		return false
+	var snapshot = result.get("snapshot", null)
+	if snapshot == null or not snapshot.revisions_match(world):
+		_observe_path_result(result, "assignment_bid_stale", "snapshot_revision_mismatch")
+		_record_path_disposition("assignment", "stale")
+		return true
+	_record_path_disposition("assignment", "accepted")
+	var stats: Dictionary = result.get("search_stats", {})
+	var bids: Array = result.get("bids", [])
+	var per_bid_ms: float = float(result.get("search_ms", 0.0)) / maxf(1.0, bids.size())
+	var stale := false
+	for bid: Dictionary in bids:
+		var entry: Dictionary = context["workers"].get(int(bid["worker_id"]), {})
+		var worker: Worker = entry.get("worker", null)
+		if not is_instance_valid(worker):
+			continue
+		if entry["configuration"] != worker.get_work_configuration() or entry["start"] != worker.get_block_coord():
+			world.trace_worker_event(worker, "assignment_bid_stale", task, "job_id=%d grid=true" % job_id)
+			stale = true
+			continue
+		_collect_worker_bid_result(task, worker, {
+			"job_id": job_id, "worker_id": worker.worker_id, "task_id": task.id, "path": bid["path"],
+			"snapshot_ms": float(result.get("snapshot_ms", 0.0)), "queue_wait_ms": float(result.get("queue_wait_ms", 0.0)),
+			"search_ms": per_bid_ms, "snapshot": snapshot,
+			"search_stats": {"reason": bid["reason"], "hit_iteration_cap": not bool(bid["conclusive"]),
+				"iterations_used": int(stats.get("flood_nodes", 0)), "max_iterations": 0, "grid": true},
+		})
+	return stale
 
 
 ## Exactly once per popped result, before any request/lifetime rejection.
@@ -1191,6 +1335,8 @@ func _reset_assignment_auction() -> void:
 	assignment_job_context.clear()
 	assignment_failed_starts.clear()
 	assignment_failed_count = 0
+	assignment_auction_dispatched = false
+	assignment_legacy_workers.clear()
 
 
 func _worker_ids(worker_list: Array) -> String:

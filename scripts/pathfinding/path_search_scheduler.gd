@@ -4,6 +4,7 @@ class_name PathSearchScheduler
 
 const PathWorldSnapshotScript = preload("res://scripts/pathfinding/path_world_snapshot.gd")
 const TaskWorkPositionRulesScript = preload("res://scripts/task_work_position_rules.gd")
+const NavGridScript = preload("res://scripts/pathfinding/nav_grid.gd")
 const SNAPSHOT_MARGIN_XZ := 32
 const SNAPSHOT_MARGIN_Y := 8
 
@@ -69,6 +70,45 @@ func enqueue(world, auction_id: int, task, worker: Worker, max_iterations: int) 
 		"flight_rotation": int(task.data.get("rotation", -1)) if task.data is Dictionary else -1,
 		"stair_excluded_cells": _stair_excluded_cells_for_task(task),
 		"max_iterations": max_iterations,
+		"snapshot": snapshot,
+		"snapshot_ms": float(Time.get_ticks_usec() - snapshot_started_usec) / 1000.0,
+		"queued_usec": Time.get_ticks_usec(),
+	}
+	_enqueue_job(job)
+	return job_id
+
+
+## One job for a whole task auction (SEE-ADR-005 amendment 2026-10-10): one
+## snapshot covering the task and every candidate start, one navigation grid
+## and one reverse search from the task's work positions. The result carries a
+## bid per worker; "conclusive" is false when the search could not prove the
+## outcome (flood stopped at the snapshot edge), which must not exclude anyone.
+func enqueue_auction(world, auction_id: int, task, workers: Array) -> int:
+	var job_id := next_job_id
+	next_job_id += 1
+	var snapshot_started_usec := Time.get_ticks_usec()
+	var worker_ids: Array[int] = []
+	var starts: Array = []
+	for worker: Worker in workers:
+		worker_ids.append(worker.worker_id)
+		starts.append(worker.get_block_coord())
+	var snapshot = PathWorldSnapshotScript.new()
+	snapshot.capture_from_world(world, task.pos, starts, SNAPSHOT_MARGIN_XZ, SNAPSHOT_MARGIN_Y)
+	var job := {
+		"job_id": job_id,
+		"kind": "auction",
+		"request_id": 0,
+		"auction_id": auction_id,
+		"task_id": task.id,
+		"task_type": task.type,
+		"worker_id": -1,
+		"worker_ids": worker_ids,
+		"starts": starts,
+		"start": task.pos,
+		"target": task.pos,
+		"flight_rotation": int(task.data.get("rotation", -1)) if task.data is Dictionary else -1,
+		"stair_excluded_cells": _stair_excluded_cells_for_task(task),
+		"max_iterations": 0,
 		"snapshot": snapshot,
 		"snapshot_ms": float(Time.get_ticks_usec() - snapshot_started_usec) / 1000.0,
 		"queued_usec": Time.get_ticks_usec(),
@@ -208,6 +248,8 @@ func _run_search(job: Dictionary) -> Dictionary:
 	var max_iterations: int = int(job["max_iterations"])
 	var path: Array = []
 	var kind := String(job.get("kind", "assignment"))
+	if kind == "auction":
+		return _run_auction(job, pathfinder, started_usec, queue_wait_ms)
 	if kind == "goals":
 		path = pathfinder.find_path_to_any(snapshot, start, job.get("goals", []), max_iterations)
 	elif kind == "haul_delivery":
@@ -238,6 +280,70 @@ func _run_search(job: Dictionary) -> Dictionary:
 		"queue_wait_ms": queue_wait_ms,
 		"search_ms": float(Time.get_ticks_usec() - started_usec) / 1000.0,
 		"search_stats": pathfinder.last_search_stats.duplicate(true),
+		"snapshot": snapshot,
+	}
+
+
+func _run_auction(job: Dictionary, pathfinder: Pathfinder, started_usec: int, queue_wait_ms: float) -> Dictionary:
+	var snapshot = job["snapshot"]
+	var target: Vector3i = job["target"]
+	var task_type: int = int(job["task_type"])
+	var goals: Array = []
+	if task_type == TaskQueue.TaskType.STAIRS:
+		goals = TaskWorkPositionRulesScript.stair_work_positions(snapshot, pathfinder, target,
+			int(job.get("flight_rotation", -1)), job.get("stair_excluded_cells", []))
+	elif task_type == TaskQueue.TaskType.HAUL:
+		goals = [target]
+	else:
+		goals = TaskWorkPositionRulesScript.task_work_positions(snapshot, pathfinder, target, task_type)
+	var starts: Array = job["starts"]
+	var bids: Array = []
+	var stats := {"goal_count": goals.size(), "grid_cells": 0, "build_ms": 0.0, "flood_nodes": 0,
+		"complete": true, "touched_box_edge": false, "reason": "found"}
+	if goals.is_empty():
+		# Same evidence as the per-worker search: no workable position at all.
+		stats["reason"] = "no_workable_adjacent_candidates"
+		for i in range(starts.size()):
+			bids.append({"worker_id": job["worker_ids"][i], "path": [], "conclusive": true, "reason": "no_workable_adjacent_candidates"})
+	else:
+		var grid = NavGridScript.new()
+		var build_started := Time.get_ticks_usec()
+		grid.build(snapshot, snapshot.min_block, snapshot.max_block, pathfinder)
+		stats["build_ms"] = float(Time.get_ticks_usec() - build_started) / 1000.0
+		var flood: Dictionary = grid.reverse_distances(goals, starts)
+		var distances: Dictionary = flood["distances"]
+		var complete: bool = bool(flood["complete"])
+		var touched: bool = bool(flood.get("flood_touched_box_edge", flood["touched_box_edge"]))
+		stats["flood_nodes"] = int(flood["nodes"])
+		stats["complete"] = complete
+		stats["touched_box_edge"] = touched
+		for i in range(starts.size()):
+			var start: Vector3i = starts[i]
+			var distance: int = int(distances.get(start, -2))
+			var bid := {"worker_id": job["worker_ids"][i], "path": [], "conclusive": false, "reason": "inconclusive"}
+			if distance > 0:
+				bid["path"] = grid.path_from(start)
+				bid["conclusive"] = not bid["path"].is_empty()
+				bid["reason"] = "found" if bid["conclusive"] else "path_reconstruction_failed"
+			elif distance == -1 and complete and not touched:
+				bid["conclusive"] = true
+				bid["reason"] = "no_path"
+			elif distance == -1:
+				bid["reason"] = "snapshot_edge"
+			bids.append(bid)
+	return {
+		"job_id": int(job["job_id"]),
+		"kind": "auction",
+		"request_id": 0,
+		"auction_id": int(job["auction_id"]),
+		"task_id": int(job["task_id"]),
+		"worker_id": -1,
+		"bids": bids,
+		"path": [],
+		"snapshot_ms": float(job.get("snapshot_ms", 0.0)),
+		"queue_wait_ms": queue_wait_ms,
+		"search_ms": float(Time.get_ticks_usec() - started_usec) / 1000.0,
+		"search_stats": stats,
 		"snapshot": snapshot,
 	}
 
