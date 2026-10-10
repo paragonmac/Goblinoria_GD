@@ -6,6 +6,7 @@ class_name RenderZoneCullScheduler
 
 const KernelScript = preload("res://scripts/rendering/render_zone_cull_kernel.gd")
 const EPOCH_CHECK_STEPS := 256
+const PUBLISHED_HISTORY_LIMIT := 4
 
 var force_start_failure := false
 var _thread: Thread
@@ -23,6 +24,15 @@ class WorkerState extends RefCounted:
 	var pending_capture := -1
 	var result: Dictionary = {}
 	var result_capture := -1
+	# Published value sets let later worker jobs produce a diff from their base.
+	# Entries are never mutated after publication and are scoped to the epoch.
+	var published_history: Array[Dictionary] = []
+	# The result the main thread most recently adopted. Its eligible set will equal
+	# that result's accepted set once applied, so completed jobs diff against it
+	# (not the base known at submit time, which per-frame requests make stale).
+	# Pinned so frequent publications cannot evict it from published_history.
+	var adopted_sequence := -1
+	var pinned_base: Dictionary = {}
 	# Only the worker (or main-thread fallback) touches a live kernel's buffers.
 	var kernel: RefCounted
 	var active_capture := -1
@@ -66,16 +76,47 @@ class WorkerState extends RefCounted:
 			kernel = null
 		return retired
 
+	func find_published_result(request_id: int) -> Dictionary:
+		if not pinned_base.is_empty() and int(pinned_base.request_id) == request_id:
+			return pinned_base
+		for entry in published_history:
+			if int(entry.request_id) == request_id:
+				return entry
+		return {}
+
+	# Called under mutex when a job starts. Returns the previous pin for release
+	# outside the lock.
+	func pin_base(request_id: int) -> Dictionary:
+		if not pinned_base.is_empty() and int(pinned_base.request_id) == request_id:
+			return {}
+		var retired := pinned_base
+		pinned_base = find_published_result(request_id)
+		return retired
+
+	# Called under mutex. The caller holds the evicted entry until after unlock.
+	func remember_published_result(request_id: int, accepted: Dictionary) -> Dictionary:
+		var retired: Dictionary = {}
+		if published_history.size() >= PUBLISHED_HISTORY_LIMIT:
+			retired = published_history.pop_front()
+		published_history.append({"request_id": request_id, "accepted": accepted})
+		return retired
+
 	func shutdown(thread: Thread) -> void:
 		mutex.lock()
 		stopping = true
 		var retired_pending := discard_pending()
 		var retired_result := result
+		var retired_history := published_history
+		published_history = []
+		var retired_pin := pinned_base
+		pinned_base = {}
 		result = {}
 		wake.post()
 		mutex.unlock()
 		retired_pending = {}
 		retired_result = {}
+		retired_history = []
+		retired_pin = {}
 		if thread != null:
 			thread.wait_to_finish()
 		mutex.lock()
@@ -89,6 +130,7 @@ class WorkerState extends RefCounted:
 
 	func step(max_steps: int, deadline_usec: int) -> int:
 		var retired_kernel: RefCounted
+		var retired_pin: Dictionary = {}
 		mutex.lock()
 		if stopping or (kernel != null and int(kernel.job.epoch) != epoch):
 			retired_kernel = cancel_active()
@@ -109,10 +151,13 @@ class WorkerState extends RefCounted:
 			return 0
 		mutex.unlock()
 		retired_kernel = null
+		retired_pin = {}
 		var started := Time.get_ticks_usec()
 		var processed := advance_kernel(mini(max_steps, EPOCH_CHECK_STEPS), deadline_usec)
 		var elapsed := Time.get_ticks_usec() - started
-		var retired_result: Dictionary = {}
+		var completing_kernel: RefCounted
+		var base_entry: Dictionary = {}
+		var base_sequence := -1
 		mutex.lock()
 		worker_usec += elapsed
 		processed_steps += processed
@@ -120,13 +165,41 @@ class WorkerState extends RefCounted:
 		if stopping or int(kernel.job.epoch) != epoch:
 			retired_kernel = cancel_active()
 		elif kernel.done:
+			completing_kernel = kernel
+			base_sequence = adopted_sequence if adopted_sequence >= 0 else int(kernel.job.get("base_sequence", -1))
+			if not fallback:
+				base_entry = find_published_result(base_sequence)
+		mutex.unlock()
+		# Releasing a large accepted set/job can be linear in its size. Keep
+		# destruction outside the shared lock, including normal completion.
+		retired_kernel = null
+		if completing_kernel == null:
+			return processed
+		var completion_started := Time.get_ticks_usec()
+		var completed_result: Dictionary = completing_kernel.take_result()
+		if not fallback and not base_entry.is_empty():
+			KernelScript.attach_delta(completed_result, base_sequence, base_entry.accepted)
+		completed_result["fallback"] = fallback
+		var completion_elapsed := Time.get_ticks_usec() - completion_started
+		var retired_result: Dictionary = {}
+		var retired_history_entry: Dictionary = {}
+		mutex.lock()
+		worker_usec += completion_elapsed
+		# Invalidation can happen while the value-only diff is being built.
+		# Recheck under the publication lock before exposing either result or history.
+		if stopping or int(completing_kernel.job.epoch) != epoch:
+			retired_kernel = cancel_active()
+		else:
 			record("completed_count", 1, active_capture)
 			record("completed_ms", float(worker_usec) / 1000.0, active_capture)
 			record("queue_wait_ms", float(queue_wait_usec) / 1000.0, active_capture)
 			if not result.is_empty():
 				record("replaced_result_count", 1, result_capture)
 			retired_result = result
-			result = kernel.take_result()
+			if not fallback:
+				retired_history_entry = remember_published_result(
+					int(completed_result.request_id), completed_result.accepted)
+			result = completed_result
 			result["worker_usec"] = worker_usec
 			result["queue_wait_usec"] = queue_wait_usec
 			result["completed_usec"] = Time.get_ticks_usec()
@@ -134,9 +207,9 @@ class WorkerState extends RefCounted:
 			retired_kernel = kernel
 			kernel = null
 		mutex.unlock()
-		# Releasing a large accepted set/job can be linear in its size. Keep
-		# destruction outside the shared lock, including normal completion.
+		completed_result = {}
 		retired_result = {}
+		retired_history_entry = {}
 		retired_kernel = null
 		return processed
 
@@ -170,11 +243,29 @@ func invalidate(epoch: int) -> void:
 	_state.epoch = epoch
 	var retired_pending := _state.discard_pending()
 	var retired_result := _state.result
+	var retired_history := _state.published_history
+	_state.published_history = []
+	var retired_pin := _state.pinned_base
+	_state.pinned_base = {}
+	_state.adopted_sequence = -1
 	_state.result = {}
 	# The worker observes this epoch within at most 256 candidates; never join.
 	_state.mutex.unlock()
 	retired_pending = {}
 	retired_result = {}
+	retired_history = []
+	retired_pin = {}
+
+
+## Main thread: the result with this request_id was adopted in this epoch.
+func note_adopted(request_id: int, epoch: int) -> void:
+	_state.mutex.lock()
+	var retired_pin: Dictionary = {}
+	if int(epoch) == _state.epoch and not _state.fallback:
+		_state.adopted_sequence = request_id
+		retired_pin = _state.pin_base(request_id)
+	_state.mutex.unlock()
+	retired_pin = {}
 
 
 func submit(job: Dictionary) -> void:
@@ -271,6 +362,7 @@ func get_stats() -> Dictionary:
 		"pending": int(not _state.pending.is_empty()),
 		"in_flight": int(_state.kernel != null),
 		"result_pending": int(not _state.result.is_empty()),
+		"published_history_count": _state.published_history.size(),
 		"fallback": _state.fallback,
 		"submitted_count": _state.submitted_count,
 		"started_count": _state.started_count,
@@ -307,7 +399,7 @@ static func _valid_job(job: Dictionary) -> bool:
 	for key in ["min", "max"]:
 		if typeof(job.get(key)) != TYPE_VECTOR3I:
 			return false
-	for key in ["chunk_size", "request_id", "epoch", "submitted_usec"]:
+	for key in ["chunk_size", "request_id", "base_sequence", "epoch", "submitted_usec"]:
 		if typeof(job.get(key)) != TYPE_INT:
 			return false
 	if int(job.chunk_size) <= 0 or typeof(job.get("planes")) != TYPE_ARRAY:
@@ -316,7 +408,10 @@ static func _valid_job(job: Dictionary) -> bool:
 		return false
 	if typeof(job.get("view_key")) != TYPE_ARRAY or typeof(job.get("bounds")) != TYPE_DICTIONARY:
 		return false
-	for entry in job.planes:
+	var lead_planes: Variant = job.get("lead_planes", [])
+	if typeof(lead_planes) != TYPE_ARRAY:
+		return false
+	for entry in job.planes + lead_planes:
 		if typeof(entry) != TYPE_DICTIONARY:
 			return false
 		if typeof(entry.get("plane")) != TYPE_PLANE or typeof(entry.get("inside_positive")) != TYPE_BOOL:

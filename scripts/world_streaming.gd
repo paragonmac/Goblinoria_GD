@@ -114,6 +114,11 @@ var throttled: bool = false
 var throttle_stream_step_accum: float = 0.0
 var speed_chunks_per_sec: float = 0.0
 var moving: bool = false
+# Smoothed pan velocity for the visibility look-ahead: speed-ups apply at once,
+# slow-downs decay gradually so a pause between drag events keeps the lead.
+const VISIBILITY_VELOCITY_DECAY := 600.0
+const VISIBILITY_TELEPORT_DISTANCE := 64.0
+var visibility_lead_velocity := Vector2.ZERO
 var slow_moving: bool = false
 #endregion
 
@@ -127,6 +132,9 @@ func _init(world_ref) -> void:
 
 #region Reset
 func reset_state() -> void:
+	visibility_lead_velocity = Vector2.ZERO
+	if world != null and world.renderer != null:
+		world.renderer.motion_lead_offset = Vector3.ZERO
 	if world != null and world.renderer != null:
 		world.renderer.invalidate_render_zone()
 	chunk_build_queue.clear()
@@ -259,6 +267,22 @@ func update_streaming(
 	var view_center: Vector3 = world.clamp_block_xz(Vector3(center_x, plane_y, center_z))
 	_update_idle_tracking(Vector2(view_center.x, view_center.z), plane_y, dt)
 	var velocity := _compute_motion(view_center, dt)
+	var pan_velocity := Vector2(velocity.x, velocity.z)
+	# A one-frame jump (Locate, load, level change) is a teleport, not a pan:
+	# it must not seed the look-ahead. Real pans are clamped to the speed the
+	# capped lead distance can represent.
+	var lead_sec: float = world.renderer.get_look_ahead_sec()
+	var max_lead_speed: float = world.renderer.RENDER_FRUSTUM_MAX_LEAD_DISTANCE / maxf(lead_sec, 0.001)
+	if pan_velocity.length() * dt > VISIBILITY_TELEPORT_DISTANCE:
+		pan_velocity = Vector2.ZERO
+		visibility_lead_velocity = Vector2.ZERO
+	pan_velocity = pan_velocity.limit_length(max_lead_speed)
+	if pan_velocity.length() >= visibility_lead_velocity.length():
+		visibility_lead_velocity = pan_velocity
+	else:
+		visibility_lead_velocity = visibility_lead_velocity.move_toward(pan_velocity, VISIBILITY_VELOCITY_DECAY * dt)
+	var lead: Vector2 = visibility_lead_velocity * lead_sec
+	world.renderer.motion_lead_offset = Vector3(lead.x, 0.0, lead.y)
 
 	# Compute buffer region
 	var speed: float = Vector2(velocity.x, velocity.z).length()
@@ -453,10 +477,11 @@ func update_streaming(
 		world.run_performance_timed("Streaming.enqueue_ms", enqueue_stream_chunks)
 		world.run_performance_timed("Streaming.process_queue_ms", process_chunk_queue)
 
-	# Keep the existing cadence for moving views, but skip unchanged views.
+	# Moving views refresh every frame: a newer request replaces the pending one,
+	# so the worker always starts from the latest camera. Unchanged views skip.
 	# Queue work above and mesh-result application continue independently.
 	render_zone_timer += dt
-	var refresh_due: bool = render_zone_timer >= render_zone_interval or last_render_zone_min_cx == DUMMY_INT
+	var refresh_due: bool = (moving and world.renderer.render_debug.refresh_every_frame) or render_zone_timer >= render_zone_interval or last_render_zone_min_cx == DUMMY_INT
 	if refresh_due:
 		render_zone_timer = 0.0
 	if refresh_due and world.renderer.needs_render_zone_update(render_min_cx, render_max_cx, render_min_cz, render_max_cz, render_min_cy, render_max_cy, camera):

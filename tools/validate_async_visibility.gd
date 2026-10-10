@@ -129,6 +129,25 @@ func _same_members(a: Dictionary, b: Dictionary) -> bool:
 	return true
 
 
+func _shown_set(renderer: ProbeRenderer) -> Dictionary:
+	var result := {}
+	for coord in renderer.chunk_cache.get_keys():
+		var node: MeshInstance3D = renderer.chunk_cache.get_chunk(coord)
+		if node != null and node.visible:
+			result[coord] = true
+	return result
+
+
+func _wait_for_worker_result(renderer: ProbeRenderer, label: String) -> bool:
+	var deadline := Time.get_ticks_msec() + WAIT_MS
+	while Time.get_ticks_msec() < deadline:
+		if renderer.get_visibility_snapshot().result_pending == 1:
+			return true
+		OS.delay_msec(1)
+	_check(false, label + ": timed out waiting for worker result")
+	return false
+
+
 func _run() -> void:
 	for fallback in [false, true]:
 		print("Async visibility mode: ", "forced fallback" if fallback else "worker")
@@ -138,6 +157,10 @@ func _run() -> void:
 		_test_partial_cancel_and_clear(fallback)
 		_test_hard_view_changes(fallback)
 		_test_mesh_handoffs(fallback)
+	_test_delta_application()
+	_test_full_scan_fallback_reasons()
+	_test_per_frame_requests_stay_delta()
+	_test_motion_padding_request()
 	_test_main_pump()
 	await process_frame
 	if failures.is_empty():
@@ -153,7 +176,8 @@ func _test_enqueue_and_stationary(fallback: bool) -> void:
 	var renderer: ProbeRenderer = world.renderer
 	var before: Dictionary = renderer.get_visibility_snapshot()
 	for key in ["epoch", "requested_sequence", "accepted_sequence", "applied_sequence",
-			"application_pending", "application_remaining", "initialized", "mixed_view"]:
+			"application_pending", "application_remaining", "initialized", "mixed_view",
+			"last_application_mode", "delta_applications", "full_applications"]:
 		_check(before.has(key), "Visibility snapshot exposes " + key)
 	renderer.update_render_zone(-16, 15, -16, 15, 0, 0)
 	# Even if the worker finishes immediately, acceptance/application requires a pump.
@@ -184,14 +208,21 @@ func _test_enqueue_and_stationary(fallback: bool) -> void:
 		_check(renderer.visibility_events.size() == calls, "Stationary pump makes no scene calls")
 		_check(renderer.get_visibility_snapshot().applied_sequence == sequence,
 			"Stationary pump does not invent requests")
-		# Most members are unchanged; both those scans and exits consume steps.
+		# Worker deltas charge only changed coordinates. Forced fallback retains
+		# the existing full stable-slot scan and charges unchanged entries too.
 		var steps := renderer.stepped_total
 		renderer.update_render_zone(-16, 14, -16, 15, 0, 0)
 		if _settle(renderer, "Mostly unchanged membership scan"):
-			_check(renderer.stepped_total - steps >= 1024,
-				"Unchanged membership scans count toward max_steps")
+			var state: Dictionary = renderer.get_visibility_snapshot()
+			if fallback:
+				_check(state.last_application_mode == "full" and renderer.stepped_total - steps >= 1024,
+					"Forced fallback retains budgeted full scans")
+			else:
+				_check(state.last_application_mode == "delta" and renderer.stepped_total - steps == 32,
+					"Stable worker motion applies only changed coordinates")
 			_check(_same_members(renderer.render_zone_visible, _range_set(-16, 14, -16, 15)),
-				"Budgeted scan retains overlapping members and removes exits")
+				"Application retains overlapping members and removes exits")
+			_check(state.full_applications > 0, "Initial reconciliation counted as a full application")
 	_check(world.chunks.is_empty(), "Visibility does not generate terrain")
 	world.free()
 
@@ -480,6 +511,183 @@ func _test_mesh_handoffs(fallback: bool) -> void:
 	world.free()
 
 
+func _test_delta_application() -> void:
+	var world := _world(false)
+	var renderer: ProbeRenderer = world.renderer
+	_check(renderer.VISIBILITY_PUMP_MS == 1.0 and renderer.VISIBILITY_PUMP_STEPS == 2048,
+		"Main default visibility pump is 1 ms / 2048 steps")
+	var mesh := BoxMesh.new()
+	for x in range(-2, 4):
+		for z in range(-1, 2):
+			var node: MeshInstance3D = renderer.chunk_cache.ensure_chunk(Vector3i(x, 0, z), World.CHUNK_SIZE)
+			node.mesh = mesh
+			node.visible = true
+	renderer.update_render_zone(-2, 1, -1, 1, 0, 0)
+	if not _settle(renderer, "Delta fixture initial view"):
+		world.free()
+		return
+	var epoch: int = renderer.get_visibility_snapshot().epoch
+	_check(renderer.get_visibility_snapshot().last_application_mode == "full",
+		"Initial node reconciliation uses the full scan")
+	_check(_same_members(renderer.render_zone_visible, _range_set(-2, 1, -1, 1))
+		and _same_members(_shown_set(renderer), _range_set(-2, 1, -1, 1)),
+		"Initial eligible and shown sets match the full-scan oracle")
+	# First motion exposes exact partial accounting, then finishes in one Main-
+	# sized pump after deliberately charging two delta coordinates separately.
+	renderer.visibility_events.clear()
+	renderer.update_render_zone(-1, 2, -1, 1, 0, 0)
+	if _wait_for_worker_result(renderer, "First stable motion"):
+		var partial_steps := renderer.pump_visibility(10.0, 2)
+		var partial: Dictionary = renderer.get_visibility_snapshot()
+		_check(partial_steps == 2 and partial.application_pending and partial.application_remaining == 4,
+			"Delta remaining count includes one entering and three exiting coordinates")
+		var default_steps := renderer.pump_visibility(renderer.VISIBILITY_PUMP_MS, renderer.VISIBILITY_PUMP_STEPS)
+		var first: Dictionary = renderer.get_visibility_snapshot()
+		_check(default_steps <= renderer.VISIBILITY_PUMP_STEPS and not first.application_pending
+			and first.last_application_mode == "delta", "Small delta finishes within a default Main pump")
+		_check(first.epoch == epoch and _same_members(renderer.render_zone_visible, _range_set(-1, 2, -1, 1))
+			and _same_members(_shown_set(renderer), _range_set(-1, 2, -1, 1)),
+			"First delta eligible and shown sets match the full-scan oracle")
+		var hiding := false
+		for event in renderer.visibility_events:
+			if not event[1]:
+				hiding = true
+			else:
+				_check(not hiding, "Delta additions are shown before any exit is hidden")
+	# A second consecutive soft motion must keep the same epoch and use its
+	# newly applied set as the next result's base.
+	renderer.visibility_events.clear()
+	renderer.update_render_zone(0, 3, -1, 1, 0, 0)
+	if _wait_for_worker_result(renderer, "Second stable motion"):
+		var steps := renderer.pump_visibility(renderer.VISIBILITY_PUMP_MS, renderer.VISIBILITY_PUMP_STEPS)
+		var second: Dictionary = renderer.get_visibility_snapshot()
+		_check(steps <= renderer.VISIBILITY_PUMP_STEPS and not second.application_pending
+			and second.last_application_mode == "delta", "Consecutive stable motion uses delta mode")
+		_check(second.delta_applications >= 2 and second.epoch == epoch
+			and _same_members(renderer.render_zone_visible, _range_set(0, 3, -1, 1))
+			and _same_members(_shown_set(renderer), _range_set(0, 3, -1, 1)),
+			"Second delta eligible and shown sets match the full-scan oracle")
+		var hiding := false
+		for event in renderer.visibility_events:
+			if not event[1]:
+				hiding = true
+			else:
+				_check(not hiding, "Second delta additions precede removals")
+	world.free()
+
+
+## Per-frame requests (the in-game pattern while panning) chain deltas and
+## converge exactly. The stale-base race itself is covered deterministically in
+## validate_render_zone_cull_scheduler.gd; jobs here finish too fast to overlap.
+func _test_per_frame_requests_stay_delta() -> void:
+	var world := _world(false)
+	var renderer: ProbeRenderer = world.renderer
+	var mesh := BoxMesh.new()
+	for x in range(-2, 40):
+		for z in range(-1, 2):
+			var node: MeshInstance3D = renderer.chunk_cache.ensure_chunk(Vector3i(x, 0, z), World.CHUNK_SIZE)
+			node.mesh = mesh
+			node.visible = true
+	renderer.update_render_zone(-2, 1, -1, 1, 0, 0)
+	if not _settle(renderer, "Per-frame fixture initial view"):
+		world.free()
+		return
+	var full_before: int = renderer.get_visibility_snapshot().full_applications
+	for frame in range(120):
+		var shift := frame / 8
+		renderer.update_render_zone(-2 + shift, 1 + shift, -1, 1, 0, 0)
+		renderer.pump_visibility(1.0, 2048)
+		OS.delay_msec(1)
+	var final_shift := 119 / 8
+	if _settle(renderer, "Per-frame requests final view"):
+		var state: Dictionary = renderer.get_visibility_snapshot()
+		_check(state.delta_applications >= 5, "Per-frame requests apply as deltas")
+		_check(state.full_applications == full_before, "Per-frame requests never fall back to full scans")
+		_check(_same_members(renderer.render_zone_visible, _range_set(-2 + final_shift, 1 + final_shift, -1, 1))
+			and _same_members(_shown_set(renderer), _range_set(-2 + final_shift, 1 + final_shift, -1, 1)),
+			"Per-frame delta chain converges exactly")
+	world.free()
+
+
+func _test_full_scan_fallback_reasons() -> void:
+	var world := _world(false)
+	var renderer: ProbeRenderer = world.renderer
+	var mesh := BoxMesh.new()
+	for x in range(-2, 4):
+		for z in range(-1, 2):
+			var node: MeshInstance3D = renderer.chunk_cache.ensure_chunk(Vector3i(x, 0, z), World.CHUNK_SIZE)
+			node.mesh = mesh
+			node.visible = true
+	renderer.update_render_zone(-2, 1, -1, 1, 0, 0)
+	if not _settle(renderer, "Full fallback fixture initial view"):
+		world.free()
+		return
+	# A mesh hide/rebuild handoff leaves a reconcile marker while membership is
+	# stable; that marker must force the established full-scan path.
+	var handoff_coord := Vector3i(0, 0, 0)
+	renderer._hide_chunk_mesh(handoff_coord)
+	renderer.visibility_state.set_node_visibility(handoff_coord, true)
+	renderer.update_render_zone(-2, 1, -1, 1, 0, 0)
+	if _settle(renderer, "Mesh reconcile fallback"):
+		var state: Dictionary = renderer.get_visibility_snapshot()
+		_check(state.last_application_mode == "full" and not state.eligible_dirty,
+			"Mesh reconcile forces and completes a full scan")
+		_check(_same_members(renderer.render_zone_visible, _range_set(-2, 1, -1, 1))
+			and _same_members(_shown_set(renderer), _range_set(-2, 1, -1, 1)),
+			"Mesh reconcile full scan restores exact eligible and shown sets")
+	# Epoch history and applied-base state are invalid after a hard reset.
+	renderer.invalidate_render_zone()
+	renderer.update_render_zone(-2, 1, -1, 1, 0, 0)
+	if _settle(renderer, "Epoch invalidation fallback"):
+		var state: Dictionary = renderer.get_visibility_snapshot()
+		_check(state.last_application_mode == "full" and _same_members(renderer.render_zone_visible,
+			_range_set(-2, 1, -1, 1)), "Epoch invalidation forces a full scan and exact convergence")
+	# Simulate a skipped/replaced base by altering its handoff metadata after the
+	# worker produced its real value-only delta; mismatch must choose full scan.
+	renderer.update_render_zone(-1, 2, -1, 1, 0, 0)
+	if _wait_for_worker_result(renderer, "Skipped base result"):
+		var result: Dictionary = renderer.visibility_state.scheduler.take_result()
+		# The worker diffs against the adopted result; a mismatch with the last
+		# applied sequence (e.g. a replaced base) must fall back to a full scan.
+		result["delta_base_sequence"] = int(result.get("delta_base_sequence", 0)) + 1
+		renderer.visibility_state._adopt(result)
+		if _settle(renderer, "Skipped base full fallback"):
+			var state: Dictionary = renderer.get_visibility_snapshot()
+			_check(state.last_application_mode == "full" and _same_members(renderer.render_zone_visible,
+				_range_set(-1, 2, -1, 1)) and _same_members(_shown_set(renderer),
+				_range_set(-1, 2, -1, 1)),
+				"Skipped/replaced base forces a full scan and exact eligible/shown convergence")
+	world.free()
+
+
+func _test_motion_padding_request() -> void:
+	var world := _world(false)
+	var renderer: ProbeRenderer = world.renderer
+	var camera := Camera3D.new()
+	world.add_child(camera)
+	camera.position = Vector3(0, 40, 40)
+	camera.look_at(Vector3.ZERO)
+	var oracle := preload("res://scripts/rendering/frustum_culler.gd").new()
+	var planes: Array = oracle.build_planes(camera, renderer.NEAR_SAMPLE_OFFSET, renderer.NEAR_SAMPLE_MIN)
+	var shifted: Array = renderer.visibility_state._translated_planes(planes, Vector3(24, 0, 0))
+	camera.position += Vector3(24, 0, 0)
+	var moved: Array = oracle.build_planes(camera, renderer.NEAR_SAMPLE_OFFSET, renderer.NEAR_SAMPLE_MIN)
+	camera.position -= Vector3(24, 0, 0)
+	var same := true
+	for x in range(-6, 7):
+		for z in range(-6, 7):
+			var coord := Vector3i(x, 0, z)
+			same = same and oracle.is_chunk_in_view(shifted, coord, World.CHUNK_SIZE, 0.0) == oracle.is_chunk_in_view(moved, coord, World.CHUNK_SIZE, 0.0)
+	_check(same, "Translated planes match a frustum from the moved camera")
+	renderer.motion_lead_offset = Vector3(24, 0, 0)
+	renderer.update_render_zone(-4, 4, -4, 4, 0, 0, camera)
+	_check(Vector3(renderer.get_visibility_snapshot().requested_bounds.lead_offset[0], 0, 0).x == 24.0, "Request carries the look-ahead offset")
+	renderer.motion_lead_offset = Vector3(999, 0, 0)
+	renderer.update_render_zone(-5, 4, -4, 4, 0, 0, camera)
+	_check(is_equal_approx(float(renderer.get_visibility_snapshot().requested_bounds.lead_offset[0]), renderer.RENDER_FRUSTUM_MAX_LEAD_DISTANCE), "Look-ahead offset is capped")
+	world.free()
+
+
 func _test_main_pump() -> void:
 	root.gui_embed_subwindows = true
 	var scene = load("res://scenes/Main.tscn").instantiate()
@@ -501,9 +709,10 @@ func _test_main_pump() -> void:
 				"Main pumps visibility exactly once with hidden overlay: " + mode)
 			if renderer.pump_calls != calls + 1:
 				break
-			_check(renderer.last_pump[0] == 1.0 and renderer.last_pump[1] == 256
-				and renderer.last_pump[2] >= 0 and renderer.last_pump[2] <= 256,
-				"Main uses the bounded 1 ms / 256-step visibility pump")
+			_check(renderer.last_pump[0] == renderer.VISIBILITY_PUMP_MS and renderer.last_pump[1] == renderer.VISIBILITY_PUMP_STEPS
+				and renderer.VISIBILITY_PUMP_MS <= 1.0
+				and renderer.last_pump[2] >= 0 and renderer.last_pump[2] <= renderer.VISIBILITY_PUMP_STEPS,
+				"Main uses the bounded 1 ms visibility pump")
 			var state: Dictionary = renderer.get_visibility_snapshot()
 			if state.initialized and not state.application_pending and state.applied_sequence == state.requested_sequence:
 				converged = true

@@ -4,6 +4,7 @@ extends SceneTree
 const Scheduler = preload("res://scripts/rendering/render_zone_cull_scheduler.gd")
 const Kernel = preload("res://scripts/rendering/render_zone_cull_kernel.gd")
 const Culler = preload("res://scripts/rendering/frustum_culler.gd")
+const VisibilityScript = preload("res://scripts/rendering/world_renderer_visibility.gd")
 const WAIT_MS := 5000
 var failures := 0
 var checks := 0
@@ -78,6 +79,7 @@ class InvalidatingState extends Scheduler.WorkerState:
 
 func _init() -> void:
 	_test_kernel()
+	_test_worker_deltas_and_history()
 	_test_fallback()
 	_test_fallback_deadline_and_capture()
 	_test_thread_coalescing()
@@ -105,7 +107,7 @@ func _check(ok: bool, message: String) -> void:
 func _job(id: int, maximum := Vector3i(3, 1, 2), epoch: int = 1) -> Dictionary:
 	return {
 		"min": Vector3i.ZERO, "max": maximum, "chunk_size": 16, "padding": 0.0,
-		"planes": [], "request_id": id, "epoch": epoch,
+		"planes": [], "request_id": id, "base_sequence": id - 1, "epoch": epoch,
 		"submitted_usec": Time.get_ticks_usec() - 100,
 		"view_key": [id, {"camera": [1, 2]}], "bounds": {"tag": ["original"]},
 	}
@@ -208,6 +210,71 @@ func _test_kernel() -> void:
 	edge.min = edge.max
 	var edge_kernel := Kernel.new(edge)
 	_check(edge_kernel.advance(2) == 1 and edge_kernel.done, "Vector3i maximum does not overflow cursor")
+
+
+func _test_worker_deltas_and_history() -> void:
+	var scheduler := Scheduler.new()
+	scheduler.invalidate(1)
+	_check(scheduler.start(), "delta history worker starts")
+	var base_job := _job(1, Vector3i(2, 0, 2))
+	base_job.base_sequence = 0
+	scheduler.submit(base_job)
+	_check(_wait_idle(scheduler), "base accepted set publishes")
+	var base_result: Dictionary = scheduler.take_result()
+	var base_copy: Dictionary = base_result.accepted.duplicate()
+	_check(base_result.get("delta_base_sequence", -1) == -1, "missing published base falls back to a full result")
+	var next_job := _job(2, Vector3i(3, 0, 2))
+	next_job.min = Vector3i(1, 0, 0)
+	next_job.base_sequence = 1
+	scheduler.submit(next_job)
+	_check(_wait_idle(scheduler), "next accepted set publishes")
+	var next_result: Dictionary = scheduler.take_result()
+	_check(next_result.get("delta_base_sequence", -1) == 1, "worker resolves the requested published base")
+	_check(next_result.get("entering_coords", []).size() == 3, "worker reports three entering coordinates")
+	_check(next_result.get("exiting_coords", []).size() == 3, "worker reports three exiting coordinates")
+	_check(base_result.accepted == base_copy, "worker leaves handed-off accepted dictionaries unchanged")
+	_check(scheduler.get_stats().published_history_count == 2, "history retains recent published accepted sets")
+	for request_id in range(3, 7):
+		var job := _job(request_id, Vector3i.ZERO)
+		job.base_sequence = request_id - 1
+		scheduler.submit(job)
+		_check(_wait_idle(scheduler), "history rollover job publishes")
+		scheduler.take_result()
+	_check(scheduler.get_stats().published_history_count == 4, "published history is bounded to four results")
+	scheduler.invalidate(2)
+	_check(scheduler.get_stats().published_history_count == 0, "epoch invalidation drops published history")
+	# note_adopted pins the main thread's base and completing jobs diff against it
+	# despite stale submit-time bases; later publications cannot evict it.
+	var pinned_job := _job(20, Vector3i(2, 0, 2), 2)
+	pinned_job.base_sequence = -1
+	scheduler.submit(pinned_job)
+	_check(_wait_idle(scheduler), "pinned base publishes")
+	scheduler.take_result()
+	scheduler.note_adopted(20, 2)
+	var pinned_result: Dictionary = {}
+	for request_id in range(21, 28):
+		var job := _job(request_id, Vector3i(request_id % 3, 0, 2), 2)
+		# Stale submit-time base: the worker must diff against the adopted result.
+		job.base_sequence = request_id - 1
+		scheduler.submit(job)
+		_check(_wait_idle(scheduler), "job against pinned base publishes")
+		pinned_result = scheduler.take_result()
+	_check(int(pinned_result.get("delta_base_sequence", -1)) == 20, "worker diffs against the adopted result despite stale submit-time bases and history rollover")
+	# Look-ahead planes: accept chunks inside either the frustum or its shifted copy.
+	var near_plane := {"plane": Plane(Vector3(-1, 0, 0), -8.0), "inside_positive": true}
+	var lead_job := _job(1, Vector3i(3, 0, 0))
+	lead_job.planes = [near_plane]
+	lead_job.lead_planes = VisibilityScript._translated_planes([near_plane], Vector3(16, 0, 0))
+	var lead_kernel = Kernel.new(lead_job)
+	lead_kernel.advance(1000)
+	var lead_accepted: Array = lead_kernel.take_result().accepted_coords
+	_check(lead_accepted == [Vector3i(0, 0, 0), Vector3i(1, 0, 0)], "look-ahead planes extend acceptance only toward the lead")
+	var bad_lead := _job(2, Vector3i(1, 0, 0), 2)
+	bad_lead.lead_planes = [1]
+	var rejected_before: int = scheduler.get_stats().rejected_count
+	scheduler.submit(bad_lead)
+	_check(scheduler.get_stats().rejected_count == rejected_before + 1, "malformed lead_planes are rejected at submit")
+	scheduler.stop()
 
 
 func _test_fallback() -> void:

@@ -151,6 +151,27 @@ func _exercise(debug_enabled: bool, recording: bool) -> Array:
 		_check(recorder._session_timings.is_empty() and recorder._session_counters.is_empty(), "Disabled recorder receives no metrics")
 	if not debug_enabled:
 		_check(world.debug_profiler.frame_data.is_empty(), "Hidden profiler receives no metrics")
+	# After recording/profiler assertions: panning legitimately adds stream resets.
+	world.renderer = renderer
+	var pan_camera := Camera3D.new()
+	root.add_child(pan_camera)
+	pan_camera.position = Vector3(0, 10, 20)
+	pan_camera.look_at(Vector3.ZERO)
+	world.update_streaming(Rect2(rect.position + Vector2(40, 0), rect.size), 0, 0.1, pan_camera, {0: Rect2(8, 0, 7, 7)})
+	_check(renderer.motion_lead_offset.x > 0.0 and is_zero_approx(renderer.motion_lead_offset.y)
+		and is_zero_approx(renderer.motion_lead_offset.z), "Panning +x leads visibility toward +x only")
+	world.update_streaming(Rect2(rect.position + Vector2(40, 30), rect.size), 0, 0.1, pan_camera, {0: Rect2(8, 0, 7, 7)})
+	_check(renderer.motion_lead_offset.z > 0.0, "Panning +z (rect y) leads visibility toward +z")
+	for i in range(20):
+		world.update_streaming(Rect2(rect.position + Vector2(40, 30), rect.size), 0, 0.1, pan_camera, {0: Rect2(8, 0, 7, 7)})
+	world.update_streaming(Rect2(rect.position + Vector2(400, 30), rect.size), 0, 0.016, pan_camera, {0: Rect2(8, 0, 7, 7)})
+	_check(renderer.motion_lead_offset.is_zero_approx(), "One-frame camera jump is a teleport, not a pan lead")
+	world.update_streaming(Rect2(rect.position + Vector2(430, 30), rect.size), 0, 0.1, pan_camera, {0: Rect2(8, 0, 7, 7)})
+	_check(renderer.motion_lead_offset.length() <= renderer.RENDER_FRUSTUM_MAX_LEAD_DISTANCE + 0.001, "Pan lead never exceeds the capped distance")
+	for i in range(20):
+		world.update_streaming(Rect2(rect.position + Vector2(430, 30), rect.size), 0, 0.1, pan_camera, {0: Rect2(8, 0, 7, 7)})
+	_check(renderer.motion_lead_offset.is_zero_approx(), "Visibility lead decays to zero when the camera stops")
+	pan_camera.queue_free()
 	renderer._stop_mesh_worker()
 	world.free()
 	return state

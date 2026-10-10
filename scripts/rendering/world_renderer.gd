@@ -29,9 +29,44 @@ const MESH_CACHE_RADIUS := 0
 const MESH_PREFETCH_BELOW_ONLY := true
 const MESHER_CACHE_VERSION := 9
 const RENDER_FRUSTUM_PADDING_CHUNKS := 1.0
+# While panning, visibility also accepts chunks in a copy of the frustum shifted
+# by the smoothed pan velocity times this lead (covers request-to-applied lag).
+# Directional, so the accepted set grows only toward where the camera is going.
+const RENDER_FRUSTUM_MOTION_LEAD_SEC := 0.15
+const RENDER_FRUSTUM_MAX_LEAD_DISTANCE := 48.0
+# Per-frame visibility application. The 1 ms deadline bounds cost; the step cap
+# is high enough that a full view batch (~3.5k mostly no-op scans) lands in
+# one or two frames instead of ~14, which showed as void while panning.
+const VISIBILITY_PUMP_MS := 1.0
+const VISIBILITY_PUMP_STEPS := 2048
 #endregion
 
 #region State
+var motion_lead_offset := Vector3.ZERO
+# Live rendering switches for the F7 Rendering debug panel. Runtime only; every
+# restart returns to the defaults. Written through set_render_debug().
+const RENDER_DEBUG_OPTIONS := {
+	"visibility_mode": ["async", "area", "sync"],
+	"depth_layers": [0, 1, 2, 4, 8],
+}
+const VOID_METER_INTERVAL_USEC := 50000
+const VOID_METER_WINDOW_USEC := 2000000
+var render_debug := {
+	"visibility_mode": "async", # async worker cull | area: whole loaded box, Godot culls | sync: main-thread cull
+	"depth_layers": 0, # 0 = all chunk layers; N = top render chunk layer and N-1 below
+	"look_ahead": true,
+	"look_ahead_sec": RENDER_FRUSTUM_MOTION_LEAD_SEC,
+	"refresh_every_frame": true, # while moving; otherwise the 50 ms cadence
+	"freeze": false, # stop visibility requests; shown chunks stay as they are
+}
+var void_meter_enabled := false
+var void_meter := {"hidden": 0, "checked": 0, "max_recent": 0, "void_ms": 0.0, "void_pct_recent": 0.0}
+var _void_samples: Array = []
+var _void_last_usec := 0
+var _void_streak_start_usec := 0
+var _last_zone_args: Array = []
+var _stats_prev := {}
+var _stats_rates := {"delta_per_sec": 0.0, "full_per_sec": 0.0, "cull_job_ms": 0.0}
 var world: World
 var mesher = ChunkMesherScript.new()
 var mesher_thread = ChunkMesherScript.new()
@@ -919,7 +954,9 @@ func _hide_chunk_mesh(coord: Vector3i) -> void:
 ## A small value snapshot, never a scan of chunks or mesh data. Check it at
 ## the existing refresh cadence, not for every candidate or mesh arrival.
 func _render_zone_key(min_cx: int, max_cx: int, min_cz: int, max_cz: int, min_cy: int, max_cy: int, camera: Camera3D) -> Array:
-	var key: Array = [min_cx, max_cx, min_cz, max_cz, min_cy, max_cy, world.top_render_y]
+	# Lead presence is part of the view: when panning stops and the lead decays to
+	# zero, one more request trims the look-ahead chunks.
+	var key: Array = [min_cx, max_cx, min_cz, max_cz, min_cy, max_cy, world.top_render_y, motion_lead_offset.is_zero_approx()]
 	if camera != null:
 		key.append_array([camera.get_instance_id(), camera.global_transform,
 			camera.get_camera_transform(), camera.get_camera_projection(),
@@ -929,7 +966,9 @@ func _render_zone_key(min_cx: int, max_cx: int, min_cz: int, max_cz: int, min_cy
 
 func needs_render_zone_update(min_cx: int, max_cx: int, min_cz: int, max_cz: int, min_cy: int, max_cy: int, camera: Camera3D = null) -> bool:
 	visibility_state.observe(camera)
-	return visibility_state.needs_request(_render_zone_key(min_cx, max_cx, min_cz, max_cz, min_cy, max_cy, camera))
+	if render_debug.freeze:
+		return false
+	return visibility_state.needs_request(_render_zone_key(min_cx, max_cx, min_cz, max_cz, _debug_min_cy(min_cy), max_cy, _key_camera(camera)))
 
 
 func invalidate_render_zone() -> void:
@@ -949,15 +988,22 @@ func update_render_zone(
 	max_cy: int,
 	camera: Camera3D = null
 ) -> void:
-	var key := _render_zone_key(min_cx, max_cx, min_cz, max_cz, min_cy, max_cy, camera)
+	_last_zone_args = [min_cx, max_cx, min_cz, max_cz, min_cy, max_cy]
+	if render_debug.freeze:
+		return
+	min_cy = _debug_min_cy(min_cy)
+	var key := _render_zone_key(min_cx, max_cx, min_cz, max_cz, min_cy, max_cy, _key_camera(camera))
 	# Intersect rather than clamp: an entirely outside request must stay empty.
 	var minimum := Vector3i(maxi(min_cx, world.WORLD_MIN_CHUNK_X), maxi(min_cy, 0), maxi(min_cz, world.WORLD_MIN_CHUNK_Z))
 	var maximum := Vector3i(mini(max_cx, world.WORLD_MAX_CHUNK_X), mini(max_cy, ceili(float(world.world_size_y) / World.CHUNK_SIZE) - 1), mini(max_cz, world.WORLD_MAX_CHUNK_Z))
-	visibility_state.request(minimum, maximum, camera, key)
+	visibility_state.request(minimum, maximum, camera, key, str(render_debug.visibility_mode))
 
 
 func pump_visibility(max_ms: float = 1.0, max_steps: int = 256) -> int:
-	return visibility_state.pump(max_ms, max_steps)
+	var steps: int = visibility_state.pump(max_ms, max_steps)
+	if void_meter_enabled:
+		_tick_void_meter()
+	return steps
 
 
 func observe_visibility_view(camera: Camera3D) -> void:
@@ -965,7 +1011,144 @@ func observe_visibility_view(camera: Camera3D) -> void:
 
 
 func get_visibility_snapshot() -> Dictionary:
-	return visibility_state.snapshot()
+	var state: Dictionary = visibility_state.snapshot()
+	state["render_debug"] = render_debug.duplicate()
+	state["void_meter"] = void_meter.duplicate() if void_meter_enabled else {"enabled": false}
+	return state
+
+
+#region Rendering debug switches (F7 panel)
+## Returns false (and changes nothing) for an unknown key or disallowed value.
+func set_render_debug(key: String, value: Variant) -> bool:
+	if not render_debug.has(key):
+		return false
+	match key:
+		"visibility_mode":
+			if not RENDER_DEBUG_OPTIONS.visibility_mode.has(value):
+				return false
+		"depth_layers":
+			if typeof(value) not in [TYPE_INT, TYPE_FLOAT] or not RENDER_DEBUG_OPTIONS.depth_layers.has(int(value)):
+				return false
+			value = int(value)
+		"look_ahead_sec":
+			if typeof(value) not in [TYPE_INT, TYPE_FLOAT]:
+				return false
+			value = clampf(float(value), 0.0, 0.5)
+		_:
+			if typeof(value) != TYPE_BOOL:
+				return false
+	if render_debug[key] == value:
+		return true
+	render_debug[key] = value
+	if key == "look_ahead" and not value:
+		motion_lead_offset = Vector3.ZERO
+	# Mode/depth changes and unfreezing need a fresh full view; epoch bump drops
+	# in-flight work for the old settings.
+	if key in ["visibility_mode", "depth_layers"] or (key == "freeze" and not value):
+		invalidate_render_zone()
+		if not _last_zone_args.is_empty():
+			var args: Array = _last_zone_args
+			update_render_zone(args[0], args[1], args[2], args[3], args[4], args[5], visibility_state.get_camera())
+	return true
+
+
+func get_render_debug() -> Dictionary:
+	return render_debug.duplicate()
+
+
+## Look-ahead lead in seconds, 0 when disabled.
+func get_look_ahead_sec() -> float:
+	return float(render_debug.look_ahead_sec) if render_debug.look_ahead else 0.0
+
+
+func get_render_debug_stats() -> Dictionary:
+	var vis: Dictionary = visibility_state.snapshot()
+	var now := Time.get_ticks_usec()
+	if _stats_prev.is_empty() or now - int(_stats_prev.usec) >= 1000000:
+		if not _stats_prev.is_empty():
+			var seconds := float(now - int(_stats_prev.usec)) / 1000000.0
+			var jobs := float(vis.get("completed_count", 0)) - float(_stats_prev.completed_count)
+			_stats_rates = {
+				"delta_per_sec": (int(vis.delta_applications) - int(_stats_prev.delta)) / seconds,
+				"full_per_sec": (int(vis.full_applications) - int(_stats_prev.full)) / seconds,
+				"cull_job_ms": (float(vis.get("completed_ms", 0.0)) - float(_stats_prev.completed_ms)) / jobs if jobs > 0.0 else 0.0,
+			}
+		_stats_prev = {"usec": now, "delta": int(vis.delta_applications), "full": int(vis.full_applications),
+			"completed_count": float(vis.get("completed_count", 0)), "completed_ms": float(vis.get("completed_ms", 0.0))}
+	return {
+		"fps": Engine.get_frames_per_second(),
+		"frame_ms": Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0,
+		"draw_calls": RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME),
+		"shown_nodes": int(vis.shown_nodes),
+		"eligible": int(vis.effective_eligible),
+		"vis_lag_ms": vis.result_age_ms,
+		"last_application_mode": vis.last_application_mode,
+		"delta_per_sec": _stats_rates.delta_per_sec,
+		"full_per_sec": _stats_rates.full_per_sec,
+		"cull_job_ms": _stats_rates.cull_job_ms,
+		"void": void_meter.duplicate(),
+		"settings": render_debug.duplicate(),
+	}
+
+
+func _debug_min_cy(min_cy: int) -> int:
+	var layers := int(render_debug.depth_layers)
+	if layers <= 0:
+		return min_cy
+	var top_cy := floori(float(world.top_render_y) / World.CHUNK_SIZE)
+	return maxi(min_cy, top_cy - layers + 1)
+
+
+## Area mode shows the whole box regardless of camera, so camera motion alone
+## must not trigger requests.
+func _key_camera(camera: Camera3D) -> Camera3D:
+	return null if render_debug.visibility_mode == "area" else camera
+
+
+## Void = on-screen chunks in the top two render chunk layers that have geometry
+## but are hidden: visibility lag the player sees as missing terrain.
+func _tick_void_meter() -> void:
+	var now := Time.get_ticks_usec()
+	if now - _void_last_usec < VOID_METER_INTERVAL_USEC or _last_zone_args.is_empty() or world == null:
+		return
+	_void_last_usec = now
+	var camera: Camera3D = visibility_state.get_camera()
+	if camera == null or not camera.is_inside_tree():
+		return
+	var planes: Array = frustum_culler.build_planes(camera, NEAR_SAMPLE_OFFSET, NEAR_SAMPLE_MIN)
+	var top_cy := floori(float(world.top_render_y) / World.CHUNK_SIZE)
+	var args: Array = _last_zone_args
+	var hidden := 0
+	var checked := 0
+	for cy in [top_cy, top_cy - 1]:
+		for cx in range(maxi(args[0], world.WORLD_MIN_CHUNK_X), mini(args[1], world.WORLD_MAX_CHUNK_X) + 1):
+			for cz in range(maxi(args[2], world.WORLD_MIN_CHUNK_Z), mini(args[3], world.WORLD_MAX_CHUNK_Z) + 1):
+				var coord := Vector3i(cx, cy, cz)
+				if not frustum_culler.is_chunk_in_view(planes, coord, World.CHUNK_SIZE, 0.0):
+					continue
+				var node: MeshInstance3D = chunk_cache.get_chunk(coord)
+				if node == null or node.mesh == null or node.mesh.get_surface_count() == 0:
+					continue
+				checked += 1
+				if not node.visible:
+					hidden += 1
+	if hidden > 0 and _void_streak_start_usec == 0:
+		_void_streak_start_usec = now
+	elif hidden == 0:
+		_void_streak_start_usec = 0
+	_void_samples.append([now, hidden])
+	while not _void_samples.is_empty() and now - int(_void_samples[0][0]) > VOID_METER_WINDOW_USEC:
+		_void_samples.pop_front()
+	var max_recent := 0
+	var void_count := 0
+	for sample: Array in _void_samples:
+		max_recent = maxi(max_recent, int(sample[1]))
+		if int(sample[1]) > 0:
+			void_count += 1
+	void_meter = {"hidden": hidden, "checked": checked, "max_recent": max_recent,
+		"void_ms": float(now - _void_streak_start_usec) / 1000.0 if _void_streak_start_usec > 0 else 0.0,
+		"void_pct_recent": 100.0 * void_count / maxf(1.0, _void_samples.size())}
+#endregion
 
 
 func _is_chunk_in_current_render_zone(coord: Vector3i) -> bool:

@@ -3,8 +3,6 @@ class_name RenderZoneCullKernel
 ## Value-only, inclusive chunk bounds. Traversal matches the renderer: Y/X/Z.
 ## The owner supplies an immutable job and exclusively owns this cursor.
 
-const CullerScript = preload("res://scripts/rendering/frustum_culler.gd")
-
 var job: Dictionary
 var done := true
 var candidate_count := 0
@@ -16,8 +14,14 @@ var _max := Vector3i.ZERO
 var _planes: Array = []
 var _chunk_size := 1
 var _padding := 0.0
-var _culler := CullerScript.new()
-
+# Optional second frustum shifted along the pan direction (look-ahead).
+var _lead_planes: Array = []
+# FrustumCuller planes normalized so every test is "reject if distance < 0" at
+# the corner picked by normal sign. Bit-identical to FrustumCuller: negating a
+# plane negates its distance exactly, and the corner choice differs only where
+# the normal component is zero (no effect on the distance).
+var _fast: Array[Plane] = []
+var _fast_lead: Array[Plane] = []
 
 func _init(snapshot: Dictionary = {}) -> void:
 	job = snapshot
@@ -27,8 +31,10 @@ func _init(snapshot: Dictionary = {}) -> void:
 	_planes = job.get("planes", [])
 	_chunk_size = int(job.get("chunk_size", 1))
 	_padding = float(job.get("padding", 0.0))
+	_lead_planes = job.get("lead_planes", [])
+	_fast = _compile(_planes)
+	_fast_lead = _compile(_lead_planes)
 	done = _min.x > _max.x or _min.y > _max.y or _min.z > _max.z
-
 
 ## deadline_usec is an absolute Time.get_ticks_usec() deadline; 0 is unlimited.
 ## Each step visits exactly one candidate, including rejected candidates.
@@ -37,9 +43,7 @@ func advance(max_steps: int, deadline_usec: int = 0) -> int:
 	while not done and processed < max_steps:
 		if deadline_usec > 0 and Time.get_ticks_usec() >= deadline_usec:
 			break
-		# Reuse the authoritative implementation, including strict plane tests,
-		# negative normals, and padding only when padding > 0.
-		if _culler.is_chunk_in_view(_planes, _coord, _chunk_size, _padding):
+		if _in_view(_fast, _coord) or (not _fast_lead.is_empty() and _in_view(_fast_lead, _coord)):
 			accepted_coords.append(_coord)
 			accepted[_coord] = true
 		candidate_count += 1
@@ -58,7 +62,6 @@ func advance(max_steps: int, deadline_usec: int = 0) -> int:
 			done = true
 	return processed
 
-
 ## Ownership transfer after completion; no copying of the coordinate buffers.
 func take_result() -> Dictionary:
 	assert(done)
@@ -70,3 +73,42 @@ func take_result() -> Dictionary:
 	accepted_coords = []
 	accepted = {}
 	return result
+
+## Builds value-only changes against a previously published accepted set.
+## Neither input set is modified; call this before publishing result ownership.
+static func attach_delta(result: Dictionary, base_sequence: int, base_accepted: Dictionary) -> void:
+	var entering: Array[Vector3i] = []
+	var exiting: Array[Vector3i] = []
+	var accepted_now: Dictionary = result.accepted
+	for coord in result.accepted_coords:
+		if not base_accepted.has(coord):
+			entering.append(coord)
+	for coord in base_accepted:
+		if not accepted_now.has(coord):
+			exiting.append(coord)
+	result["delta_base_sequence"] = base_sequence
+	result["entering_coords"] = entering
+	result["exiting_coords"] = exiting
+
+static func _compile(planes: Array) -> Array[Plane]:
+	var compiled: Array[Plane] = []
+	for entry in planes:
+		var p: Plane = entry["plane"]
+		compiled.append(p if entry["inside_positive"] else Plane(-p.normal, -p.d))
+	return compiled
+
+## Same result as FrustumCuller.is_chunk_in_view, including padding only when > 0.
+func _in_view(planes: Array[Plane], coord: Vector3i) -> bool:
+	var min_corner := Vector3(coord.x * _chunk_size, coord.y * _chunk_size, coord.z * _chunk_size)
+	var max_corner := min_corner + Vector3(_chunk_size, _chunk_size, _chunk_size)
+	if _padding > 0.0:
+		var pad := Vector3(_padding, _padding, _padding)
+		min_corner -= pad
+		max_corner += pad
+	for p in planes:
+		var n := p.normal
+		if p.distance_to(Vector3(max_corner.x if n.x >= 0.0 else min_corner.x,
+				max_corner.y if n.y >= 0.0 else min_corner.y,
+				max_corner.z if n.z >= 0.0 else min_corner.z)) < 0.0:
+			return false
+	return true
