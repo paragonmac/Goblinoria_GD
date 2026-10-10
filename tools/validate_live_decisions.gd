@@ -234,7 +234,12 @@ func _test_invalidation() -> void:
 	world.task_manager._start_assignment_auction(task)
 	_check(recorder.has_event("auction_candidate_excluded", worker.worker_id), "Role-filtered auction candidate missing observation")
 	var second: Worker = world.workers[1]
+	# A capped search is inconclusive: it neither excludes the worker nor blocks the task.
 	world.task_manager._collect_worker_bid_result(task, second, {"worker_id": second.worker_id, "task_id": task.id, "path": [], "search_stats": {"reason": "iteration_cap", "hit_iteration_cap": true, "iterations_used": 42, "max_iterations": 42}})
+	_check(recorder.has_event("assignment_bid_inconclusive", second.worker_id) and not task.is_worker_unreachable(second.worker_id, Time.get_ticks_msec())
+		and task.block_reason != TaskQueue.TaskBlockReason.NO_WORKER_PATH, "Capped bid was not treated as inconclusive")
+	# An exhausted search is real evidence.
+	world.task_manager._collect_worker_bid_result(task, second, {"worker_id": second.worker_id, "task_id": task.id, "path": [], "search_stats": {"reason": "no_path", "hit_iteration_cap": false, "iterations_used": 42, "max_iterations": 8192}})
 	_check(recorder.has_event("assignment_bid_failed", second.worker_id), "Failed bid did not preserve search outcome")
 	_check(task.block_reason == TaskQueue.TaskBlockReason.NO_WORKER_PATH, "All failed worker paths did not block task")
 	queue.remove_task(task)

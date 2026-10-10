@@ -1079,6 +1079,19 @@ func _collect_worker_bid_result(task, worker: Worker, result: Dictionary) -> voi
 	var maybe_path: Array = result.get("path", [])
 	var search_ms: float = float(result.get("search_ms", 0.0))
 	var stats: Dictionary = result.get("search_stats", {})
+	if maybe_path.is_empty() and bool(stats.get("hit_iteration_cap", false)):
+		# Inconclusive: the search ran out of budget (e.g. a stair detour several
+		# levels down). That proves nothing about reachability, so the worker is
+		# neither excluded nor counted toward blocking the task.
+		_observe_path_result(result, "assignment_bid_inconclusive", "iteration_cap")
+		world.trace_worker_event(worker, "assignment_bid_inconclusive", task, "snapshot_ms=%.3f queue_wait_ms=%.3f search_ms=%.3f iterations=%d/%d" % [
+			float(result.get("snapshot_ms", 0.0)),
+			float(result.get("queue_wait_ms", 0.0)),
+			search_ms,
+			int(stats.get("iterations_used", 0)),
+			int(stats.get("max_iterations", 0)),
+		])
+		return
 	if maybe_path.is_empty():
 		_observe_path_result(result, "assignment_bid_failed", "empty_path")
 		world.trace_worker_event(worker, "assignment_bid_failed", task, "snapshot_ms=%.3f queue_wait_ms=%.3f search_ms=%.3f reason=%s iterations=%d/%d hit_iteration_cap=%s" % [
@@ -1090,8 +1103,8 @@ func _collect_worker_bid_result(task, worker: Worker, result: Dictionary) -> voi
 			int(stats.get("max_iterations", 0)),
 			str(stats.get("hit_iteration_cap", false)),
 		])
-		if task.id == assignment_task_id and not bool(stats.get("hit_iteration_cap", false)):
-			# A capped search proves nothing about other starts; an exhausted one does.
+		if task.id == assignment_task_id:
+			# An exhausted search fails identically for every worker on this cell.
 			assignment_failed_starts[worker.get_block_coord()] = true
 		mark_worker_unreachable_for_task(task, worker)
 		return
