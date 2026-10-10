@@ -33,6 +33,7 @@ const WorkerTraceScript = preload("res://scripts/diagnostics/worker_trace.gd")
 const AnomalyWatchdogScript = preload("res://scripts/diagnostics/anomaly_watchdog.gd")
 const WorkerRolesScript = preload("res://scripts/worker_roles.gd")
 const StairFlightScript = preload("res://scripts/stair_flight.gd")
+const LightFieldScript = preload("res://scripts/world/light_field.gd")
 const ChunkDataType = ChunkDataScript
 #endregion
 
@@ -218,6 +219,9 @@ var pathfinder := Pathfinder.new()
 var generator: WorldGeneratorScript
 var save_load: WorldSaveLoadScript
 var arena_cooker: WorldArenaCookerScript
+var light_field: LightFieldScript = LightFieldScript.new()
+var light_field_built: bool = false
+var light_field_arena_cook_seen: bool = false
 var streaming: WorldStreamingScript
 var raycaster: WorldRaycasterScript
 var debug_profiler: DebugProfiler
@@ -298,6 +302,8 @@ func _ready() -> void:
 
 #region World Initialization
 func init_world(seed_world_flag: bool = true) -> void:
+	light_field_built = false
+	light_field_arena_cook_seen = false
 	runtime_epoch += 1
 	if live_diagnostics != null:
 		live_diagnostics.begin_world("world_initialized")
@@ -325,6 +331,8 @@ func init_world(seed_world_flag: bool = true) -> void:
 		if world_seed == 0:
 			world_seed = generator.generate_world_seed()
 		generator.prime_spawn_chunks()
+		light_field.build(self)
+		light_field_built = true
 		spawn_initial_workers()
 
 
@@ -334,6 +342,8 @@ func start_new_world(seed_value: int = -1) -> void:
 	init_world(false)
 	world_seed = seed_value if seed_value >= 0 else generator.generate_world_seed()
 	generator.prime_spawn_chunks()
+	light_field.build(self)
+	light_field_built = true
 	spawn_initial_workers()
 #endregion
 
@@ -362,6 +372,9 @@ func load_world(path: String) -> bool:
 		renderer.set_min_render_y(get_min_render_y())
 	if ok and generator != null:
 		generator.reset_generation_jobs()
+	if ok:
+		light_field.build(self)
+		light_field_built = true
 	return ok
 #endregion
 
@@ -432,6 +445,8 @@ func request_chunk_generation_async(coord: Vector3i, high_priority: bool = false
 
 
 func notify_chunk_loaded(coord: Vector3i) -> void:
+	if light_field != null and light_field_built:
+		light_field.notify_chunk_loaded(coord)
 	if renderer != null:
 		renderer.notify_chunk_loaded(coord)
 
@@ -507,6 +522,8 @@ func set_block_raw(x: int, y: int, z: int, value: int, mark_dirty: bool) -> void
 		touch_chunk(chunk)
 		return
 	chunk.blocks[idx] = value
+	if light_field != null and light_field_built:
+		light_field.notify_block_changed(x, y, z, prev, value)
 	# Path snapshots key on block content, not on render state.
 	chunk.block_revision += 1
 	if mark_dirty:
@@ -848,6 +865,14 @@ func update_world(dt: float) -> void:
 func update_world_controlled(dt: float, advance_simulation: bool) -> void:
 	# SEE-ADR-013: Keep one phase sequence, independent of either timing sink.
 	run_performance_timed("World.process_generation_results", process_generation_results)
+	if arena_cooker != null and arena_cooker.stage > WorldArenaCooker.Stage.IDLE and arena_cooker.stage < WorldArenaCooker.Stage.DONE:
+		light_field_arena_cook_seen = true
+	if light_field_arena_cook_seen and arena_cooker.stage == WorldArenaCooker.Stage.DONE:
+		light_field.build(self)
+		light_field_built = true
+		light_field_arena_cook_seen = false
+	if light_field != null:
+		run_performance_timed("World.process_light_events", light_field.process_events)
 	run_performance_timed("World.update_render_height_queue", update_render_height_queue)
 	if advance_simulation:
 		# Debug speed runs whole extra steps rather than scaling dt, so movement,

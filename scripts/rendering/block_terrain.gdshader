@@ -6,6 +6,17 @@ render_mode cull_back, depth_draw_opaque;
 uniform float top_render_y = 0.0;
 uniform float min_render_y = -1e20;
 uniform sampler2D atlas_texture;
+// SEE-ADR-021 darkness: one R8 layer per world Y (light 0..15 scaled to 0..1,
+// explored 0/1), indexed by cell x/z offset from the world minimum.
+uniform sampler2DArray light_tex : filter_nearest;
+uniform sampler2DArray explored_tex : filter_nearest;
+uniform bool darkness_enabled = false;
+uniform bool fog_enabled = true;
+uniform bool light_view = false;
+uniform ivec2 light_origin = ivec2(-128, -128);
+uniform int light_layers = 256;
+const float UNLIT_DIM = 0.28;
+const float LEVEL_FALLOFF = 0.8;
 const float HEIGHT_SHADE_FACTOR = 0.15;
 const float HEIGHT_SHADE_MIN = 0.3;
 const float ATLAS_COLUMNS = 4.0;
@@ -59,6 +70,30 @@ void fragment() {
 	}
 	vec3 tex = texture(atlas_texture, texture_uv).rgb;
 	ALBEDO = tex * COLOR.rgb * height_shade;
+	if (darkness_enabled) {
+		// The cell in front of the face carries its light; a slice cap (cut top
+		// inside solid ground) samples its own cell.
+		bool cap = top_flag > 0.5;
+		vec3 probe = preview_world_position + preview_world_normal * (cap ? -0.5 : 0.5);
+		ivec3 cell = ivec3(round(probe));
+		ivec3 texel = ivec3(cell.x - light_origin.x, cell.z - light_origin.y, cell.y);
+		float level = 0.0;
+		float explored = 1.0;
+		if (texel.x >= 0 && texel.x < 256 && texel.y >= 0 && texel.y < 256 && texel.z >= 0 && texel.z < light_layers) {
+			level = texelFetch(light_tex, texel, 0).r * 15.0;
+			explored = texelFetch(explored_tex, texel, 0).r;
+		}
+		if (light_view) {
+			ALBEDO = vec3(level / 15.0);
+		} else if (fog_enabled && explored < 0.5) {
+			ALBEDO = vec3(0.0);
+		} else if (level < 0.5) {
+			float grey = dot(ALBEDO, vec3(0.299, 0.587, 0.114));
+			ALBEDO = mix(vec3(grey), ALBEDO, 0.25) * UNLIT_DIM;
+		} else {
+			ALBEDO *= pow(LEVEL_FALLOFF, 15.0 - level);
+		}
+	}
 	// A surviving top face with top_flag set is a synthetic cut through solid ground.
 	if (top_flag > 0.5) {
 		ALBEDO *= CUT_FACE_SHADE * mix(1.0, CUT_HATCH_SHADE, cut_hatch_line());

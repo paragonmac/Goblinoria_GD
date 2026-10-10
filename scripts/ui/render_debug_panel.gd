@@ -32,6 +32,8 @@ var _look_ahead_slider: HSlider
 var _look_ahead_value: Label
 var _update_option: OptionButton
 var _freeze_check: CheckBox
+## Darkness switches (SEE-ADR-021), keyed by render_debug setting.
+var _light_checks := {}
 ## Drag handle for the window layout.
 var title_handle: Label
 ## Default floating rect: between the management and details columns at 1920x1080.
@@ -138,6 +140,13 @@ func _build() -> void:
 	_freeze_check.text = "Freeze culling"
 	_freeze_check.toggled.connect(_on_freeze_toggled)
 	body.add_child(_freeze_check)
+	for entry: Array in [["darkness", "Darkness"], ["fog", "Fog of war"], ["light_view", "Light view (levels)"]]:
+		var check := CheckBox.new()
+		check.text = entry[1]
+		var key: String = entry[0]
+		check.toggled.connect(func(pressed: bool) -> void: _set_render(key, pressed))
+		body.add_child(check)
+		_light_checks[entry[0]] = check
 
 	_draw_option = _option(DRAW_LABELS)
 	_draw_option.item_selected.connect(_on_draw_selected)
@@ -209,6 +218,9 @@ func _sync_controls() -> void:
 		_look_ahead_value.text = "%.2f s" % _look_ahead_slider.value
 		_update_option.select(0 if bool(settings["refresh_every_frame"]) else 1)
 		_freeze_check.button_pressed = bool(settings["freeze"])
+		for key: String in _light_checks:
+			if settings.has(key):
+				_light_checks[key].button_pressed = bool(settings[key])
 	var mode: int = main.get_viewport().debug_draw if main != null else Viewport.DEBUG_DRAW_DISABLED
 	var view: String = renderer.get_terrain_view() if renderer != null and renderer.has_method("get_terrain_view") else "normal"
 	var index: int = DRAW_TERRAIN_VIEWS.find(view) if view != "normal" else maxi(DRAW_MODES.find(mode), 0)

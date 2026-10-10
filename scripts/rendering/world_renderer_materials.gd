@@ -39,6 +39,7 @@ func get_block_material() -> Material:
 			shader_material.set_shader_parameter("min_render_y", float(world.get_min_render_y()))
 		_apply_next_pass(shader_material)
 		_apply_excavation_preview(shader_material)
+		_apply_light_params(shader_material)
 		block_material = shader_material
 	return block_material
 
@@ -94,6 +95,22 @@ func set_poly_debug_enabled(enabled: bool) -> void:
 	_apply_active_shader()
 
 
+## SEE-ADR-021: binds the light/explored layer textures and darkness switches.
+var _light_params := {}
+
+func set_light_params(params: Dictionary) -> void:
+	for key in params:
+		_light_params[key] = params[key]
+	_apply_light_params(get_block_material() as ShaderMaterial)
+
+
+func _apply_light_params(material: ShaderMaterial) -> void:
+	if material == null:
+		return
+	for key in _light_params:
+		material.set_shader_parameter(key, _light_params[key])
+
+
 func set_terrain_view(view: String) -> bool:
 	if not TERRAIN_VIEWS.has(view):
 		return false
@@ -127,6 +144,7 @@ func _apply_active_shader() -> void:
 			shader_material.set_shader_parameter("min_render_y", float(world.get_min_render_y()))
 		_apply_next_pass(shader_material)
 		_apply_excavation_preview(shader_material)
+		_apply_light_params(shader_material)
 
 
 func _apply_next_pass(shader_material: ShaderMaterial) -> void:

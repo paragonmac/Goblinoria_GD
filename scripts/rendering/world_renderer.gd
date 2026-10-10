@@ -60,6 +60,9 @@ var render_debug := {
 	"look_ahead_sec": RENDER_FRUSTUM_MOTION_LEAD_SEC,
 	"refresh_every_frame": true, # while moving; otherwise the 50 ms cadence
 	"freeze": false, # stop visibility requests; shown chunks stay as they are
+	"darkness": true, # SEE-ADR-021: light and fog in the terrain shader
+	"fog": true, # unexplored cells black
+	"light_view": false, # greyscale light levels
 }
 var void_meter_enabled := false
 var void_meter := {"hidden": 0, "checked": 0, "max_recent": 0, "void_ms": 0.0, "void_pct_recent": 0.0}
@@ -1008,7 +1011,43 @@ func pump_visibility(max_ms: float = 1.0, max_steps: int = 256) -> int:
 	var steps: int = visibility_state.pump(max_ms, max_steps)
 	if void_meter_enabled:
 		_tick_void_meter()
+	pump_light()
 	return steps
+
+
+#region Darkness (SEE-ADR-021)
+const LightTextureSyncScript = preload("res://scripts/rendering/light_texture_sync.gd")
+var light_sync = LightTextureSyncScript.new()
+var _light_bound := false
+
+
+## Mirrors the world's LightField into the terrain material: binds textures
+## after a (re)build, then uploads a budget of dirty layers per frame.
+func pump_light() -> void:
+	var field = world.get("light_field") if world != null else null
+	if field == null:
+		if _light_bound:
+			_light_bound = false
+			material_helper.set_light_params({"darkness_enabled": false})
+		return
+	if light_sync.bind(field) or not _light_bound:
+		_light_bound = true
+		material_helper.set_light_params({
+			"light_tex": light_sync.light_tex, "explored_tex": light_sync.explored_tex,
+			"light_origin": Vector2i(World.WORLD_MIN_BLOCK_X, World.WORLD_MIN_BLOCK_Z),
+			"light_layers": world.world_size_y,
+		})
+		_apply_light_switches()
+	light_sync.pump(field, world.top_render_y)
+
+
+func _apply_light_switches() -> void:
+	material_helper.set_light_params({
+		"darkness_enabled": _light_bound and bool(render_debug.darkness),
+		"fog_enabled": bool(render_debug.fog),
+		"light_view": bool(render_debug.light_view),
+	})
+#endregion
 
 
 func observe_visibility_view(camera: Camera3D) -> void:
@@ -1174,6 +1213,8 @@ func set_render_debug(key: String, value: Variant) -> bool:
 	render_debug[key] = value
 	if key == "look_ahead" and not value:
 		motion_lead_offset = Vector3.ZERO
+	if key in ["darkness", "fog", "light_view"]:
+		_apply_light_switches()
 	# Mode/depth changes and unfreezing need a fresh full view; epoch bump drops
 	# in-flight work for the old settings.
 	if key in ["visibility_mode", "depth_layers"] or (key == "freeze" and not value):

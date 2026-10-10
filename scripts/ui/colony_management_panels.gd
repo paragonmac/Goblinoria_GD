@@ -336,6 +336,7 @@ func update_details(kind: String, row: Dictionary) -> void:
 	if kind == "cell":
 		var pos: Vector3i = row.get("pos", Vector3i.ZERO)
 		detail_text.text = "Level %d   (%d, %d, %d)" % [int(row.get("level", 0)), pos.x, pos.y, pos.z]
+		detail_text.text += "\nLight S%d B%d%s" % [int(row.get("sky_light", 0)), int(row.get("block_light", 0)), " Explored" if bool(row.get("explored", false)) else ""]
 		var protection_reason := str(row.get("protection_reason", ""))
 		if not protection_reason.is_empty():
 			detail_text.text += "\nProtected: " + protection_reason.replace("_", " ")
