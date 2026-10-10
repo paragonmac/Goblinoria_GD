@@ -116,6 +116,38 @@ func revisions_match(world) -> bool:
 	return true
 
 
+## Revisions of the chunks a path depends on: every chunk touched by the
+## 3x3x3 neighbourhood of each path cell (support below, headroom, ramp and
+## stair neighbours). A route stays valid while these chunks are unchanged,
+## even if terrain elsewhere in the snapshot was edited.
+func path_revision_tokens(path: Array) -> Dictionary:
+	var tokens := {}
+	for cell in path:
+		if not cell is Vector3i:
+			continue
+		for cx in range(_floor_div(cell.x - 1, chunk_size), _floor_div(cell.x + 1, chunk_size) + 1):
+			for cy in range(_floor_div(cell.y - 1, chunk_size), _floor_div(cell.y + 1, chunk_size) + 1):
+				for cz in range(_floor_div(cell.z - 1, chunk_size), _floor_div(cell.z + 1, chunk_size) + 1):
+					var coord := Vector3i(cx, cy, cz)
+					# Chunks outside the capture were never read by the search.
+					if not tokens.has(coord) and chunk_revisions.has(coord):
+						tokens[coord] = int(chunk_revisions[coord])
+	return tokens
+
+
+static func path_tokens_match(world, tokens: Dictionary) -> bool:
+	for coord: Vector3i in tokens:
+		var chunk = world.get_chunk(coord)
+		var expected: int = int(tokens[coord])
+		if chunk == null or not chunk.generated:
+			if expected >= 0:
+				return false
+			continue
+		if expected < 0 or chunk.block_revision != expected:
+			return false
+	return true
+
+
 func _floor_div(value: int, divisor: int) -> int:
 	return floori(float(value) / float(divisor))
 

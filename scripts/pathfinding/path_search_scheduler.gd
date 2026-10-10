@@ -7,6 +7,12 @@ const TaskWorkPositionRulesScript = preload("res://scripts/task_work_position_ru
 const NavGridScript = preload("res://scripts/pathfinding/nav_grid.gd")
 const SNAPSHOT_MARGIN_XZ := 32
 const SNAPSHOT_MARGIN_Y := 8
+# Grid auction box margin beyond the task and every candidate start. Routes
+# that leave the box are inconclusive and leave workers unassigned, so this must
+# cover typical detours (stairs, tunnels); 12 lost a stair shaft once the
+# remaining candidates clustered on one side.
+const AUCTION_SNAPSHOT_MARGIN_XZ := 32
+const AUCTION_SNAPSHOT_MARGIN_Y := 8
 
 var search_thread: Thread
 var thread_running := false
@@ -93,7 +99,7 @@ func enqueue_auction(world, auction_id: int, task, workers: Array) -> int:
 		worker_ids.append(worker.worker_id)
 		starts.append(worker.get_block_coord())
 	var snapshot = PathWorldSnapshotScript.new()
-	snapshot.capture_from_world(world, task.pos, starts, SNAPSHOT_MARGIN_XZ, SNAPSHOT_MARGIN_Y)
+	snapshot.capture_from_world(world, task.pos, starts, AUCTION_SNAPSHOT_MARGIN_XZ, AUCTION_SNAPSHOT_MARGIN_Y)
 	var job := {
 		"job_id": job_id,
 		"kind": "auction",
@@ -328,6 +334,11 @@ func _run_auction(job: Dictionary, pathfinder: Pathfinder, started_usec: int, qu
 			elif distance == -1 and complete and not touched:
 				bid["conclusive"] = true
 				bid["reason"] = "no_path"
+			elif distance == -1 and complete and grid.forward_closed(start):
+				# The goal-side flood spilled over the box edge, but this start's
+				# own reachable region is closed and never met it.
+				bid["conclusive"] = true
+				bid["reason"] = "no_path_start_enclosed"
 			elif distance == -1:
 				bid["reason"] = "snapshot_edge"
 			bids.append(bid)

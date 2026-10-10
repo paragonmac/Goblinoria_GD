@@ -427,6 +427,45 @@ func forward_neighbors(pos: Vector3i) -> Array[Vector3i]:
 	return result
 
 
+## True when everything reachable forward from start lies inside the box and
+## the flood never settles a box-face cell: then "not reached by the reverse
+## flood" is proof of no path (e.g. a worker sealed in a pocket while the goal
+## side flood spilled over the box edge). node_cap bounds the work; hitting it
+## returns false (inconclusive).
+func forward_closed(start: Vector3i, node_cap: int = 20000) -> bool:
+	var si := _index_or_minus_one(start)
+	if si < 0 or _valid[si] == 0:
+		return false
+	var seen := {si: true}
+	var queue := PackedInt32Array([si])
+	var head := 0
+	while head < queue.size():
+		if head >= node_cap:
+			return false
+		var vi: int = queue[head]
+		head += 1
+		var vx := vi % _sx
+		var vz := (vi / _sx) % _sz
+		var vy := vi / _layer
+		if vx == 0 or vx == _sx - 1 or vy == 0 or vy == _sy - 1 or vz == 0 or vz == _sz - 1:
+			return false
+		if _distance[vi] >= 0:
+			return false
+		if _walkable[vi] == 0 and vi != si:
+			continue
+		_ensure_edge_mask(vi)
+		var mask: int = _edge_mask[vi]
+		for bit in range(12):
+			if (mask & (1 << bit)) == 0:
+				continue
+			var d: Vector3i = DIRS[bit]
+			var ni := ((vy + d.y) * _sz + (vz + d.z)) * _sx + (vx + d.x)
+			if not seen.has(ni):
+				seen[ni] = true
+				queue.append(ni)
+	return true
+
+
 func _distance_from_nonwalkable_start(start_index: int) -> int:
 	var best := -1
 	var x := start_index % _sx

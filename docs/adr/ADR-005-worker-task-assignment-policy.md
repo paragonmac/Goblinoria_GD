@@ -40,6 +40,18 @@ only when that flood never reached the snapshot edge. Each round keeps every
 bid it collects and commits a greedy matching ordered by worker priority, path
 length, worker ID and task ID, instead of one claim per round, since workers
 that all nominate the same nearest task otherwise get one assignment per round.
+Review follow-up (same day): a grid result is never discarded wholesale for
+terrain edits elsewhere in its box; each found route is checked against the
+chunks along it (path revision tokens), and failures from an outdated snapshot
+are dropped instead of trusted, so digging no longer resets rounds. Nearby
+workers are not pruned from grid auctions, so a worker that loses its best task
+can still win another over a farther worker. Workers beyond the grid radius bid
+only when no nearby worker can. A worker the goal-side flood missed is proven
+unreachable when its own forward region is closed inside the box (sealed
+pockets block the task). A commit budgets PLACE material against stored
+material minus PLACE tasks already in progress. Matching order is worker
+priority first (a priority-1 bidder beats a shorter priority-2 bidder for the
+same task). Next performance step: reuse one grid across a round's auctions.
 
 If a worker reaches a work front where another worker owns a task but has not started working, task ownership may transfer to the arrived worker. If a worker is waiting on an invalid work position, it releases the task back to pending after a short retry interval so the changed world can be re-evaluated.
 
@@ -53,6 +65,7 @@ If a worker reaches a work front where another worker owns a task but has not st
 
 - Code pointer: `scripts/task_manager.gd`, assignment auction and bid comparison.
 - Code pointer: `scripts/worker.gd`, waiting repath and arrived-worker transfer paths.
+- Contract: `tools/validate_assignment_matching.gd` (nearer idle worker wins, sealed worker blocks the task, PLACE material budget, 36 miners under digging churn stay mostly busy; baseline before the grid auction assigned none).
 - Contract: `tools/validate_assignment_depth_scaling.gd` (36 surface workers, digs four levels down behind stair flights: all assigned within 600 steps, no exclusion from inconclusive searches, sealed dig still blocked) and `tools/validate_nav_grid.gd` (grid edges equal `Pathfinder.get_neighbors`, reverse distances equal uncapped forward search).
 - Contract: `tools/validate_worker_path_safety.gd` checks shortest-path bid rules, per-worker failure expiry, localized invalidation, and arrived-worker task transfer.
 - Runtime trace: `assignment_auction_started`, `assignment_bid_queued`, `assignment_bid`, `assignment_bid_failed`, `task_worker_unreachable`, `task_transferred`, and `task_released_for_repath`.
