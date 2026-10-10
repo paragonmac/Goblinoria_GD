@@ -69,6 +69,10 @@ func _pool_or_free_node(mesh_instance: MeshInstance3D) -> void:
 	if mesh_instance == null:
 		return
 	_reset_chunk_node(mesh_instance)
+	var cap := mesh_instance.get_node_or_null("SliceCap")
+	if cap != null:
+		mesh_instance.remove_child(cap)
+		cap.queue_free()
 	if mesh_instance.get_parent() == self:
 		remove_child(mesh_instance)
 	if pooled_nodes.size() >= MAX_POOLED_CHUNK_NODES:

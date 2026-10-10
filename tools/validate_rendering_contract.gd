@@ -102,6 +102,15 @@ func _init() -> void:
 		push_error("Terrain slope visibility no longer uses its physical block height")
 		quit(1)
 		return
+	# Covered tops moved to the per-level slice cap; check them there.
+	var cap := mesher.build_cap_arrays(cube_blocks, cube_blocks, World.CHUNK_SIZE, 0, 0, 0, 1, World.BLOCK_ID_AIR,
+		solid_table, ramp_table, color_table)
+	var chunk_bakes_covered_top := covered_top_face_ok
+	var cap_uv2s := PackedVector2Array(cap.uv2)
+	var cap_tops_ok := not cap_uv2s.is_empty()
+	for index in range(cap_uv2s.size()):
+		cap_tops_ok = cap_tops_ok and is_equal_approx(cap_uv2s[index].x, 1.0) 			and cap_uv2s[index].y >= ChunkMesher.COVERED_FROM_ABOVE_FLAG and cap.normals[index].y > 0.5
+	covered_top_face_ok = cap_tops_ok and not chunk_bakes_covered_top
 	if not covered_lower_cube_ok or not exposed_upper_cube_ok or not covered_top_face_ok or not covered_side_face_ok:
 		push_error("Covered terrain faces no longer preserve level-cut visibility")
 		quit(1)

@@ -27,7 +27,9 @@ const MESH_RESULT_BACKLOG_MAX := 32
 const MESH_RESULT_BACKLOG_SLEEP_USEC := 500
 const MESH_CACHE_RADIUS := 0
 const MESH_PREFETCH_BELOW_ONLY := true
-const MESHER_CACHE_VERSION := 9
+# 10: covered tops left chunk meshes for per-level slice caps; 9 is migrated.
+const MESHER_CACHE_VERSION := 10
+const MESHER_CACHE_VERSION_LEGACY_CUT_FACES := 9
 const RENDER_FRUSTUM_PADDING_CHUNKS := 1.0
 # While panning, visibility also accepts chunks in a copy of the frustum shifted
 # by the smoothed pan velocity times this lead (covers request-to-applied lag).
@@ -135,6 +137,8 @@ func reset_stats() -> void:
 
 func clear_chunks() -> void:
 	clear_drag_preview()
+	_slice_cap_coords.clear()
+	_slice_cap_checked.clear()
 	visibility_state.clear()
 	diagnostics_render_bounds = {}
 	chunk_cache.clear()
@@ -320,7 +324,7 @@ func regenerate_chunk(cx: int, cy: int, cz: int) -> void:
 
 	_record_chunk_render_stats(key, visible_faces, occluded_faces, mesh_metrics)
 	mesh_instance.mesh = mesh
-	visibility_state.set_node_visibility(key, has_geometry and _is_chunk_in_current_render_zone(key))
+	_after_chunk_mesh_applied(key)
 	if has_geometry:
 		mesh_instance.material_override = get_block_material()
 	var chunk: ChunkData = world.get_chunk(key)
@@ -596,7 +600,7 @@ func _apply_mesh_result(result: Dictionary) -> bool:
 		_record_chunk_render_stats(coord, visible_faces, occluded_faces, mesh_metrics)
 		mesh_instance.mesh = mesh
 		mesh_instance.set_meta("diagnostics_mesh_revision", revision)
-		visibility_state.set_node_visibility(coord, has_geometry and _is_chunk_in_current_render_zone(coord))
+		_after_chunk_mesh_applied(coord)
 		if has_geometry:
 			mesh_instance.material_override = get_block_material()
 		chunk.mesh_state = ChunkData.MESH_STATE_READY
@@ -921,9 +925,9 @@ func _apply_mesh_entry(coord: Vector3i, entry: Dictionary, chunk: ChunkData) -> 
 	_record_chunk_render_stats(coord, visible_faces, occluded_faces, _mesh_metrics_from_entry(entry, null))
 	mesh_instance.mesh = mesh if has_geometry else null
 	mesh_instance.set_meta("diagnostics_mesh_revision", chunk.mesh_revision)
-	visibility_state.set_node_visibility(coord, has_geometry and _is_chunk_in_current_render_zone(coord))
 	if has_geometry:
 		mesh_instance.material_override = get_block_material()
+	_after_chunk_mesh_applied(coord)
 	chunk.mesh_state = ChunkData.MESH_STATE_READY
 	chunk.dirty = false
 	_update_neighbor_remesh_dependencies(coord, missing_neighbors)
@@ -989,6 +993,7 @@ func update_render_zone(
 	camera: Camera3D = null
 ) -> void:
 	_last_zone_args = [min_cx, max_cx, min_cz, max_cz, min_cy, max_cy]
+	_fill_slice_caps_in_zone()
 	if render_debug.freeze:
 		return
 	min_cy = _debug_min_cy(min_cy)
@@ -1015,6 +1020,133 @@ func get_visibility_snapshot() -> Dictionary:
 	state["render_debug"] = render_debug.duplicate()
 	state["void_meter"] = void_meter.duplicate() if void_meter_enabled else {"enabled": false}
 	return state
+
+
+#region Slice caps
+## SEE-ADR-020. The hatched cut floor at the render level. Chunk meshes hold only exposed
+## faces; each chunk in the render level's chunk layer gets a small child mesh
+## with the covered tops of that one block layer, rebuilt on level change and
+## when the chunk (or the chunk above) is remeshed.
+const SLICE_CAP_NODE := "SliceCap"
+var _slice_cap_coords: Dictionary = {}
+var slice_cap_build_usec := 0
+# Columns checked for a cap at the current level (with or without one).
+var _slice_cap_checked: Dictionary = {}
+var _cap_cell_table := PackedByteArray()
+
+
+func _slice_cap_layer() -> int:
+	if world == null:
+		return -1
+	return floori(float(world.top_render_y) / World.CHUNK_SIZE)
+
+
+## Level change: drop every cap, then build the columns of the current render
+## zone. Columns entering the zone later are filled in by _fill_slice_caps_in_zone.
+func refresh_slice_caps() -> void:
+	if world == null:
+		return
+	var started := Time.get_ticks_usec()
+	for coord: Vector3i in _slice_cap_coords.keys():
+		_remove_slice_cap(coord)
+	_slice_cap_checked.clear()
+	_fill_slice_caps_in_zone()
+	slice_cap_build_usec = Time.get_ticks_usec() - started
+
+
+## Builds caps for slice-layer columns of the last render-zone box not yet
+## checked at this level (each column is checked once per level; remeshes
+## rebuild through _after_chunk_mesh_applied). Cheap when nothing is new.
+func _fill_slice_caps_in_zone() -> void:
+	var slice_cy := _slice_cap_layer()
+	if slice_cy < 0 or _last_zone_args.is_empty():
+		return
+	var args: Array = _last_zone_args
+	if slice_cy < int(args[4]) or slice_cy > int(args[5]):
+		return
+	for cx in range(maxi(args[0], world.WORLD_MIN_CHUNK_X), mini(args[1], world.WORLD_MAX_CHUNK_X) + 1):
+		for cz in range(maxi(args[2], world.WORLD_MIN_CHUNK_Z), mini(args[3], world.WORLD_MAX_CHUNK_Z) + 1):
+			var coord := Vector3i(cx, slice_cy, cz)
+			if _slice_cap_checked.has(coord):
+				continue
+			_slice_cap_checked[coord] = true
+			_build_slice_cap(coord)
+
+
+## Every mesh apply path (sync, async result, cache) ends here: a remesh of the
+## slice chunk or the chunk above it changes that column's cap; a chunk with
+## only a cap is still visible.
+func _after_chunk_mesh_applied(coord: Vector3i) -> void:
+	var slice_cy := _slice_cap_layer()
+	if coord.y == slice_cy:
+		_slice_cap_checked[coord] = true
+		_build_slice_cap(coord)
+	elif coord.y == slice_cy + 1:
+		var below := Vector3i(coord.x, slice_cy, coord.z)
+		_slice_cap_checked[below] = true
+		_build_slice_cap(below)
+	visibility_state.set_node_visibility(coord, _is_chunk_in_current_render_zone(coord))
+
+
+func has_slice_cap(coord: Vector3i) -> bool:
+	return _slice_cap_coords.has(coord)
+
+
+func _build_slice_cap(coord: Vector3i) -> void:
+	var chunk: ChunkData = world.get_chunk(coord) if world.is_chunk_coord_valid(coord) else null
+	var ly: int = world.top_render_y - coord.y * World.CHUNK_SIZE
+	if chunk == null or not chunk.generated or ly < 0 or ly >= World.CHUNK_SIZE or chunk.blocks.is_empty():
+		_remove_slice_cap(coord)
+		return
+	_ensure_block_tables()
+	var above_blocks := chunk.blocks
+	if ly == World.CHUNK_SIZE - 1:
+		var above_coord := coord + Vector3i.UP
+		var above: ChunkData = world.get_chunk(above_coord) if world.is_chunk_coord_valid(above_coord) else null
+		above_blocks = above.blocks if above != null and above.generated else PackedByteArray()
+	if _cap_cell_table.size() != block_solid_table.size():
+		_cap_cell_table = mesher.cap_cell_table(World.BLOCK_ID_AIR, block_ramp_table, block_solid_table.size())
+	var arrays: Dictionary = mesher.build_cap_arrays_tabled(chunk.blocks, above_blocks, World.CHUNK_SIZE, coord.x, coord.y, coord.z, ly,
+		_cap_cell_table, block_solid_table, block_color_table)
+	var vertices: PackedVector3Array = arrays.vertices
+	if vertices.is_empty():
+		_remove_slice_cap(coord)
+		return
+	var mesh_arrays := []
+	mesh_arrays.resize(Mesh.ARRAY_MAX)
+	mesh_arrays[Mesh.ARRAY_VERTEX] = vertices
+	mesh_arrays[Mesh.ARRAY_NORMAL] = arrays.normals
+	mesh_arrays[Mesh.ARRAY_COLOR] = arrays.colors
+	mesh_arrays[Mesh.ARRAY_TEX_UV] = arrays.uv
+	mesh_arrays[Mesh.ARRAY_TEX_UV2] = arrays.uv2
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, mesh_arrays)
+	var node: MeshInstance3D = chunk_cache.ensure_chunk(coord, World.CHUNK_SIZE)
+	var cap: MeshInstance3D = node.get_node_or_null(SLICE_CAP_NODE)
+	if cap == null:
+		cap = MeshInstance3D.new()
+		cap.name = SLICE_CAP_NODE
+		node.add_child(cap)
+	cap.mesh = mesh
+	cap.material_override = get_block_material()
+	_slice_cap_coords[coord] = true
+	# A buried chunk can now be visible through its cap alone.
+	visibility_state.set_node_visibility(coord, _is_chunk_in_current_render_zone(coord))
+
+
+func _remove_slice_cap(coord: Vector3i) -> void:
+	if not _slice_cap_coords.has(coord):
+		return
+	_slice_cap_coords.erase(coord)
+	var node: MeshInstance3D = chunk_cache.get_chunk(coord)
+	if node == null:
+		return
+	var cap := node.get_node_or_null(SLICE_CAP_NODE)
+	if cap != null:
+		node.remove_child(cap)
+		cap.queue_free()
+	visibility_state.set_node_visibility(coord, _is_chunk_in_current_render_zone(coord))
+#endregion
 
 
 #region Rendering debug switches (F7 panel)
@@ -1127,7 +1259,7 @@ func _tick_void_meter() -> void:
 				if not frustum_culler.is_chunk_in_view(planes, coord, World.CHUNK_SIZE, 0.0):
 					continue
 				var node: MeshInstance3D = chunk_cache.get_chunk(coord)
-				if node == null or node.mesh == null or node.mesh.get_surface_count() == 0:
+				if node == null or ((node.mesh == null or node.mesh.get_surface_count() == 0) and not has_slice_cap(coord)):
 					continue
 				checked += 1
 				if not node.visible:
@@ -1174,6 +1306,7 @@ func get_block_material() -> Material:
 
 func set_top_render_y(value: int) -> void:
 	material_helper.set_top_render_y(value)
+	refresh_slice_caps()
 	if overlay_renderer != null:
 		overlay_renderer.set_top_render_y(value)
 

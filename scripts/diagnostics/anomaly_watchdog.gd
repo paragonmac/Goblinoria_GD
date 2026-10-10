@@ -284,7 +284,7 @@ func _check_chunk(renderer, coord: Vector3i) -> void:
 	var job_pending: bool = renderer.mesh_scheduler.mesh_job_set.has(coord)
 	var ready: bool = chunk.mesh_state == ChunkData.MESH_STATE_READY
 	var node: MeshInstance3D = renderer.chunk_cache.get_chunk(coord)
-	var has_geometry := node != null and node.mesh != null and node.mesh.get_surface_count() > 0
+	var has_geometry: bool = node != null and ((node.mesh != null and node.mesh.get_surface_count() > 0) or renderer.has_slice_cap(coord))
 	var applied := int(node.get_meta("diagnostics_mesh_revision", -1)) if node != null else -1
 	var details := {"coord": coord, "mesh_state": chunk.mesh_state, "mesh_revision": chunk.mesh_revision,
 		"applied_revision": applied, "job_pending": job_pending, "node_exists": node != null,

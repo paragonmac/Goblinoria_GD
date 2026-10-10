@@ -14,6 +14,8 @@ const MESH_CACHE_FILE_NAME := "world_mesh_cache.dat"
 #region State
 var pending_mesh_cache_entries: Dictionary = {}
 var mesh_cache_stats: Dictionary = {}
+# Loaded cache predates slice caps: strip baked cut faces while importing.
+var _legacy_cut_faces := false
 # Block data cannot change during a synchronous save, so each chunk is hashed
 # once per save instead of once per entry and per neighbor reference.
 var _save_hashes: Dictionary = {}
@@ -119,7 +121,9 @@ func load_mesh_cache(world: World, world_dir: String, block_table_hash: int) -> 
 	if file.get_16() != MESH_CACHE_VERSION:
 		push_warning("Mesh cache ignored: version mismatch")
 		return true
-	if file.get_16() != WorldRenderer.MESHER_CACHE_VERSION:
+	var mesher_version: int = file.get_16()
+	_legacy_cut_faces = mesher_version == WorldRenderer.MESHER_CACHE_VERSION_LEGACY_CUT_FACES
+	if mesher_version != WorldRenderer.MESHER_CACHE_VERSION and not _legacy_cut_faces:
 		push_warning("Mesh cache ignored: mesher version mismatch")
 		return true
 	if file.get_16() != World.CHUNK_SIZE:
@@ -165,6 +169,8 @@ func try_import_for_loaded_chunk(world: World, bulk_chunk_blocks: Dictionary, co
 		mesh_cache_stats["entries_rejected"] = int(mesh_cache_stats.get("entries_rejected", 0)) + 1
 		return
 	var typed_entry: Dictionary = entry
+	if _legacy_cut_faces:
+		typed_entry = ChunkMesher.strip_legacy_cut_faces(typed_entry)
 	if not _is_mesh_cache_entry_valid_for_chunk(world, bulk_chunk_blocks, coord, chunk, typed_entry):
 		mesh_cache_stats["entries_rejected"] = int(mesh_cache_stats.get("entries_rejected", 0)) + 1
 		return
@@ -194,6 +200,9 @@ func _persistent_mesh_cache_entry_for_coord(world: World, bulk_chunk_blocks: Dic
 		if typeof(pending_entry) == TYPE_DICTIONARY and _is_mesh_cache_entry_shape_valid(pending_entry) and _is_mesh_cache_entry_valid_for_blocks(world, bulk_chunk_blocks, coord, blocks, pending_entry):
 			# Only top-level keys are replaced below; packed arrays are copy-on-write.
 			mesh_entry = pending_entry.duplicate()
+			if _legacy_cut_faces:
+				# Never imported this session: migrate before writing a v10 file.
+				mesh_entry = ChunkMesher.strip_legacy_cut_faces(mesh_entry)
 	if mesh_entry.is_empty():
 		return {}
 	mesh_entry["cx"] = coord.x

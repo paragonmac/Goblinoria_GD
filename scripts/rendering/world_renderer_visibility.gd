@@ -152,7 +152,7 @@ func set_node_visibility(coord: Vector3i, desired: bool) -> void:
 	if node == null:
 		shown.erase(coord)
 		return
-	desired = desired and node.mesh != null and node.mesh.get_surface_count() > 0
+	desired = desired and ((node.mesh != null and node.mesh.get_surface_count() > 0) or renderer.has_slice_cap(coord))
 	if node.visible != desired:
 		node.visible = desired
 	if desired:

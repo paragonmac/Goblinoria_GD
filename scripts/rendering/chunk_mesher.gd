@@ -261,6 +261,142 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 #endregion
 
 
+#region Slice caps
+## Cut-floor cap for one block layer of a chunk: greedy-merged hatched top faces
+## of solid cube blocks covered by solid ground. above_blocks is the chunk that
+## holds layer ly + 1 (this chunk, or the one above when ly is the top layer).
+func build_cap_arrays(blocks: PackedByteArray, above_blocks: PackedByteArray, chunk_size: int, cx: int, cy: int, cz: int, ly: int,
+		air_id: int, solid_table: PackedByteArray, ramp_table: PackedByteArray, color_table: PackedColorArray) -> Dictionary:
+	return build_cap_arrays_tabled(blocks, above_blocks, chunk_size, cx, cy, cz, ly,
+		cap_cell_table(air_id, ramp_table, solid_table.size()), solid_table, color_table)
+
+
+## 1 for block ids that can carry a cap face (greedy cubes: not air, ramp or
+## stair flight). Precomputed once so the per-cell loop is plain array reads.
+func cap_cell_table(air_id: int, ramp_table: PackedByteArray, size: int) -> PackedByteArray:
+	var table := PackedByteArray()
+	table.resize(size)
+	for block_id in range(size):
+		table[block_id] = 1 if _is_greedy_cube_block(block_id, air_id, ramp_table) else 0
+	return table
+
+
+## Hot path for level changes (every column of a chunk layer on the main
+## thread): an integer mask and inlined chunk indexing, (lz * s + ly) * s + lx.
+func build_cap_arrays_tabled(blocks: PackedByteArray, above_blocks: PackedByteArray, chunk_size: int, cx: int, cy: int, cz: int, ly: int,
+		cap_cells: PackedByteArray, solid_table: PackedByteArray, color_table: PackedColorArray) -> Dictionary:
+	var vertices := PackedVector3Array()
+	var normals := PackedVector3Array()
+	var colors := PackedColorArray()
+	var uvs := PackedVector2Array()
+	var uv2s := PackedVector2Array()
+	var result := {"vertices": vertices, "normals": normals, "colors": colors, "uv": uvs, "uv2": uv2s}
+	if above_blocks.is_empty():
+		return result
+	var cells := PackedInt32Array()
+	cells.resize(chunk_size * chunk_size)
+	var any := false
+	var above_ly := ly + 1 if ly + 1 < chunk_size else 0
+	var cap_size := cap_cells.size()
+	var solid_size := solid_table.size()
+	for lz in range(chunk_size):
+		var row := lz * chunk_size
+		var base := (row + ly) * chunk_size
+		var above_base := (row + above_ly) * chunk_size
+		for lx in range(chunk_size):
+			var block_id: int = blocks[base + lx]
+			if block_id >= cap_size or cap_cells[block_id] == 0:
+				continue
+			var above_id: int = above_blocks[above_base + lx]
+			if above_id >= solid_size or solid_table[above_id] == 0:
+				continue
+			cells[row + lx] = block_id + 1
+			any = true
+	if not any:
+		return result
+	var tile_count := ATLAS_COLUMNS * ATLAS_ROWS
+	var tile_scale := _atlas_tile_scale(ATLAS_COLUMNS, ATLAS_ROWS)
+	for z in range(chunk_size):
+		for x in range(chunk_size):
+			var value: int = cells[z * chunk_size + x]
+			if value == 0:
+				continue
+			var width := 1
+			while x + width < chunk_size and cells[z * chunk_size + x + width] == value:
+				width += 1
+			var depth := 1
+			var can_grow := true
+			while z + depth < chunk_size and can_grow:
+				for dx in range(width):
+					if cells[(z + depth) * chunk_size + x + dx] != value:
+						can_grow = false
+						break
+				if can_grow:
+					depth += 1
+			for dz in range(depth):
+				for dx in range(width):
+					cells[(z + dz) * chunk_size + x + dx] = 0
+			var cell := {"block_id": value - 1, "sample_x": cx * chunk_size + x, "sample_y": cy * chunk_size + ly,
+				"sample_z": cz * chunk_size + z, "top_flag": 1.0, "covered_from_above": true}
+			_emit_greedy_xz_face(vertices, normals, colors, uvs, uv2s, x, z, width, depth, ly, true, cell, color_table, tile_count, tile_scale)
+	return result
+
+
+## Drops baked cut faces (greedy top faces with the top flag) from mesh arrays
+## built before slice caps (mesher cache version 9). Triangles are handled
+## individually because ramps emit triangles and stay unchanged.
+static func strip_legacy_cut_faces(entry: Dictionary) -> Dictionary:
+	# Malformed entries are left for the cache validity checks to reject.
+	if typeof(entry.get("vertices")) != TYPE_PACKED_VECTOR3_ARRAY or typeof(entry.get("normals")) != TYPE_PACKED_VECTOR3_ARRAY \
+			or typeof(entry.get("colors")) != TYPE_PACKED_COLOR_ARRAY or typeof(entry.get("uv")) != TYPE_PACKED_VECTOR2_ARRAY \
+			or typeof(entry.get("uv2")) != TYPE_PACKED_VECTOR2_ARRAY:
+		return entry
+	var vertices: PackedVector3Array = entry["vertices"]
+	var normals: PackedVector3Array = entry["normals"]
+	var colors: PackedColorArray = entry["colors"]
+	var uvs: PackedVector2Array = entry["uv"]
+	var uv2s: PackedVector2Array = entry["uv2"]
+	var count := vertices.size()
+	if count == 0 or count % 3 != 0 or normals.size() != count or uv2s.size() != count \
+			or colors.size() != count or uvs.size() != count:
+		return entry
+	var keep_v := PackedVector3Array()
+	var keep_n := PackedVector3Array()
+	var keep_c := PackedColorArray()
+	var keep_uv := PackedVector2Array()
+	var keep_uv2 := PackedVector2Array()
+	var stripped := 0
+	for tri in range(0, count, 3):
+		var flag := uv2s[tri].y
+		if flag >= COVERED_FROM_ABOVE_FLAG:
+			flag -= COVERED_FROM_ABOVE_FLAG
+		if normals[tri].y > 0.5 and flag >= GREEDY_UV2_FLAG and fmod(flag - GREEDY_UV2_FLAG, 2.0) > 0.5:
+			stripped += 1
+			continue
+		for i in range(tri, tri + 3):
+			keep_v.append(vertices[i])
+			keep_n.append(normals[i])
+			keep_c.append(colors[i])
+			keep_uv.append(uvs[i])
+			keep_uv2.append(uv2s[i])
+	if stripped == 0:
+		return entry
+	var out := entry.duplicate()
+	out["vertices"] = keep_v
+	out["normals"] = keep_n
+	out["colors"] = keep_c
+	out["uv"] = keep_uv
+	out["uv2"] = keep_uv2
+	out["has_geometry"] = not keep_v.is_empty()
+	if typeof(entry.get("metrics")) == TYPE_DICTIONARY:
+		var metrics: Dictionary = entry["metrics"].duplicate()
+		metrics["vertices"] = keep_v.size()
+		metrics["triangles"] = keep_v.size() / 3
+		out["metrics"] = metrics
+	return out
+#endregion
+
+
 #region Block Colors
 func block_color_from_table(color_table: PackedColorArray, block_id: int, wx: int, wy: int, wz: int) -> Color:
 	return visuals.block_color_from_table(color_table, block_id, wx, wy, wz)
@@ -472,10 +608,13 @@ func _add_greedy_top_bottom_faces(
 					neighbor_id = padded_block(padded_blocks, padded_size, lx + 1, ly, lz + 1, air_id)
 				var neighbor_occluding := is_solid_id(neighbor_id, solid_table)
 				if is_top:
-					var top_flag := 1.0 if neighbor_occluding else 0.0
+					# Covered tops are cut faces, visible only at the render level (SEE-ADR-020);
+					# the renderer draws them as a per-level slice cap instead of a
+					# sheet for every block layer (90% of chunk quads before).
 					if neighbor_occluding:
 						counts["occluded"] = int(counts["occluded"]) + 1
-					mask[lz * chunk_size + lx] = _make_greedy_cell(block_id, lx, ly, lz, cx, cy, cz, chunk_size, top_flag, not neighbor_occluding, covered_from_above)
+						continue
+					mask[lz * chunk_size + lx] = _make_greedy_cell(block_id, lx, ly, lz, cx, cy, cz, chunk_size, 0.0, true, covered_from_above)
 				elif neighbor_occluding:
 					counts["occluded"] = int(counts["occluded"]) + 1
 				else:
