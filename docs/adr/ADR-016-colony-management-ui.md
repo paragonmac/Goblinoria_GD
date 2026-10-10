@@ -37,6 +37,16 @@ and clears selection; action-time checks reject stale IDs before the next UI tic
 Pending task cancellation uses an identity-checked TaskManager wrapper sharing the
 existing hauling reservation cleanup. Filters and roles use authoritative APIs.
 
+Amended 2026-10-05 (UI redesign): the shell is an icon-first bottom command bar
+(status chips, tool palette, primary panel buttons) with a right-edge depth gauge,
+following the player-approved concept. Primary categories (Colony, Workers, Jobs,
+Tasks, Stockpiles, Resources) sit in the bar; the remaining catalog categories
+open from a "More" popover. Unavailable features stay discoverable and disabled,
+but inside each category they collapse into a "Coming later (N)" section instead
+of filling the panel. Stairs is one palette tool with an Up/Down toggle; the tool
+catalog, shortcuts and category/feature IDs are unchanged. Icons are drawn in code
+(UiIcon); no image assets were added.
+
 The shell overlays the existing viewport. Management continues simulation. Main's
 input coordination gives GUI-origin gestures ownership through release and absorbs
 text/popup keys without replay. Escape closes popup, latest dock, then game menu.
@@ -84,3 +94,7 @@ scene/resource edits or new art dependencies are required.
 - tools/validate_colony_capabilities.gd, validate_colony_presentation.gd and
   validate_colony_ui.gd; existing selection/context/economy validators remain active.
 - [Player controls and acceptance notes](../colony_ui.md).
+
+## Amendment (2026-10-09): floating and docked windows
+
+Panels are windows managed by `scripts/ui/window_layout.gd` (WindowLayout): header drag, edge/corner resize, left/right dock zones near the screen-side edges with stacking, clamping clear of the command bar, and a per-user layout in `user://ui_layout.cfg` (versioned, validated, pulled on screen; never written by headless runs). The manager works on the existing PanelContainers and follows their visibility, so open/close code is unchanged; the details window's Work Priorities width is a temporary width floor, never persisted. Defaults reproduce the previous fixed layout. Game menu > Reset window layout restores defaults. Guardrail: `tools/validate_window_layout.gd` (manager) and `tools/validate_colony_ui.gd` (integration).

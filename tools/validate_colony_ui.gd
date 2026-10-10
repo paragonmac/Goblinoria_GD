@@ -78,6 +78,33 @@ func _run() -> void:
 		"Two working Miners, delivering Hauler and reserved Fighter have distinct counts")
 	check(ui.model.get_row("worker", 3).description.contains("Carrying 1"), "Delivering worker exposes carried material without live diagnostics")
 	check(not main.hud_controller.stockpile_panel.visible, "Prototype stockpile panel retired")
+	# Window layout: defaults reproduce the fixed layout; headless never persists.
+	check(ui.layout != null and ui.layout.config_path.is_empty(), "Window layout exists and headless runs do not persist it")
+	ui.open_category("workers")
+	ui.inspect_cell(1, Vector3i.ZERO)
+	await settle()
+	var management_rect: Rect2 = ui.layout.get_state("management").rect
+	var details_rect: Rect2 = ui.layout.get_state("details").rect
+	check(ui.layout.get_state("management").dock == "left" and is_equal_approx(management_rect.position.x, 16.0)
+		and is_equal_approx(management_rect.size.x, 480.0), "Management window docks left at the old column")
+	check(ui.layout.get_state("details").dock == "right" and is_equal_approx(details_rect.end.x, ui.root.size.x + ui.DETAILS_RIGHT)
+		and is_equal_approx(details_rect.size.x, ui.DETAILS_WIDTH), "Details window docks right beside the depth gauge")
+	check(details_rect.end.y <= ui.root.size.y - ui.CommandBar.BAR_HEIGHT and management_rect.end.y <= ui.root.size.y - ui.CommandBar.BAR_HEIGHT,
+		"Docked windows stay above the command bar")
+	check(ui.layout.get_state("jobs").dock == "float", "Jobs is a floating window")
+	main._toggle_render_debug_panel()
+	check(ui.layout.get_state("render_debug").dock == "float" and main.render_debug_panel.get_parent() == ui.root,
+		"F7 panel is a managed floating window in the colony UI")
+	main._toggle_render_debug_panel()
+	var reset_button: Button = main.menu_vbox.get_node_or_null("ResetLayoutButton")
+	check(reset_button != null and reset_button.get_index() < main.quit_button.get_index(), "Game menu offers Reset window layout above Quit")
+	ui.layout.undock("details", Rect2(700, 200, 420, 500))
+	check(ui.layout.get_state("details").dock == "float", "Details can float")
+	reset_button.pressed.emit()
+	check(ui.layout.get_state("details").dock == "right", "Reset window layout re-docks details")
+	ui.close_details()
+	ui.close_management()
+	await settle()
 	check(not main.diagnostics_controller.service.enabled, "Player UI does not enable diagnostics")
 	for category: Dictionary in Catalog.categories():
 		ui.open_category(category.id)
@@ -196,7 +223,11 @@ func _run() -> void:
 		root.content_scale_aspect = Window.CONTENT_SCALE_ASPECT_EXPAND
 		await settle()
 		check(ui.root.size.x >= 1920 and ui.root.size.y >= 1080, "Scaled logical canvas fits " + str(size))
-		check(ui.summary.get_parent().get_parent().size.y <= 56, "Summary respects 56-pixel top bar " + str(size))
+		var bar: Control = ui.command_bar.bar
+		check(bar.size.y <= ui.command_bar.BAR_HEIGHT + 0.5 and bar.get_combined_minimum_size().y <= ui.command_bar.BAR_HEIGHT + 0.5,
+			"Command bar respects its %d-pixel height %s" % [ui.command_bar.BAR_HEIGHT, size])
+		check(bar.get_combined_minimum_size().x <= 1920.0, "Command bar content fits the 1920 logical width %s (min %s)" % [size, bar.get_combined_minimum_size()])
+		check(ui.command_bar.gauge.get_global_rect().end.x <= ui.root.size.x and ui.command_bar.gauge.visible, "Depth gauge stays on screen " + str(size))
 		var button: Button = ui._tool_buttons[World.PlayerMode.DIG]
 		var native_point: Vector2 = root.get_final_transform() * button.get_global_rect().get_center()
 		world.set_player_mode(World.PlayerMode.INFORMATION)

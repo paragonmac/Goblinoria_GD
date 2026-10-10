@@ -459,6 +459,9 @@ func _cancel_jobs_drag() -> void:
 	var jobs = ui.get("jobs_popup")
 	if jobs != null and jobs.has_method("cancel_drag"):
 		jobs.cancel_drag()
+	var window_layout = ui.get("layout")
+	if window_layout != null and window_layout.has_method("cancel_interaction"):
+		window_layout.cancel_interaction()
 
 
 func _clear_gui_pressed_state() -> void:

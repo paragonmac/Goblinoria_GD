@@ -279,10 +279,10 @@ func _run_real_ui_contracts() -> void:
 			check(delivered.get("ok", false), "partial jobs-popup press delivers")
 			real_main._process(0.016)
 			await process_frame
-	check(real_ui.jobs_popup._dragging, "jobs-popup header enters drag state")
+	check(real_ui.layout.is_interacting(), "jobs-popup header enters drag state")
 	real_driver.cancel()
 	await _real_settle()
-	check(real_ui.jobs_popup.is_visible() and not real_ui.jobs_popup._dragging,
+	check(real_ui.jobs_popup.is_visible() and not real_ui.layout.is_interacting(),
 		"cancel stops jobs-popup drag without closing the popup")
 	real_ui.close_management()
 

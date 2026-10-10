@@ -10,6 +10,11 @@ const WindowPolicy = preload("res://scripts/ui/colony_window_policy.gd")
 const H = preload("res://scripts/ui/colony_panel_helpers.gd")
 const Tools = preload("res://scripts/main_tool_catalog.gd")
 const PAGE_SIZE := 50
+const DETAILS_WIDTH := 400.0
+const DETAILS_WIDE_WIDTH := 700.0
+# Right edge of docked details: clear of the 84 px depth gauge and its margin.
+const DETAILS_RIGHT := -112.0
+const CommandBar = preload("res://scripts/ui/colony_command_bar.gd")
 
 class PopupInput extends Node:
 	var popup: Window
@@ -36,7 +41,15 @@ var navigation = Navigation.new()
 var model = Model.new()
 var panels = Panels.new()
 var jobs_popup = JobsPopup.new()
+# Floating/docked windows: management (left dock), details (right dock), Jobs and
+# debug panels (floating). Layout persists in user://ui_layout.cfg.
+var layout: WindowLayout
+var _management_header: Control
+var _details_header: Control
+const LAYOUT_PATH := "user://ui_layout.cfg"
+const FLOAT_TOP := 72.0
 var window_policy = WindowPolicy.new()
+var command_bar = CommandBar.new()
 var management: PanelContainer
 var details: PanelContainer
 var body: VBoxContainer
@@ -71,7 +84,6 @@ var _was_loading := false
 var _world_id := 0
 var _world_epoch := -1
 var _tool_buttons: Dictionary = {}
-var _summary_buttons: Dictionary = {}
 var _detail_signature := ""
 
 func setup(owner, configure_window: bool = true) -> void:
@@ -85,11 +97,11 @@ func setup(owner, configure_window: bool = true) -> void:
 	root.theme = ThemeFactory.build()
 	if configure_window:
 		window_policy.setup(main.get_window())
-	navigation.setup(root)
 	navigation.category_selected.connect(toggle_category)
 	_build_shell()
 	jobs_popup.setup(root, root.theme)
 	jobs_popup.close_requested.connect(close_management)
+	_setup_layout()
 	model.bind_world(main.world)
 	_world_id = main.world.get_instance_id()
 	_world_epoch = main.world.runtime_epoch
@@ -112,83 +124,133 @@ func setup(owner, configure_window: bool = true) -> void:
 	menu.offset_right = 350
 	menu.offset_top = -310
 	menu.offset_bottom = 310
-	H.label(main.menu_vbox, "Prototype saves restore terrain, resources, stockpile names and work priorities. Workers respawn; unfinished jobs reset.")
-	for entry in [[main.performance_controller.indicator, -146], [main.diagnostics_controller.indicator, -116]]:
+	H.label(main.menu_vbox, "Saves keep terrain, items, stockpiles, worker positions and roles, pending jobs and the camera. Jobs in progress restart.")
+	# Recording/diagnostic status sits quietly at the top centre, clear of panels.
+	for entry in [[main.performance_controller.indicator, 10], [main.diagnostics_controller.indicator, 34]]:
 		var indicator: Label = entry[0]
 		if indicator == null:
 			continue
-		indicator.anchor_top = 1
-		indicator.anchor_bottom = 1
+		indicator.anchor_left = 0.5
+		indicator.anchor_right = 0.5
+		indicator.anchor_top = 0
+		indicator.anchor_bottom = 0
 		indicator.offset_top = entry[1]
-		indicator.offset_bottom = entry[1] + 28
-		indicator.offset_left = 648
-		indicator.offset_right = -352
-		indicator.add_theme_font_size_override("font_size", 18)
+		indicator.offset_bottom = entry[1] + 24
+		indicator.offset_left = -300
+		indicator.offset_right = 300
+		indicator.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		indicator.add_theme_font_size_override("font_size", 16)
 
 func _build_shell() -> void:
-	var top := PanelContainer.new()
-	root.add_child(top)
-	top.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
-	top.offset_bottom = 56
-	var bar := HBoxContainer.new()
-	top.add_child(bar)
-	H.button(bar, "Colony", toggle_category.bind("colony"))
-	for state in ["working", "travelling", "waiting", "reserve"]:
-		_summary_buttons[state] = H.button(bar, state.capitalize(), toggle_workers.bind(state))
-	summary = H.label(bar, "Updating colony...")
-	summary.autowrap_mode = TextServer.AUTOWRAP_OFF
-	summary.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	summary.size_flags_stretch_ratio = 3.0
-	H.button(bar, "Tasks", toggle_category.bind("jobs"))
-	H.button(bar, "Menu", main.open_menu)
+	# Approved hybrid layout: one bottom command bar (status, tools, panels),
+	# right-edge depth gauge, docked panels above the bar, world kept clear.
+	var bar_top := -CommandBar.BAR_HEIGHT - 12.0
 	management = PanelContainer.new()
+	management.name = "Management"
+	management.theme_type_variation = "Card"
 	root.add_child(management)
 	management.set_anchors_and_offsets_preset(Control.PRESET_LEFT_WIDE)
-	management.offset_left = 176
-	management.offset_right = 636
-	management.offset_top = 56
-	management.offset_bottom = -76
+	management.offset_left = 16
+	management.offset_right = 496
+	management.offset_top = 16
+	management.offset_bottom = bar_top
 	var content := H.content(management)
 	var header := HBoxContainer.new()
 	content.add_child(header)
-	title = H.label(header, "Colony")
-	H.button(header, "Close", close_management)
+	_management_header = header
+	title = H.styled_label(header, "Colony", "Heading")
+	var close := H.icon_button(header, "close", "Close", close_management, "IconButton", 18, Vector2(44, 40))
+	close.get_meta("caption").hide()
 	body = H.scroll(content)
 	management.hide()
 	details = PanelContainer.new()
+	details.name = "Details"
+	details.theme_type_variation = "Card"
 	root.add_child(details)
 	details.set_anchors_and_offsets_preset(Control.PRESET_RIGHT_WIDE)
-	details.offset_left = -340
-	details.offset_top = 56
-	details.offset_bottom = -76
+	details.offset_right = DETAILS_RIGHT
+	details.offset_left = DETAILS_RIGHT - DETAILS_WIDTH
+	details.offset_top = 16
+	details.offset_bottom = bar_top - 58.0
 	var detail_content := H.content(details)
-	H.button(detail_content, "Close details", close_details)
+	var detail_header := HBoxContainer.new()
+	detail_content.add_child(detail_header)
+	_details_header = detail_header
+	H.styled_label(detail_header, "Details", "Subheading")
+	var close_detail := H.icon_button(detail_header, "close", "Close details", close_details, "IconButton", 18, Vector2(44, 40))
+	close_detail.get_meta("caption").hide()
 	detail_body = H.scroll(detail_content)
 	details.hide()
-	var bottom := PanelContainer.new()
-	root.add_child(bottom)
-	bottom.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
-	bottom.offset_top = -76
-	var tools := HBoxContainer.new()
-	bottom.add_child(tools)
-	for tool: Dictionary in Tools.TOOLS:
-		var button := H.button(tools, "%s [%s]" % [tool.label, OS.get_keycode_string(tool.key)], choose_tool.bind(int(tool.mode)))
-		button.toggle_mode = true
-		button.tooltip_text = tool_hint(int(tool.mode))
-		_tool_buttons[int(tool.mode)] = button
-	H.button(tools, "Down [", change_level.bind(-1))
-	level_label = H.label(tools, "Level")
-	H.button(tools, "Up ]", change_level.bind(1))
+	command_bar.build(root, self)
+	summary = command_bar.summary
+	_tool_buttons = command_bar.tool_buttons
+	level_label = command_bar.level_label
 	feedback = Label.new()
+	feedback.name = "Feedback"
+	feedback.theme_type_variation = "Body"
 	root.add_child(feedback)
 	feedback.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	feedback.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
-	feedback.offset_left = 648
-	feedback.offset_right = -352
-	feedback.offset_top = -106
-	feedback.offset_bottom = -78
+	feedback.offset_left = 520
+	feedback.offset_right = -520
+	feedback.offset_top = bar_top - 96
+	feedback.offset_bottom = bar_top - 64
+	feedback.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	feedback.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.8))
+	feedback.add_theme_constant_override("shadow_offset_x", 1)
+	feedback.add_theme_constant_override("shadow_offset_y", 1)
 	feedback.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	feedback.tooltip_text = ""
+
+## Bands for docked windows and the area floating windows must stay inside, in
+## root coordinates: clear of the bottom command bar, the right depth gauge and
+## the blocked-jobs toast above the bar.
+func _layout_area(side: String) -> Rect2:
+	var size := root.size
+	var bar_top := size.y - CommandBar.BAR_HEIGHT - 12.0
+	match side:
+		"left":
+			return Rect2(16.0, 16.0, minf(900.0, size.x * 0.5 - 24.0), maxf(0.0, bar_top - 16.0))
+		"right":
+			var right := size.x + DETAILS_RIGHT
+			var width := minf(900.0, size.x * 0.5 - 24.0)
+			return Rect2(right - width, 16.0, width, maxf(0.0, bar_top - 58.0 - 16.0))
+	return Rect2(16.0, FLOAT_TOP, maxf(0.0, size.x - 32.0), maxf(0.0, bar_top - FLOAT_TOP))
+
+
+func _setup_layout() -> void:
+	layout = WindowLayout.new()
+	# Headless validators must never read or overwrite the player's layout.
+	layout.config_path = "" if DisplayServer.get_name() == "headless" else LAYOUT_PATH
+	layout.setup(root, _layout_area)
+	var float_area := _layout_area("float")
+	layout.register("management", management, _management_header,
+		{"dock": "left", "dock_width": 480.0, "min_size": Vector2(360, 240),
+		"float_rect": Rect2(float_area.position + Vector2(40, 0), Vector2(480, 640))})
+	layout.register("details", details, _details_header,
+		{"dock": "right", "dock_width": DETAILS_WIDTH, "min_size": Vector2(320, 200),
+		"float_rect": Rect2(float_area.end.x - DETAILS_WIDTH - 40.0, float_area.position.y, DETAILS_WIDTH, 640)})
+	var jobs_size := Vector2(minf(JobsPopup.PANEL_SIZE.x, float_area.size.x), minf(JobsPopup.PANEL_SIZE.y, float_area.size.y))
+	layout.register("jobs", jobs_popup.panel, jobs_popup._header,
+		{"dock": "float", "min_size": Vector2(480, 360), "dock_width": jobs_size.x,
+		"float_rect": Rect2(float_area.position + (float_area.size - jobs_size) * 0.5, jobs_size)})
+	layout.load()
+
+
+## For panels created elsewhere (debug tools): reparent into the layout root and
+## manage as a window. defaults as WindowLayout.register.
+func register_window(id: String, panel: Control, handle: Control, defaults: Dictionary) -> void:
+	if panel.get_parent() != root:
+		if panel.get_parent() != null:
+			panel.get_parent().remove_child(panel)
+		root.add_child(panel)
+	layout.register(id, panel, handle, defaults)
+
+
+func reset_layout() -> void:
+	if layout != null:
+		layout.reset()
+
 
 static func tool_hint(mode: int) -> String:
 	match mode:
@@ -222,14 +284,14 @@ func tick(dt: float) -> void:
 		_refresh_details()
 		model.refresh_workers()
 		panels.refresh_debug_controls()
-	for mode in _tool_buttons:
-		_tool_buttons[mode].set_pressed_no_signal(mode == main.world.player_mode)
-	level_label.text = "Level %d\nY %d" % [main.world.top_render_y - main.hud_controller.render_level_base_y, main.world.top_render_y]
+	command_bar.update_tools(main.world.player_mode)
+	command_bar.update_level(main.world.top_render_y - main.hud_controller.render_level_base_y, main.world.top_render_y)
 	if Time.get_ticks_msec() > _feedback_until:
 		feedback.text = ""
 
 func reset_world() -> void:
 	cancel_popups()
+	navigation.close_more()
 	close_details()
 	close_management()
 	model.bind_world(main.world)
@@ -243,9 +305,7 @@ func reset_world() -> void:
 func _refresh_summary() -> void:
 	var data: Dictionary = model.snapshot()
 	var counts: Dictionary = data.get("counts", {})
-	for state in _summary_buttons:
-		_summary_buttons[state].text = "%d %s" % [int(counts.get(state, 0)), state.capitalize()]
-	summary.text = "Updating..." if model.updating else "%d pending | %d blocked | %d stored" % [int(counts.get("pending", 0)), int(counts.get("blocked", 0)), int(counts.get("stored", 0))]
+	command_bar.update_counts(counts, model.updating)
 	if category == "colony":
 		panels.update_colony(data)
 
@@ -255,6 +315,7 @@ func open_category(id: String) -> void:
 	if id == "assignments" and category == id and jobs_popup.is_visible():
 		return
 	jobs_popup.hide()
+	navigation.close_more()
 	category = id
 	page = 0
 	search_text = ""
@@ -302,6 +363,15 @@ func show_workers(activity: String) -> void:
 				filter.select(index)
 	_start_filter()
 
+func show_tasks(filter_value: String) -> void:
+	open_category("jobs")
+	filter_text = filter_value
+	if filter != null:
+		for index in range(filter.item_count):
+			if filter.get_item_text(index) == filter_value:
+				filter.select(index)
+	_start_filter()
+
 func close_management() -> void:
 	jobs_popup.hide()
 	management.hide()
@@ -322,7 +392,14 @@ func _touch_panel(id: String) -> void:
 	_panel_order.erase(id)
 	_panel_order.append(id)
 
+func _more_open() -> bool:
+	return is_instance_valid(navigation.more_panel) and navigation.more_panel.visible
+
+
 func close_latest() -> bool:
+	if _more_open():
+		navigation.close_more()
+		return true
 	if _panel_order.is_empty():
 		return false
 	if _panel_order.back() == "details":
@@ -334,6 +411,7 @@ func close_latest() -> bool:
 func choose_tool(mode: int) -> void:
 	if main.loading_active or not main.world_started:
 		return
+	navigation.close_more()
 	main._cancel_context_input()
 	main.world.set_player_mode(mode)
 	show_feedback(tool_hint(mode))
@@ -355,11 +433,9 @@ func select_row(kind: String, id: int) -> void:
 	selection = {"kind": kind, "id": id, "epoch": model.epoch}
 	_selection_object = _actual_target(kind, id)
 	_detail_signature = ""
-	details.offset_left = -680 if kind == "assignment" else -340
+	# The priority editor needs the wide layout; the user's own width wins if larger.
+	layout.set_width_floor("details", DETAILS_WIDE_WIDTH if kind == "assignment" else 0.0)
 	details.show()
-	if jobs_popup.is_visible():
-		# Keep the worker list clear of the explicit selection editor.
-		jobs_popup.panel.position.x = minf(jobs_popup.panel.position.x, maxf(16.0, root.size.x + details.offset_left - jobs_popup.panel.size.x - 12.0))
 	_touch_panel("details")
 	_refresh_details()
 
@@ -381,7 +457,7 @@ func inspect_cell(block_id: int, pos: Vector3i) -> void:
 	_selection_serial += 1
 	selection = {"kind": "cell", "id": block_id, "pos": pos, "epoch": model.epoch}
 	_selection_object = null
-	details.offset_left = -340
+	layout.set_width_floor("details", 0.0)
 	details.show()
 	_touch_panel("details")
 	_detail_signature = ""
@@ -566,6 +642,7 @@ func dispatch_action(action: String) -> bool:
 		var calls := {"profiler": "toggle_profiler", "burden": "toggle_draw_burden", "timings": "toggle_debug_timings", "streaming": "toggle_streaming_stats", "streaming_capture": "toggle_streaming_capture", "ramps": "dump_ramp_counts", "map": "export_map_snapshot", "timings_log": "toggle_debug_timings_log", "workers": "toggle_worker_trace"}
 		var name := action.trim_prefix("debug:")
 		if name == "normals": main.world.renderer.toggle_debug_normals()
+		elif name == "render_panel": main._toggle_render_debug_panel()
 		elif calls.has(name): main.debug_overlay.call(calls[name])
 		else: return false
 	else:
@@ -602,6 +679,8 @@ func watch_popup(popup: Window) -> void:
 
 func cancel_popups() -> void:
 	jobs_popup.cancel_drag()
+	if layout != null:
+		layout.cancel_interaction()
 	if main == null: return
 	for popup: Window in main.get_viewport().get_embedded_subwindows():
 		if popup.visible and popup.popup_window:
@@ -609,7 +688,8 @@ func cancel_popups() -> void:
 			if popup is AcceptDialog: popup.queue_free()
 
 func pointer_owned() -> bool:
-	return not _held_buttons.is_empty() or main.get_viewport().gui_get_hovered_control() != null
+	return not _held_buttons.is_empty() or main.get_viewport().gui_get_hovered_control() != null \
+		or (layout != null and layout.is_interacting())
 
 func observe_input(event: InputEvent) -> bool:
 	_release_event = 0
@@ -619,6 +699,12 @@ func observe_input(event: InputEvent) -> bool:
 			main.key_state[event.physical_keycode] = event.pressed
 		return false
 	if event is InputEventMouseButton:
+		if event.pressed and _more_open():
+			# Outside click closes More without consuming the event.
+			var hovered: Control = main.get_viewport().gui_get_hovered_control()
+			var in_more: bool = hovered != null and (hovered == navigation.more_button or hovered == navigation.more_panel or navigation.more_panel.is_ancestor_of(hovered))
+			if not in_more:
+				navigation.close_more()
 		if event.pressed and main.get_viewport().gui_get_hovered_control() != null:
 			if event.button_index in [MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT, MOUSE_BUTTON_MIDDLE]:
 				_held_buttons[event.button_index] = true
@@ -646,6 +732,7 @@ func shutdown() -> void:
 	jobs_popup.shutdown()
 	model.clear()
 	panels.ui = null
+	command_bar.ui = null
 	if navigation.category_selected.is_connected(toggle_category):
 		navigation.category_selected.disconnect(toggle_category)
 	main = null

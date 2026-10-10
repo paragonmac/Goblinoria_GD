@@ -13,6 +13,8 @@ const MainRenderLevelControllerScript = preload("res://scripts/main_render_level
 const MainPerformanceControllerScript = preload("res://scripts/main_performance_controller.gd")
 const MainDiagnosticsControllerScript = preload("res://scripts/main_diagnostics_controller.gd")
 const ColonyUIScript = preload("res://scripts/ui/colony_ui_controller.gd")
+const UiIconAtlas = preload("res://scripts/ui/ui_icon_atlas.gd")
+const RenderDebugPanelScript = preload("res://scripts/ui/render_debug_panel.gd")
 #endregion
 
 #region Constants - Engine & General
@@ -66,6 +68,7 @@ var render_level_controller: MainRenderLevelController
 var performance_controller
 var diagnostics_controller
 var colony_ui
+var render_debug_panel
 #endregion
 
 #region Input State
@@ -136,7 +139,7 @@ func _process(dt: float) -> void:
 	# It is measured before profiling finalization, never inside prewarm loops.
 	if world != null and world.renderer != null:
 		world.renderer.observe_visibility_view(camera)
-		world.renderer.pump_visibility()
+		world.renderer.pump_visibility(world.renderer.VISIBILITY_PUMP_MS, world.renderer.VISIBILITY_PUMP_STEPS)
 	if debug_overlay != null:
 		debug_overlay.finish_timed_frame()
 	if performance_controller != null:
@@ -417,6 +420,8 @@ func _handle_camera_rotation() -> void:
 func _handle_debug_keys() -> void:
 	if is_key_just_pressed(KEY_QUOTELEFT) and OS.is_debug_build():
 		toggle_sim_speed()
+	if is_key_just_pressed(KEY_F7) and OS.is_debug_build():
+		_toggle_render_debug_panel()
 	if debug_overlay == null:
 		return
 	if is_key_just_pressed(KEY_F2):
@@ -429,8 +434,6 @@ func _handle_debug_keys() -> void:
 		debug_overlay.toggle_streaming_stats()
 	if is_key_just_pressed(KEY_F6):
 		debug_overlay.toggle_streaming_capture()
-	if is_key_just_pressed(KEY_F7):
-		debug_overlay.dump_ramp_counts()
 	if is_key_just_pressed(KEY_F8):
 		if world != null and world.renderer != null:
 			world.renderer.toggle_debug_normals()
@@ -541,6 +544,21 @@ func _update_depth_limit_background() -> void:
 		world_environment.environment.background_color = default_bg_color
 
 
+## Debug builds only. F7 opens the Rendering panel (ramp dump lives inside it).
+func _toggle_render_debug_panel() -> void:
+	if render_debug_panel == null:
+		render_debug_panel = RenderDebugPanelScript.new()
+		hud_layer.add_child(render_debug_panel)
+		render_debug_panel.setup(self)
+		if colony_ui != null and colony_ui.layout != null:
+			colony_ui.register_window("render_debug", render_debug_panel, render_debug_panel.title_handle,
+				{"dock": "float", "float_rect": RenderDebugPanelScript.DEFAULT_RECT, "dock_width": 360.0, "min_size": Vector2(320, 260)})
+	var show_panel: bool = not render_debug_panel.visible
+	render_debug_panel.set_panel_visible(show_panel)
+	if world != null and world.renderer != null:
+		world.renderer.void_meter_enabled = show_panel
+
+
 #region Mouse Interaction
 func handle_mouse() -> void:
 	if colony_ui != null and colony_ui.pointer_owned():
@@ -574,15 +592,48 @@ func update_info_hover() -> void:
 #region Menu System
 func _setup_menu() -> void:
 	_setup_full_map_generation_option()
+	_setup_reset_layout_button()
 	if resume_button:
+		resume_button.icon = UiIconAtlas.texture("colony")
+		resume_button.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		resume_button.add_theme_constant_override("icon_max_width", 22)
 		resume_button.pressed.connect(_on_resume_pressed)
 	if save_button:
+		save_button.icon = UiIconAtlas.texture("stored")
+		save_button.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		save_button.add_theme_constant_override("icon_max_width", 22)
 		save_button.pressed.connect(_on_save_pressed)
 	if load_button:
+		load_button.icon = UiIconAtlas.texture("resources")
+		load_button.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		load_button.add_theme_constant_override("icon_max_width", 22)
 		load_button.pressed.connect(_on_load_pressed)
 	if quit_button:
+		quit_button.icon = UiIconAtlas.texture("close")
+		quit_button.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		quit_button.add_theme_constant_override("icon_max_width", 22)
 		quit_button.pressed.connect(_on_quit_pressed)
 	_refresh_menu_buttons()
+
+
+func _setup_reset_layout_button() -> void:
+	if menu_vbox == null:
+		return
+	var reset_button := Button.new()
+	reset_button.name = "ResetLayoutButton"
+	reset_button.text = "Reset window layout"
+	reset_button.tooltip_text = "Put the colony, details, Jobs and debug windows back in their default places."
+	reset_button.icon = UiIconAtlas.texture("rotate")
+	reset_button.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	reset_button.add_theme_constant_override("icon_max_width", 22)
+	reset_button.pressed.connect(func() -> void:
+		if colony_ui != null:
+			colony_ui.reset_layout())
+	var insert_index: int = menu_vbox.get_child_count()
+	if quit_button != null and quit_button.get_parent() == menu_vbox:
+		insert_index = quit_button.get_index()
+	menu_vbox.add_child(reset_button)
+	menu_vbox.move_child(reset_button, insert_index)
 
 
 func _setup_full_map_generation_option() -> void:

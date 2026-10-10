@@ -8,6 +8,7 @@ signal action_feedback(message: String)
 var external_inspector := false
 
 const ToolCatalog = preload("res://scripts/main_tool_catalog.gd")
+const UiIconAtlas = preload("res://scripts/ui/ui_icon_atlas.gd")
 const PAN_THRESHOLD := 6.0
 const RAYCAST_DISTANCE := 500.0
 const ACTION_INSPECT := 100
@@ -72,6 +73,7 @@ func initialize(world_ref: World, camera_ref: Camera3D, viewport_ref: Viewport,
 	context_popup.force_native = false
 	context_popup.prefer_native_menu = false
 	context_popup.input_observer = _observe_popup_input
+	context_popup.add_theme_constant_override("icon_max_width", 20)
 	popup = context_popup
 	popup.id_pressed.connect(_on_action_selected)
 	popup.popup_hide.connect(_on_popup_hidden)
@@ -151,6 +153,9 @@ func observe_input(event: InputEvent) -> bool:
 		# Mouse clicks inside the popup must reach its normal GUI selection path.
 		return false
 	if blocks_world_input():
+		# F1 bug capture must work mid-gesture (e.g. while right-drag panning).
+		if event is InputEventKey and _event_key(event) == KEY_F1:
+			return false
 		if event is InputEventMouseButton and event.pressed and _is_held_button(event.button_index):
 			_guard_buttons[event.button_index] = true
 		return true
@@ -345,19 +350,30 @@ func _rebuild_menu() -> void:
 	popup.add_separator("Tools")
 	for tool: Dictionary in ToolCatalog.TOOLS:
 		popup.add_check_item("%s [%s]" % [tool.label, OS.get_keycode_string(tool.key)], int(tool.mode))
+		var tool_icon := "inspect"
+		match int(tool.mode):
+			World.PlayerMode.DIG: tool_icon = "dig"
+			World.PlayerMode.PLACE: tool_icon = "build"
+			World.PlayerMode.UP_STAIRS: tool_icon = "stairs_up"
+			World.PlayerMode.DOWN_STAIRS: tool_icon = "stairs_down"
+			World.PlayerMode.ERASE: tool_icon = "erase"
+			World.PlayerMode.STOCKPILE: tool_icon = "stockpile"
+		popup.set_item_icon(popup.item_count - 1, UiIconAtlas.texture(tool_icon))
 		popup.set_item_checked(popup.item_count - 1, tool.mode == world.player_mode)
 	popup.add_separator("This location")
-	_add_context_item("Inspect clicked cell", ACTION_INSPECT, not _hit.is_empty(), "No visible loaded block here.")
-	_add_context_item("Cancel pending tasks", ACTION_CANCEL_TASKS, not _pending_target.is_empty(), "No pending tasks at this location.")
-	_add_context_item("Remove stockpile designation", ACTION_REMOVE_STOCKPILE, not _stockpile_target.is_empty(), "No stockpile designation at this location.")
-	_add_context_item("Remove stairs", ACTION_REMOVE_STAIRS, not _stair_target.is_empty(), "No player stairs at this location.")
+	_add_context_item("Inspect clicked cell", ACTION_INSPECT, not _hit.is_empty(), "No visible loaded block here.", "inspect")
+	_add_context_item("Cancel pending tasks", ACTION_CANCEL_TASKS, not _pending_target.is_empty(), "No pending tasks at this location.", "erase")
+	_add_context_item("Remove stockpile designation", ACTION_REMOVE_STOCKPILE, not _stockpile_target.is_empty(), "No stockpile designation at this location.", "stockpile")
+	_add_context_item("Remove stairs", ACTION_REMOVE_STAIRS, not _stair_target.is_empty(), "No player stairs at this location.", "stairs")
 	popup.add_separator("Colony")
 	popup.add_item("Open Workers [W]", ACTION_WORKERS)
+	popup.set_item_icon(popup.item_count - 1, UiIconAtlas.texture("workers"))
 
 
-func _add_context_item(label: String, id: int, available: bool, reason: String) -> void:
+func _add_context_item(label: String, id: int, available: bool, reason: String, icon_name: String) -> void:
 	popup.add_item(label, id)
 	var index := popup.item_count - 1
+	popup.set_item_icon(index, UiIconAtlas.texture(icon_name))
 	popup.set_item_disabled(index, not available)
 	if not available:
 		popup.set_item_tooltip(index, reason)

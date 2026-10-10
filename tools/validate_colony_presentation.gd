@@ -146,6 +146,20 @@ func _test_roles_and_read_only() -> void:
 	_expect(model.updating, "Worker refresh did not report pending work")
 	_drain(model)
 	_expect(model.snapshot().counts.waiting == 2 and is_same(old_jobs, model.list_rows("job")), "Worker refresh rescanned economy or missed worker state")
+	# Idle wandering counts as idle (waiting), never as travelling.
+	world.workers[1].state = Worker.WorkerState.MOVING
+	world.workers[1].movement_intent = Worker.MovementIntent.WANDER
+	model.refresh_workers()
+	_drain(model)
+	_expect(model.snapshot().counts.travelling == 0 and model.snapshot().counts.waiting == 2 		and model.get_row("worker", 2).activity == "waiting", "Idle wandering counted as travelling")
+	world.workers[1].movement_intent = Worker.MovementIntent.TASK
+	model.refresh_workers()
+	_drain(model)
+	_expect(model.snapshot().counts.travelling == 1, "Task movement no longer counts as travelling")
+	world.workers[1].state = Worker.WorkerState.WAITING
+	world.workers[1].movement_intent = Worker.MovementIntent.NONE
+	model.refresh_workers()
+	_drain(model)
 	world.workers[1].current_task_id = stale_id
 	world.workers[0].state = Worker.WorkerState.IDLE
 	world.workers[0].current_task_id = -1

@@ -2,6 +2,17 @@ extends RefCounted
 ## Per-worker controls only. All writes retain the selected world's/entity's identity.
 const H = preload("res://scripts/ui/colony_panel_helpers.gd")
 const Work = preload("res://scripts/worker_work_priorities.gd")
+const UITheme = preload("res://scripts/ui/colony_ui_theme.gd")
+
+const WORK_ICONS := {
+	"hauling": "stored",
+	"mining": "dig",
+	"building": "build",
+	"crafting": "build",
+	"gathering": "item",
+	"farming": "resources",
+	"combat": "reserve",
+}
 
 var ui_ref: WeakRef
 var serial := -1
@@ -25,12 +36,12 @@ func build(ui, parent: VBoxContainer) -> void:
 	groups.custom_minimum_size.x = 240
 	groups.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	columns.add_child(groups)
-	H.label(groups, "Enabled work")
+	H.styled_label(groups, "Enabled work", "Subheading")
 	var right := VBoxContainer.new()
 	right.custom_minimum_size.x = 280
 	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	columns.add_child(right)
-	H.label(right, "Work type priority")
+	H.styled_label(right, "Work type priority", "Subheading")
 	priority_rows = VBoxContainer.new()
 	right.add_child(priority_rows)
 	var group_boxes: Dictionary = {}
@@ -40,28 +51,51 @@ func build(ui, parent: VBoxContainer) -> void:
 		if not group_boxes.has(group_name):
 			var group_box := VBoxContainer.new()
 			groups.add_child(group_box)
-			H.label(group_box, group_name)
+			H.styled_label(group_box, group_name, "Subheading")
 			group_boxes[group_name] = group_box
 		var checkbox := CheckBox.new()
-		checkbox.text = str(work.label)
+		checkbox.text = ""
 		checkbox.custom_minimum_size.y = 36
 		checkbox.disabled = not bool(work.implemented)
 		checkbox.tooltip_text = str(work.description)
 		group_boxes[group_name].add_child(checkbox)
+		var check_content := HBoxContainer.new()
+		check_content.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		check_content.add_theme_constant_override("separation", 6)
+		check_content.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		check_content.offset_left = 30
+		check_content.offset_right = -4
+		checkbox.add_child(check_content)
+		var work_icon: Control = H.Icon.make(str(WORK_ICONS.get(str(work.id), "worker")), 22)
+		work_icon.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		check_content.add_child(work_icon)
+		var work_label := Label.new()
+		work_label.theme_type_variation = "Body"
+		work_label.text = str(work.label)
+		work_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		work_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+		work_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		if checkbox.disabled:
+			work_label.add_theme_color_override("font_color", UITheme.MUTED_TEXT)
+		check_content.add_child(work_label)
 		checks[work.id] = checkbox
 		if not work.implemented:
-			H.label(group_boxes[group_name], "Not implemented yet")
+			var unavailable := H.styled_label(group_boxes[group_name], "Not implemented yet", "Caption")
+			unavailable.add_theme_color_override("font_color", UITheme.MUTED_TEXT)
 			continue
 		checkbox.toggled.connect(_toggle.bind(str(work.id)))
 		var line := HBoxContainer.new()
 		priority_rows.add_child(line)
 		rows[work.id] = line
-		var button := H.button(line, str(work.label), _select.bind(str(work.id)))
+		var button := H.icon_row(line, str(WORK_ICONS.get(str(work.id), "worker")),
+			str(work.label), _select.bind(str(work.id))) as Button
 		button.toggle_mode = true
 		button.button_group = button_group
+		button.tooltip_text = str(work.description)
 		row_buttons[work.id] = button
 		var choice := OptionButton.new()
 		choice.custom_minimum_size = Vector2(90, 36)
+		choice.theme_type_variation = "Number"
 		choice.add_item("Off", 0)
 		for priority in range(1, 10): choice.add_item(str(priority), priority)
 		choice.tooltip_text = str(work.description)
@@ -71,11 +105,13 @@ func build(ui, parent: VBoxContainer) -> void:
 		choice.item_selected.connect(_set_priority.bind(str(work.id)))
 	var actions := HBoxContainer.new()
 	right.add_child(actions)
-	move_up = H.button(actions, "Move Up", _move.bind(-1))
-	move_down = H.button(actions, "Move Down", _move.bind(1))
+	move_up = H.icon_button(actions, "up", "Move Up", _move.bind(-1), "IconButton", 22, Vector2(48, 36))
+	move_down = H.icon_button(actions, "down", "Move Down", _move.bind(1), "IconButton", 22, Vector2(48, 36))
+	move_up.get_meta("caption").hide()
+	move_down.get_meta("caption").hide()
 	move_up.tooltip_text = "Increase selected work's priority by one (toward 1). Other numbers stay unchanged."
 	move_down.tooltip_text = "Decrease selected work's priority by one (toward 9). Other numbers stay unchanged."
-	H.label(right, "Select a work type, then move its priority up or down. Equal numbers share priority; their display order does not break ties. Enable work at priority 2.")
+	H.styled_label(right, "Select a work type, then move its priority up or down. Equal numbers share priority; their display order does not break ties. Enable work at priority 2.", "Caption")
 	refresh()
 
 func _owner():
@@ -127,5 +163,5 @@ func refresh() -> void:
 		order = next_order
 		for index in range(order.size()): priority_rows.move_child(rows[order[index]], index)
 	var selected_value := int(values.get(selected_work, 0))
-	move_up.disabled = selected_value <= 1
-	move_down.disabled = selected_value == 0 or selected_value >= 9
+	H.set_disabled(move_up, selected_value <= 1)
+	H.set_disabled(move_down, selected_value == 0 or selected_value >= 9)

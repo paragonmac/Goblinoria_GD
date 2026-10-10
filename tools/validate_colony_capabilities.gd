@@ -24,7 +24,7 @@ const REQUIRED_GROUPS := {
 	"world": ["level_up", "level_down", "rotate_left", "rotate_right", "world_generation", "world_overlays", "fog", "water_flooding", "lava", "cave_ins", "poison_gas", "fire_smoke", "temperature_pressure"],
 	"game": ["game_menu", "new_world", "resume", "save", "load", "session_persistence", "settings", "live_diagnostics", "capture_bug", "performance", "profiler", "draw_burden", "debug_timings", "streaming_stats", "streaming_capture", "ramp_counts", "debug_normals", "map_snapshot", "timings_log", "worker_trace", "quit"],
 }
-const ROUTES := ["open:colony", "open:workers", "open:jobs", "open:stockpiles", "open:resources", "camera:left", "camera:right", "level:up", "level:down", "game:menu", "game:new", "game:save", "game:load", "diagnostics:live", "diagnostics:capture", "diagnostics:performance", "debug:profiler", "debug:burden", "debug:timings", "debug:streaming", "debug:streaming_capture", "debug:ramps", "debug:normals", "debug:map", "debug:timings_log", "debug:workers"]
+const ROUTES := ["open:colony", "open:workers", "open:jobs", "open:stockpiles", "open:resources", "camera:left", "camera:right", "level:up", "level:down", "game:menu", "game:new", "game:save", "game:load", "diagnostics:live", "diagnostics:capture", "diagnostics:performance", "debug:profiler", "debug:burden", "debug:timings", "debug:streaming", "debug:streaming_capture", "debug:ramps", "debug:render_panel", "debug:normals", "debug:map", "debug:timings_log", "debug:workers"]
 
 var failures: Array[String] = []
 var checks := 0
@@ -125,54 +125,42 @@ func _test_theme() -> void:
 
 
 func _test_navigation() -> void:
-	root.size = Vector2i(1000, 500)
-	var parent := Control.new()
-	parent.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(parent)
-	parent.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	# Command-bar navigation: primary categories are icon buttons in the bar;
+	# every other catalog category stays reachable through the "More" popover.
+	root.size = Vector2i(1920, 1080)
+	var overlay := Control.new()
+	overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(overlay)
+	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var bar := HBoxContainer.new()
+	overlay.add_child(bar)
+	bar.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
+	bar.offset_top = -96
 	var nav := Navigation.new()
 	nav.category_selected.connect(func(id: String) -> void: selections.append(id))
-	nav.setup(parent)
+	nav.setup(bar, overlay)
 	await _settle()
 	_check(nav.buttons.size() == EXPECTED_CATEGORIES.size(), "Navigation includes every category")
-	_check(nav.panel.anchor_bottom == 1.0 and nav.panel.offset_top == 56.0 and nav.panel.offset_bottom == -76.0, "Navigation vertical anchors")
-	_check(is_equal_approx(nav.panel.size.x, 176.0), "Navigation is 176 logical pixels wide")
-	_check(nav.scroll.horizontal_scroll_mode == ScrollContainer.SCROLL_MODE_DISABLED, "No horizontal navigation scroll")
-	_check(nav.scroll.get_v_scroll_bar().visible, "Navigation scrolls in a short viewport")
-	_check(nav.panel.mouse_filter == Control.MOUSE_FILTER_STOP, "Navigation blocks world input under an ignored parent")
 	_check(selections.is_empty(), "Setup does not emit a selection")
+	_check(not nav.more_panel.visible, "More popover starts closed")
+	_check(nav.more_panel.mouse_filter == Control.MOUSE_FILTER_STOP, "More popover blocks world input under an ignored parent")
 	for id: String in nav.buttons:
-		var button: Button = nav.buttons[id]
-		_check(button.custom_minimum_size.y == 36.0 and button.size.y >= 36.0, "Accessible button height: " + id)
-		_check(button.focus_mode == Control.FOCUS_ALL, "Keyboard-focusable category: " + id)
-		_check(button.mouse_filter == Control.MOUSE_FILTER_STOP, "Button owns mouse input: " + id)
-		_check(button.autowrap_mode == TextServer.AUTOWRAP_WORD_SMART, "Navigation labels wrap: " + id)
-		_check(button.size.x <= 176.0, "Wrapped button stays within navigation width: " + id)
+		var control: Control = nav.buttons[id]
+		_check(control.custom_minimum_size.y >= 36.0, "Accessible control height: " + id)
+		_check(control.mouse_filter == Control.MOUSE_FILTER_STOP, "Control owns mouse input: " + id)
+		_check(control.focus_mode == Control.FOCUS_ALL, "Keyboard-focusable category: " + id)
+		_check(nav.is_primary(id) == (control.get_parent().get_parent() == bar or control.get_parent() == nav.bar), "Primary categories live in the bar: " + id)
 		if FULL_LABELS.has(id):
-			_check(button.text == FULL_LABELS[id], "Navigation retains full label: " + id)
-	_check(nav.buttons.world.size.y > nav.buttons.workers.size.y, "Long navigation label grows vertically")
-	nav.set_selected("game")
-	await _settle()
-	_check(nav.selected_id == "game" and nav.buttons.game.button_pressed, "Programmatic selection")
-	_check(selections.is_empty(), "Programmatic selection does not dispatch")
-	_check(nav.scroll.scroll_vertical > 0, "Selected category scrolls into view")
-	nav.set_selected("missing")
-	_check(nav.selected_id == "game", "Invalid selection preserves current category")
+			_check(control.tooltip_text == FULL_LABELS[id], "Navigation retains full label: " + id)
 	nav.set_selected("workers")
 	await _settle()
+	_check(nav.selected_id == "workers" and nav.buttons.workers.button_pressed, "Programmatic selection")
+	_check(selections.is_empty(), "Programmatic selection does not dispatch")
+	nav.set_selected("missing")
+	_check(nav.selected_id == "workers", "Invalid selection preserves current category")
 	var button: Button = nav.buttons.workers
-	var position := button.get_global_rect().get_center()
-	var motion := InputEventMouseMotion.new()
-	motion.position = position
-	root.push_input(motion, true)
-	await _settle()
+	await _click(button.get_global_rect().get_center())
 	_check(root.gui_get_hovered_control() == button, "Hover resolves to navigation under ignored parent")
-	for pressed: bool in [true, false]:
-		var click := InputEventMouseButton.new()
-		click.button_index = MOUSE_BUTTON_LEFT
-		click.position = position
-		click.pressed = pressed
-		root.push_input(click, true)
 	_check(selections == ["workers"], "GUI click emits exactly one category ID")
 	button.grab_focus()
 	for pressed: bool in [true, false]:
@@ -182,27 +170,39 @@ func _test_navigation() -> void:
 		root.push_input(key, true)
 	_check(selections == ["workers", "workers"], "Keyboard activation emits one category ID")
 	var pressed_count := 0
-	for category_button: Button in nav.buttons.values():
-		pressed_count += int(category_button.button_pressed)
+	for id: String in nav.buttons:
+		if nav.buttons[id] is Button and nav.buttons[id].toggle_mode:
+			pressed_count += int(nav.buttons[id].button_pressed)
 	_check(pressed_count == 1, "Exactly one selected category")
+	await _click(nav.more_button.get_global_rect().get_center())
+	_check(nav.more_panel.visible and selections.size() == 2, "More opens the secondary list without dispatching")
+	await _click(nav.buttons.game.get_global_rect().get_center())
+	_check(selections.back() == "game" and not nav.more_panel.visible, "Secondary category dispatches once and closes More")
 	nav.set_selected("")
 	_check(nav.selected_id.is_empty(), "Closing management clears selected ID")
-	for category_button: Button in nav.buttons.values():
-		_check(not category_button.button_pressed, "Closing management clears pressed buttons")
-	_check(selections.size() == 2, "Clearing selection does not dispatch")
+	for id: String in nav.buttons:
+		if nav.buttons[id] is Button and nav.buttons[id].toggle_mode:
+			_check(not nav.buttons[id].button_pressed, "Closing management clears pressed buttons: " + id)
 	nav.set_selected("workers")
-	parent.size.y = 900.0
+	nav.setup(bar, overlay)
 	await _settle()
-	_check(is_equal_approx(nav.panel.size.y, 768.0), "Navigation follows parent resize")
-	nav.setup(parent)
-	await _settle()
-	_check(parent.get_child_count() == 1 and nav.buttons.size() == EXPECTED_CATEGORIES.size(), "Repeated setup replaces navigation")
+	_check(bar.get_child_count() == 1 and nav.buttons.size() == EXPECTED_CATEGORIES.size(), "Repeated setup replaces navigation")
 	_check(nav.buttons.workers.button_pressed, "Repeated setup preserves selection")
-	parent.free()
-	await process_frame
-	# The RefCounted controller can outlive its parent without invalid accesses.
-	nav.set_selected("colony")
-	nav.setup(null)
+	overlay.queue_free()
+
+
+func _click(position: Vector2) -> void:
+	var motion := InputEventMouseMotion.new()
+	motion.position = position
+	root.push_input(motion, true)
+	await _settle()
+	for pressed: bool in [true, false]:
+		var click := InputEventMouseButton.new()
+		click.button_index = MOUSE_BUTTON_LEFT
+		click.position = position
+		click.pressed = pressed
+		root.push_input(click, true)
+	await _settle()
 
 
 func _settle() -> void:

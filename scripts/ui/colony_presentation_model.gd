@@ -445,7 +445,12 @@ func _worker_row(world, worker) -> Dictionary:
 	var custom_assignments: bool = not worker.work_priorities.is_empty()
 	var default_fighter: bool = worker.role_id == Roles.Role.FIGHTER and not custom_assignments
 	var task = world.task_queue.get_task(worker.current_task_id) if worker.current_task_id >= 0 else null
-	match worker.state:
+	# Idle wandering is not activity the player cares about: classify it as idle.
+	var state: int = worker.state
+	var wandering: bool = state == Worker.WorkerState.MOVING and worker.movement_intent == Worker.MovementIntent.WANDER
+	if wandering:
+		state = Worker.WorkerState.IDLE
+	match state:
 		Worker.WorkerState.WORKING:
 			activity = "working"
 			description = "Working"

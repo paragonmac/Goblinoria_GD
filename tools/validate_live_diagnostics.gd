@@ -156,6 +156,15 @@ func _input_and_capture() -> void:
 	await _finish_capture()
 	_check(controller.capture.capture_id != old_id and controller.capture.state == "complete", "F1 available in menu")
 	main.close_menu()
+	await process_frame
+	controller._last_capture_usec = -controller.CAPTURE_COOLDOWN_USEC
+	var menu_id: String = controller.capture.capture_id
+	main.context_menu_controller.right_pending = true
+	_key(true)
+	_key(false)
+	await _finish_capture()
+	_check(controller.capture.capture_id != menu_id and controller.capture.state == "complete", "F1 captures while right-drag panning")
+	main.context_menu_controller.right_pending = false
 
 func _queries() -> void:
 	var service = controller.service

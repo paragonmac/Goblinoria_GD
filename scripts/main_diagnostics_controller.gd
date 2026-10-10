@@ -100,7 +100,9 @@ func handle_unhandled_input(event: InputEvent) -> bool:
 		return false
 	if event.ctrl_pressed or event.alt_pressed or event.meta_pressed or event.shift_pressed:
 		return false
-	if main._context_blocks_world_input() or main.performance_controller._popup_visible():
+	# Only typing or an open popup owns F1. World-input gates (right-drag panning,
+	# a pending context click) must not block evidence capture mid-gesture.
+	if (main.colony_ui != null and main.colony_ui.keyboard_owned()) or main.performance_controller._popup_visible():
 		return false
 	if event.pressed and not event.echo:
 		request_capture({})

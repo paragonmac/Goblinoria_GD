@@ -3,9 +3,6 @@ extends RefCounted
 const H = preload("res://scripts/ui/colony_panel_helpers.gd")
 
 const PANEL_SIZE := Vector2(700.0, 720.0)
-const EDGE_MARGIN := 16.0
-const HUD_TOP := 56.0
-const HUD_BOTTOM := 76.0
 
 signal close_requested
 
@@ -14,8 +11,9 @@ var body: VBoxContainer
 
 var _root: Control
 var _header: Control
+# Dragging, resizing and clamping belong to the colony UI WindowLayout; this
+# flag remains only for callers that cancel gestures generically.
 var _dragging := false
-var _drag_offset := Vector2.ZERO
 
 
 func setup(parent: Control, theme: Theme) -> void:
@@ -27,6 +25,7 @@ func setup(parent: Control, theme: Theme) -> void:
 
 	panel = PanelContainer.new()
 	panel.name = "JobsWorkerPopup"
+	panel.theme_type_variation = "Card"
 	panel.mouse_filter = Control.MOUSE_FILTER_STOP
 	panel.visible = false
 	if theme != null:
@@ -39,29 +38,39 @@ func setup(parent: Control, theme: Theme) -> void:
 	_header.custom_minimum_size.y = 44.0
 	_header.mouse_filter = Control.MOUSE_FILTER_STOP
 	content.add_child(_header)
-	H.label(_header, "Jobs")
+	var title_row := HBoxContainer.new()
+	title_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	title_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	title_row.add_theme_constant_override("separation", 10)
+	_header.add_child(title_row)
+	var jobs_icon: Control = H.Icon.make("jobs", 26)
+	jobs_icon.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	title_row.add_child(jobs_icon)
+	var title := H.styled_label(title_row, "Jobs", "Heading")
+	title.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 
 	var owner_ref: WeakRef = weakref(self)
-	H.button(_header, "Close", func() -> void:
+	var close_button := Button.new()
+	close_button.theme_type_variation = "IconButton"
+	close_button.custom_minimum_size = Vector2(40.0, 40.0)
+	close_button.tooltip_text = "Close Jobs"
+	close_button.accessibility_name = "Close Jobs"
+	close_button.focus_mode = Control.FOCUS_NONE
+	_header.add_child(close_button)
+	var close_icon: Control = H.Icon.make("close", 22)
+	close_icon.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	close_button.add_child(close_icon)
+	close_button.pressed.connect(func() -> void:
 		var owner = owner_ref.get_ref()
 		if owner != null:
 			owner.close_requested.emit()
-	)
-	_header.gui_input.connect(func(event: InputEvent) -> void:
-		var owner = owner_ref.get_ref()
-		if owner != null:
-			owner._on_header_gui_input(event)
 	)
 
 	body = H.scroll(content)
 	body.name = "Body"
 
-	parent.resized.connect(func() -> void:
-		var owner = owner_ref.get_ref()
-		if owner != null:
-			owner._on_parent_resized()
-	)
-	_clamp_panel()
+	# Position, size, dragging and clamping belong to the colony UI's WindowLayout.
+	panel.size = PANEL_SIZE
 
 
 func open() -> void:
@@ -69,9 +78,6 @@ func open() -> void:
 		return
 	if panel.visible:
 		return
-	_stop_drag()
-	_clamp_panel()
-	_center_panel()
 	panel.show()
 
 
@@ -102,74 +108,5 @@ func shutdown() -> void:
 	panel = null
 
 
-func _on_header_gui_input(event: InputEvent) -> void:
-	if not is_visible():
-		return
-	if event is InputEventMouse:
-		_root.get_viewport().set_input_as_handled()
-	# GUI events carry header-local coordinates; avoid polled mouse state,
-	# which can differ from the event during buffered/replayed input.
-	var pointer := Vector2.ZERO
-	if event is InputEventMouse:
-		pointer = _root.get_global_transform().affine_inverse() * (_header.get_global_transform() * event.position)
-	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
-		if event.pressed:
-			_dragging = true
-			_drag_offset = pointer - panel.position
-		else:
-			_stop_drag()
-		return
-	if event is InputEventMouseMotion and _dragging:
-		panel.position = pointer - _drag_offset
-		_clamp_panel_position()
-
-
-func _on_parent_resized() -> void:
-	_stop_drag()
-	_clamp_panel()
-
-
 func _stop_drag() -> void:
 	_dragging = false
-	_drag_offset = Vector2.ZERO
-
-
-func _safe_rect() -> Rect2:
-	if not is_instance_valid(_root):
-		return Rect2()
-	var viewport_size := _root.size
-	var left := EDGE_MARGIN if viewport_size.x >= EDGE_MARGIN * 2.0 else 0.0
-	var right := viewport_size.x - EDGE_MARGIN if viewport_size.x >= EDGE_MARGIN * 2.0 else viewport_size.x
-	var has_hud_height := viewport_size.y >= HUD_TOP + HUD_BOTTOM + EDGE_MARGIN * 2.0
-	var top := HUD_TOP + EDGE_MARGIN if has_hud_height else 0.0
-	var bottom := viewport_size.y - HUD_BOTTOM - EDGE_MARGIN if has_hud_height else viewport_size.y
-	return Rect2(left, top, maxf(right - left, 0.0), maxf(bottom - top, 0.0))
-
-
-func _clamp_panel() -> void:
-	if not is_instance_valid(panel):
-		return
-	var safe := _safe_rect()
-	var current_position := panel.position
-	panel.size = Vector2(minf(PANEL_SIZE.x, safe.size.x), minf(PANEL_SIZE.y, safe.size.y))
-	panel.position = current_position
-	_clamp_panel_position()
-
-
-func _clamp_panel_position() -> void:
-	if not is_instance_valid(panel):
-		return
-	var safe := _safe_rect()
-	var max_position := safe.position + safe.size - panel.size
-	panel.position = Vector2(
-		clampf(panel.position.x, safe.position.x, max_position.x),
-		clampf(panel.position.y, safe.position.y, max_position.y)
-	)
-
-
-func _center_panel() -> void:
-	if not is_instance_valid(panel):
-		return
-	var safe := _safe_rect()
-	panel.position = safe.position + (safe.size - panel.size) * 0.5
-	_clamp_panel_position()

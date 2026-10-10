@@ -5,27 +5,61 @@ every system in the game design document. Management panels do not pause the wor
 
 ## Layout and controls
 
-- Top: working, travelling, waiting and reserve counts, pending/blocked tasks,
-  stored resources, and the game menu. Activity counts open filtered Workers.
-- Left: category navigation and one scrollable management panel. Workers and Tasks
-  have search, filters and 50-row pages. Stockpiles and Resources are also paginated.
+The layout follows the approved icon-first concept (dark translucent panels,
+warm brass accents) and keeps the top of the screen clear for the world.
+
+- Bottom command bar, left: status chips for Busy, Moving, Idle and Reserve
+  workers and Pending, Blocked and Stored. Worker chips open Workers filtered to
+  that activity, Pending/Blocked open Tasks filtered the same way, Stored opens
+  Resources.
+- Bottom command bar, centre: tool palette Inspect [1], Dig [2], Build [3],
+  Stairs [4/5], Erase [6], Stockpile [7]. Stairs is one tool; a contextual row
+  above the palette offers Up/Down (keys 4/5 still select directly) and the
+  rotate hint. Other tools show a one-line hint in the same row.
+- Bottom command bar, right: Colony, Workers, Jobs, Tasks, Stockpiles, Resources,
+  More and Menu. More lists the remaining categories (Dig & Build, Zones & Rooms,
+  Production, Needs & Health, Defense, World & Environment, Game & Diagnostics).
+- Right edge: depth gauge with up/down buttons, the level relative to the
+  starting level and the absolute Y ([ / ] still work).
+- A warning toast above the bar reports jobs no worker can reach; it opens Tasks
+  filtered to Blocked.
+- Left: one scrollable management panel above the bar. Workers and Tasks have
+  search, filters and 50-row pages. Stockpiles and Resources are also paginated.
+  Planned and tentative features collapse into a "Coming later (N)" section.
 - Jobs opens a movable, non-modal worker-list pop-out instead of a docked page.
-  Drag its header to move it; Close, Escape or clicking Jobs again closes it.
+  Close, Escape or clicking Jobs again closes it.
+- Windows: the management panel, details panel, Jobs pop-out and the F7
+  Rendering panel are windows. Drag a window by its header; drag its edges or
+  corners to resize (docked windows resize from their inner edge only). Drop a
+  window within 64 px of the left or right screen-side edge (a brass highlight
+  shows the slot) to dock it; windows docked on the same side stack and share
+  the height. Drag a docked window's header to float it again. Defaults:
+  management docked left, details docked right, Jobs and F7 floating. The layout
+  is saved to user://ui_layout.cfg and restored on start (pulled back on screen
+  for a smaller window); Game menu > Reset window layout restores the defaults.
+  The Work Priorities editor still widens the details window while it is shown.
   It starts with just search, filters, pagination and worker rows, without feature cards.
 - Click an already-open category or the same selected information row again to
   close its panel; no timed double-click is needed. Programmatic open/refresh
   operations (including Open Workers in the context menu) remain idempotent.
-- Right: selected worker, task, stockpile, material or live cell details. Cell
+- Right (left of the depth gauge): selected worker, task, stockpile, material or
+  live cell details with a block header and tags. Cell
   terrain and occupants refresh every 0.2 seconds with clickable related entries.
   Selection does not move the camera or change a role. Use Locate to
   center the target and request its level through the normal render controller.
-- Bottom: Information [1], Dig [2], Place [3], Up Stairs [4], Down Stairs [5],
-  Erase [6], Stockpile [7], and level controls ([ / ]). W opens Workers.
+- W opens Workers. Live diagnostic and recording status sit at the top centre.
 - Escape closes a popup first, then the most recently opened details/management
   panel, then opens the game menu. Right-click context actions and right-drag
   panning remain available in the world. Panel gestures remain GUI-owned.
-- F1-F12 retain their existing diagnostic meanings. Recording and live-diagnostic
-  status are grouped above the bottom bar, away from colony activity counts.
+- Submenus use the same icon language: list rows show an activity/task-type
+  icon with a status tag, Colony shows a tile grid of counts, detail actions are
+  icon rows, and the Jobs pop-out, priority editor, right-click context menu and
+  game menu carry icons. Popup and button icons come from `UiIconAtlas`, which
+  bakes the code-drawn `UiIcon` vectors into one SubViewport (no image assets).
+- F1-F12 retain their existing diagnostic meanings. In debug builds the backtick
+  key toggles 1x/10x simulation speed (also under More > Game & Diagnostics).
+  In debug builds F7 opens the Rendering debug panel (non-modal, runtime only),
+  which holds the ramp-count dump (`Dump ramp counts`) and live renderer switches.
 
 Text fields and popups own their keys; typing a tool or diagnostic shortcut does
 not activate it after focus changes. Long lists scroll inside their panels.
