@@ -7,7 +7,8 @@ const WorldSaveTransactionScript = preload("res://scripts/world_save_transaction
 
 #region Constants
 const MESH_CACHE_MAGIC := 0x474D4553
-const MESH_CACHE_VERSION := 1
+# 2: terrain faces grow by ChunkMesher.SEAM_OVERLAP (crack fix); v1 caches are rebuilt.
+const MESH_CACHE_VERSION := 2
 const MESH_CACHE_FILE_NAME := "world_mesh_cache.dat"
 #endregion
 

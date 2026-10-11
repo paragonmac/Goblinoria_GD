@@ -16,6 +16,7 @@ const ATLAS_COLUMNS := 4
 const ATLAS_ROWS := 4
 const GREEDY_UV2_FLAG := 2.0
 const COVERED_FROM_ABOVE_FLAG := 256.0
+const SEAM_OVERLAP := 0.002
 const DEBUG_FACE_BUCKET_COUNT := 16
 #endregion
 
@@ -985,12 +986,29 @@ func _emit_greedy_quad(
 	if bool(cell.get("covered_from_above", false)):
 		encoded_top_flag += COVERED_FROM_ABOVE_FLAG
 	var uv2 := Vector2(float(wy), encoded_top_flag)
-	vertices.append_array([v1, v3, v2, v1, v4, v3])
+	var grown := _grow_quad(v1, v2, v3, v4)
+	vertices.append_array([grown[0], grown[2], grown[1], grown[0], grown[3], grown[2]])
 	normals.append_array([normal, normal, normal, normal, normal, normal])
 	colors.append_array([shaded, shaded, shaded, shaded, shaded, shaded])
 	uvs.append_array([uv1, uv3, uv2_local, uv1, uv4, uv3])
 	uv2s.append_array([uv2, uv2, uv2, uv2, uv2, uv2])
 #endregion
+
+
+## Axis-aligned faces are grown by SEAM_OVERLAP along their plane so merged
+## quads overlap their neighbours slightly: T-junctions between greedy quads
+## otherwise leave single-pixel cracks that show the background.
+static func _grow_quad(v1: Vector3, v2: Vector3, v3: Vector3, v4: Vector3) -> Array[Vector3]:
+	var center := (v1 + v2 + v3 + v4) * 0.25
+	return [_grow_corner(v1, center), _grow_corner(v2, center), _grow_corner(v3, center), _grow_corner(v4, center)]
+
+
+static func _grow_corner(v: Vector3, center: Vector3) -> Vector3:
+	var d := v - center
+	return v + Vector3(
+		signf(d.x) * SEAM_OVERLAP if absf(d.x) > 0.0001 else 0.0,
+		signf(d.y) * SEAM_OVERLAP if absf(d.y) > 0.0001 else 0.0,
+		signf(d.z) * SEAM_OVERLAP if absf(d.z) > 0.0001 else 0.0)
 
 
 #region Face Generation
@@ -1053,7 +1071,8 @@ func add_face(
 	var uv3 := _atlas_uv(_planar_uv(v3, base, normal), tile_offset, tile_scale)
 	var uv4 := _atlas_uv(_planar_uv(v4, base, normal), tile_offset, tile_scale)
 
-	vertices.append_array([v1, v3, v2, v1, v4, v3])
+	var grown := _grow_quad(v1, v2, v3, v4)
+	vertices.append_array([grown[0], grown[2], grown[1], grown[0], grown[3], grown[2]])
 	normals.append_array([normal, normal, normal, normal, normal, normal])
 	colors.append_array([shaded, shaded, shaded, shaded, shaded, shaded])
 	uvs.append_array([uv1, uv3, uv2_local, uv1, uv4, uv3])
