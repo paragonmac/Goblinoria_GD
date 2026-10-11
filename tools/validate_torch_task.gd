@@ -176,13 +176,14 @@ func _run() -> void:
 	world.light_field.process_events(100000)
 
 	world.torch_store.add_torch(target)
-	var high_torch := Vector3i(3, 41, 1)
+	# Visible like a standing worker: cell y shows while y <= render level + 1.
+	var high_torch := Vector3i(3, 42, 1)
 	world.torch_store.add_torch(high_torch)
 	var overlay := OverlayRendererScript.new()
 	root.add_child(overlay)
 	overlay.initialize(world)
 	overlay._sync_torch_multimesh()
-	_check(overlay.torch_multimesh_instance.multimesh.instance_count == 1, "MultiMesh only includes torches at or below top_render_y")
+	_check(overlay.torch_multimesh_instance.multimesh.instance_count == 1, "MultiMesh hides torches standing above the render level")
 	var torch_mesh: Mesh = overlay.torch_multimesh_instance.multimesh.mesh
 	_check(is_equal_approx(torch_mesh.get_aabb().position.y, -0.5), "torch mesh rests on the floor of its cell")
 	world.top_render_y = 41

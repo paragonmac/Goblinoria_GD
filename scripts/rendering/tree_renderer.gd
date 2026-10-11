@@ -1,8 +1,8 @@
 extends Node3D
 ## Draws TreeStore trees as MultiMeshes, one per (kind, height, variant bucket)
-## mesh. A tree is drawn whole while its base is at or below the render level
-## and hidden when the view is sliced below it. Rebuilds only when the store
-## revision or the render range changes.
+## mesh. A tree is drawn whole while the ground it stands on is in view (base
+## cell visible like a standing worker) and hidden when sliced below it.
+## Rebuilds only when the store revision or the render range changes.
 
 const Trees = preload("res://scripts/rendering/tree_mesh_builder.gd")
 const Util = preload("res://scripts/rendering/prop_mesh_util.gd")
@@ -48,7 +48,8 @@ func sync() -> void:
 	var groups: Dictionary = {}
 	trees_drawn = 0
 	for base: Vector3i in store.trees.keys():
-		if base.y > top or base.y < min_y:
+		# The base is the air cell above the ground, visible like a standing worker.
+		if not world.is_visible_at_level(base.y) or base.y < min_y:
 			continue
 		var tree: Dictionary = store.trees[base]
 		var kind := int(tree.get("kind", Trees.KIND_OAK))

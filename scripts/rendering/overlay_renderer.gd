@@ -149,7 +149,7 @@ func _sync_torch_multimesh() -> void:
 	var standing: Array[Transform3D] = []
 	var mounted: Array[Transform3D] = []
 	for pos: Vector3i in world.torch_store.torches.keys():
-		if pos.y > world.top_render_y or pos.y < world.get_min_render_y():
+		if not world.is_visible_at_level(pos.y) or pos.y < world.get_min_render_y():
 			continue
 		var facing: Vector3i = world.torch_store.facing(pos)
 		if facing == Vector3i.ZERO:
@@ -697,7 +697,8 @@ func _update_item_overlays(items: Dictionary) -> void:
 		if bool(item.get("is_carried", false)):
 			continue
 		var pos: Vector3i = item.get("pos", Vector3i.ZERO)
-		if not _is_explored(pos) or not world.is_visible_at_level(pos.y - 1):
+		# Same rule as workers: a stack in cell y shows while y <= render level + 1.
+		if not _is_explored(pos) or not world.is_visible_at_level(pos.y):
 			continue
 		var key := Vector2i(int(item.get("material_id", 0)), ItemMeshBuilder.pieces_for_count(int(item.get("count", 1))))
 		if not groups.has(key):
