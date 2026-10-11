@@ -115,7 +115,9 @@ Terrain shaders retain exposed cave sides even when a solid block sits above the
 - `world_blocks.dat`: finite-world bulk chunk block data with fill/raw/ZSTD entries. Handled by `WorldBulkChunkSaveLoad`.
 - `world_mesh_cache.dat`: optional raw mesh-cache acceleration data. Handled by `WorldMeshCacheSaveLoad`.
 - `items_stockpiles.dat`: physical item stacks and named stockpile zones. Handled by `WorldItemStockpileSaveLoad`; legacy unnamed zones receive `Stockpile <id>`.
-- `tasks.dat` (V9): pending dig, place, stair-build and stair-removal designations. Handled by `WorldTaskSaveLoad`; hauling is rebuilt from items/stockpiles, in-progress jobs reload as pending, and sites are revalidated by normal completion checks. `World.load_world` restores them after clearing the previous queue. V8 and older saves load with an empty queue.
+- `tasks.dat` (V9+): pending dig, place, stair-build/removal and torch designations. Handled by `WorldTaskSaveLoad`; hauling is rebuilt from items/stockpiles, in-progress jobs reload as pending, and sites are revalidated by normal completion checks. `World.load_world` restores them after clearing the previous queue. V8 and older saves load with an empty queue.
+- `explored.dat` (V10): compressed 256³ explored-cell snapshot, unioned with cells discovered by the final light build. V9 and older saves migrate exploration from sky light, worker-connected air and pending task sites.
+- `torches.dat` (V10): validated world positions for torch attachments. Restored torches are checked against the loaded terrain and their light events are drained before the first rendered frame.
 - `workers.dat`: worker-ID to role-template-ID records and validated per-work priority overrides. Handled by `WorldWorkerSaveLoad`; since V9 each record also stores the worker position, restored on load only when saved terrain still supports that cell (otherwise the default spawn is kept). Missing legacy overrides use the role defaults; Off is an explicit zero, not a missing value.
 
 Current save formats are not changed by housekeeping refactors unless explicitly planned.

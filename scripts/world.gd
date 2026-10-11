@@ -355,6 +355,8 @@ func rebuild_light_field() -> void:
 	light_field_arena_cook_seen = false
 	goblin_light = GoblinLightScript.new()
 	torch_store.register_light_sources()
+	if save_load != null:
+		save_load.apply_final_light_snapshots()
 
 
 func start_new_world(seed_value: int = -1) -> void:
@@ -381,17 +383,17 @@ func save_world(path: String) -> bool:
 
 
 func load_world(path: String) -> bool:
-	if torch_store != null:
-		torch_store.clear()
-	goblin_light = GoblinLightScript.new()
-	torch_store = TorchStoreScript.new()
-	torch_store.bind_world(self)
 	if live_diagnostics != null:
 		live_diagnostics.mark_event("loading_started")
 	var ok := save_load.load_world(path)
 	if live_diagnostics != null:
 		live_diagnostics.mark_event("loading_finished", {"success": ok})
 	if ok:
+		if torch_store != null:
+			torch_store.clear()
+		goblin_light = GoblinLightScript.new()
+		torch_store = TorchStoreScript.new()
+		torch_store.bind_world(self)
 		clear_tasks()
 		save_load.restore_saved_tasks()
 	if ok and renderer != null:

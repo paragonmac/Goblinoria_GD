@@ -1,5 +1,5 @@
 extends SceneTree
-## Torch attachment, designation, lighting and V9 compatibility contract.
+## Torch attachment, designation, lighting and V10 persistence contract.
 
 const SelectionScript = preload("res://scripts/main_selection_controller.gd")
 const OverlayRendererScript = preload("res://scripts/rendering/overlay_renderer.gd")
@@ -194,9 +194,10 @@ func _run() -> void:
 	var save_dir := "user://torch_task_%d" % OS.get_process_id()
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(save_dir))
 	world.queue_task_request(TaskQueue.TaskType.TORCH, Vector3i(4, 20, 1), 0)
-	_check(task_save.save_tasks(world, ProjectSettings.globalize_path(save_dir)), "saving V9 tasks with pending TORCH task succeeds")
+	_check(task_save.save_tasks(world, ProjectSettings.globalize_path(save_dir)), "saving tasks with pending TORCH task succeeds")
 	var saved_tasks: Dictionary = task_save.read_snapshot(world, ProjectSettings.globalize_path(save_dir))
-	_check(bool(saved_tasks.get("ok", false)) and saved_tasks.get("tasks", []).is_empty(), "V9 tasks.dat loads and omits TORCH until phase 6")
+	_check(bool(saved_tasks.get("ok", false)) and saved_tasks.get("tasks", []).size() == 1 \
+		and saved_tasks.get("tasks", [])[0].get("type") == TaskQueue.TaskType.TORCH, "tasks.dat restores the pending TORCH designation")
 
 	print("Torch task: %d checks, %d failures" % [checks, failures])
 	world.task_manager.shutdown()

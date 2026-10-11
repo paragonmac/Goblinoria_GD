@@ -10,6 +10,7 @@ const WorldBulkChunkSaveLoadScript = preload("res://scripts/world_bulk_chunk_sav
 const WorldMeshCacheSaveLoadScript = preload("res://scripts/world_mesh_cache_save_load.gd")
 const WorldWorkerSaveLoadScript = preload("res://scripts/world_worker_save_load.gd")
 const WorldTaskSaveLoadScript = preload("res://scripts/world_task_save_load.gd")
+const WorldExploredTorchSaveLoadScript = preload("res://scripts/world_explored_torch_save_load.gd")
 const WorldSaveTransactionScript = preload("res://scripts/world_save_transaction.gd")
 const WorldGenerationSharedScript = preload("res://scripts/world/world_generation_shared.gd")
 const WorldTerrainHeightSamplerScript = preload("res://scripts/world/world_terrain_height_sampler.gd")
@@ -18,14 +19,15 @@ const WorldRampRulesScript = preload("res://scripts/world/world_ramp_rules.gd")
 
 #region Constants
 const CHUNK_MAGIC := 0x43484B53
-const SAVE_VERSION := 9
+const SAVE_VERSION := 10
 const LEGACY_SAVE_VERSION := 4
 const WORKER_ROLES_LEGACY_SAVE_VERSION := 5
 const NAMED_WORK_SETTINGS_LEGACY_SAVE_VERSION := 6
 const PREVIOUS_STAIR_FLIGHT_SAVE_VERSION := 7
 # V8 has no worker positions or saved designations; both default on load.
 const NO_TASKS_LEGACY_SAVE_VERSION := 8
-const LEGACY_SAVE_VERSIONS := [LEGACY_SAVE_VERSION, WORKER_ROLES_LEGACY_SAVE_VERSION, NAMED_WORK_SETTINGS_LEGACY_SAVE_VERSION, PREVIOUS_STAIR_FLIGHT_SAVE_VERSION, NO_TASKS_LEGACY_SAVE_VERSION]
+const SAVE_V9_LEGACY_VERSION := 9
+const LEGACY_SAVE_VERSIONS := [LEGACY_SAVE_VERSION, WORKER_ROLES_LEGACY_SAVE_VERSION, NAMED_WORK_SETTINGS_LEGACY_SAVE_VERSION, PREVIOUS_STAIR_FLIGHT_SAVE_VERSION, NO_TASKS_LEGACY_SAVE_VERSION, SAVE_V9_LEGACY_VERSION]
 const CHUNK_DIR_NAME := "chunks"
 # Optional since V9: camera view at save time. Missing means the default view.
 const VIEW_FILE_NAME := "view.dat"
@@ -46,8 +48,13 @@ var bulk_chunk_save_load = WorldBulkChunkSaveLoadScript.new()
 var mesh_cache_save_load = WorldMeshCacheSaveLoadScript.new()
 var worker_save_load = WorldWorkerSaveLoadScript.new()
 var task_save_load = WorldTaskSaveLoadScript.new()
+var explored_torch_save_load = WorldExploredTorchSaveLoadScript.new()
 # Read during load; applied by World after it clears the previous task queue.
 var pending_task_snapshot: Dictionary = {}
+var pending_explored_snapshot: Dictionary = {}
+var pending_torch_snapshot: Dictionary = {}
+var pending_migration_task_snapshot: Dictionary = {}
+var has_pending_light_snapshots := false
 var save_transaction = WorldSaveTransactionScript.new()
 var legacy_terrain_slope_migration: bool = false
 #endregion
@@ -81,6 +88,8 @@ func save_world(path: String) -> bool:
 		WorldItemStockpileSaveLoadScript.ITEM_STOCKPILE_FILE_NAME,
 		WorldWorkerSaveLoadScript.WORKER_FILE_NAME,
 		WorldTaskSaveLoadScript.TASK_FILE_NAME,
+		WorldExploredTorchSaveLoadScript.EXPLORED_FILE_NAME,
+		WorldExploredTorchSaveLoadScript.TORCH_FILE_NAME,
 		VIEW_FILE_NAME,
 	]
 	if world.renderer != null:
@@ -110,7 +119,9 @@ func save_world(path: String) -> bool:
 				ok = DirAccess.remove_absolute(cache_path) == OK
 			mesh_cache_save_load.restore_state(previous_mesh_state)
 		ok = ok and _save_items_and_stockpiles(stage_dir) and _save_workers(stage_dir) \
-			and task_save_load.save_tasks(world, stage_dir) and _write_view(stage_dir)
+			and task_save_load.save_tasks(world, stage_dir) and _write_view(stage_dir) \
+			and explored_torch_save_load.save_explored(world.light_field, stage_dir) \
+			and explored_torch_save_load.save_torches(world, stage_dir)
 	if not ok or not save_transaction.promote():
 		bulk_chunk_save_load.restore_state(previous_bulk_state)
 		mesh_cache_save_load.restore_state(previous_mesh_state)
@@ -133,6 +144,10 @@ func save_world(path: String) -> bool:
 func load_world(path: String) -> bool:
 	var load_start_usec: int = Time.get_ticks_usec()
 	pending_task_snapshot = {}
+	pending_explored_snapshot = {}
+	pending_torch_snapshot = {}
+	pending_migration_task_snapshot = {}
+	has_pending_light_snapshots = false
 	var world_dir := _world_dir_from_path(path)
 	if not save_transaction.recover(world_dir):
 		return false
@@ -165,6 +180,13 @@ func load_world(path: String) -> bool:
 		return false
 	var task_snapshot := task_save_load.read_snapshot(world, world_dir)
 	if not bool(task_snapshot.get("ok", false)):
+		return false
+	var save_version := int(meta_snapshot.get("save_version", SAVE_VERSION))
+	var explored_snapshot := explored_torch_save_load.read_explored_snapshot(world_dir, save_version >= SAVE_VERSION)
+	if not bool(explored_snapshot.get("ok", false)):
+		return false
+	var torch_snapshot := explored_torch_save_load.read_torch_snapshot(world, world_dir, save_version >= SAVE_VERSION)
+	if not bool(torch_snapshot.get("ok", false)):
 		return false
 	var view_snapshot := _read_view(world_dir)
 	if not bool(view_snapshot.get("ok", false)):
@@ -205,6 +227,10 @@ func load_world(path: String) -> bool:
 		world.renderer.reset_stats()
 	item_stockpile_save_load.apply_snapshot(world, item_snapshot)
 	pending_task_snapshot = task_snapshot
+	pending_explored_snapshot = explored_snapshot
+	pending_torch_snapshot = torch_snapshot
+	pending_migration_task_snapshot = task_snapshot
+	has_pending_light_snapshots = true
 	world.loaded_view_state = view_snapshot.get("view", {})
 	last_load_metrics["total_save_load_ms"] = _elapsed_ms(load_start_usec)
 	return true
@@ -617,6 +643,33 @@ func restore_saved_tasks() -> int:
 	var restored: int = task_save_load.apply_snapshot(world, pending_task_snapshot)
 	pending_task_snapshot = {}
 	return restored
+
+
+## Called after the final full-map light build. This preserves fog discovered by
+## the build, restores torch sources, and migrates old saves from worker/task sites.
+func apply_final_light_snapshots() -> void:
+	if not has_pending_light_snapshots:
+		return
+	if bool(pending_torch_snapshot.get("present", false)):
+		for pos: Vector3i in pending_torch_snapshot.get("positions", []):
+			var reason: String = world.torch_site_reject_reason(pos)
+			if not reason.is_empty():
+				push_warning("Skipping restored torch at %s: %s" % [pos, reason])
+				continue
+			world.torch_store.add_torch(pos)
+	world.torch_store.register_light_sources()
+	# Drain restored sources synchronously so the first rendered frame has correct light.
+	while world.light_field.pending_events() > 0:
+		world.light_field.process_events(1000000)
+	if bool(pending_explored_snapshot.get("present", false)):
+		world.light_field.apply_explored(pending_explored_snapshot.explored)
+	else:
+		last_load_metrics["explored_migration_ms"] = explored_torch_save_load.migrate_explored(
+			world, world.light_field, pending_migration_task_snapshot)
+	pending_explored_snapshot = {}
+	pending_torch_snapshot = {}
+	pending_migration_task_snapshot = {}
+	has_pending_light_snapshots = false
 
 
 func _save_workers(world_dir: String) -> bool:

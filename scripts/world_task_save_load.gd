@@ -1,6 +1,6 @@
 extends RefCounted
 class_name WorldTaskSaveLoad
-## Persists player designations (dig, place, stairs, stair removal) so queued
+## Persists player designations (dig, place, stairs, stair removal, torches) so queued
 ## work survives save/load. Hauling is derived from items and stockpiles and is
 ## rebuilt after load, so it is not saved. Jobs in progress reload as pending;
 ## sites are revalidated by the normal completion checks, never here, because
@@ -11,7 +11,7 @@ const WorldSaveTransactionScript = preload("res://scripts/world_save_transaction
 const TASK_FILE_NAME := "tasks.dat"
 const TASK_MAGIC := 0x5441534B
 const MAX_TASKS := 65536
-const SAVED_TYPES := [TaskQueue.TaskType.DIG, TaskQueue.TaskType.PLACE, TaskQueue.TaskType.STAIRS]
+const SAVED_TYPES := [TaskQueue.TaskType.DIG, TaskQueue.TaskType.PLACE, TaskQueue.TaskType.STAIRS, TaskQueue.TaskType.TORCH]
 const DATA_KEYS := ["flight", "rotation", "up", "footprint", "materials", "remove_stairs"]
 
 
@@ -20,7 +20,6 @@ func save_tasks(world: World, world_dir: String) -> bool:
 		return false
 	var records: Array = []
 	for task in world.task_queue.tasks:
-		# Phase 6 adds torches.dat; V9 tasks.dat intentionally omits TORCH jobs.
 		if task == null or task.status == TaskQueue.TaskStatus.COMPLETED or not SAVED_TYPES.has(task.type):
 			continue
 		var data := {}

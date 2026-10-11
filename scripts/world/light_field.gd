@@ -211,6 +211,17 @@ func mark_explored_indices(indices: PackedInt32Array) -> void:
 		_set_explored(idx)
 
 
+## Unions a persisted fog snapshot with exploration discovered during this build.
+func apply_explored(snapshot: PackedByteArray) -> void:
+	if snapshot.size() != VOLUME or explored.size() != VOLUME:
+		return
+	for idx in VOLUME:
+		if snapshot[idx] != 0 and explored[idx] == 0:
+			explored[idx] = 255
+			explored_count += 1
+			dirty_explored_layers[idx >> 16] = true
+
+
 func pending_events() -> int:
 	return _events.size()
 
