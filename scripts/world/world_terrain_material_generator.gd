@@ -29,6 +29,8 @@ var soil_region := PackedByteArray()
 var water_cells_placed: int = 0
 var coal_ore_cells_placed: int = 0
 var iron_ore_cells_placed: int = 0
+var region_coal_counts := PackedInt32Array()
+var region_iron_counts := PackedInt32Array()
 
 var geology_noise := FastNoiseLite.new()
 var aquifer_noise := FastNoiseLite.new()
@@ -92,9 +94,43 @@ func build_geology_maps() -> void:
 				soil_region[idx] = World.BLOCK_ID_GRANITE
 
 
+func build_geology_region(x0: int, z0: int, x1: int, z1: int, _region_index: int) -> void:
+	for local_z in range(z0, z1):
+		var wz: int = _world_z(local_z)
+		for local_x in range(x0, x1):
+			var wx: int = _world_x(local_x)
+			var idx: int = _map_index(local_x, local_z)
+			var geology: float = _normalized_noise_2d(geology_noise, wx, wz)
+			if geology < 0.18:
+				soil_region[idx] = World.BLOCK_ID_SLATE
+			elif geology < 0.35:
+				soil_region[idx] = World.BLOCK_ID_BASALT
+			elif geology < 0.53:
+				soil_region[idx] = World.BLOCK_ID_LIMESTONE
+			elif geology < 0.70:
+				soil_region[idx] = World.BLOCK_ID_SANDSTONE
+			else:
+				soil_region[idx] = World.BLOCK_ID_GRANITE
+
+
 func fill_solid_terrain(volume: PackedByteArray) -> void:
 	for local_z in range(world_size_z):
 		for local_x in range(world_size_x):
+			var map_idx: int = _map_index(local_x, local_z)
+			var surface_y: int = elevation[map_idx]
+			var topsoil_depth: int = _topsoil_depth(local_x, local_z)
+			for y in range(surface_y + 1):
+				var block_id: int = _stone_block_for(map_idx, y, surface_y)
+				if y == surface_y:
+					block_id = _surface_block_for_biome(biome[map_idx])
+				elif y >= surface_y - topsoil_depth:
+					block_id = _subsurface_block_for_biome(biome[map_idx])
+				volume[_volume_index(local_x, y, local_z)] = block_id
+
+
+func fill_solid_terrain_region(x0: int, z0: int, x1: int, z1: int, _region_index: int, volume: PackedByteArray) -> void:
+	for local_z in range(z0, z1):
+		for local_x in range(x0, x1):
 			var map_idx: int = _map_index(local_x, local_z)
 			var surface_y: int = elevation[map_idx]
 			var topsoil_depth: int = _topsoil_depth(local_x, local_z)
@@ -131,32 +167,86 @@ func add_static_water(volume: PackedByteArray) -> void:
 
 
 func add_ores(volume: PackedByteArray) -> void:
-	for local_z in range(world_size_z):
-		var wz: int = _world_z(local_z)
-		for local_x in range(world_size_x):
-			var wx: int = _world_x(local_x)
-			var surface_y: int = elevation[_map_index(local_x, local_z)]
-			for y in range(2, max(2, surface_y - 3)):
+	region_coal_counts.resize(1)
+	region_iron_counts.resize(1)
+	region_coal_counts[0] = 0
+	region_iron_counts[0] = 0
+	_add_ores_region(volume, 0, 0, world_size_x, world_size_z, 0)
+	coal_ore_cells_placed += region_coal_counts[0]
+	iron_ore_cells_placed += region_iron_counts[0]
+
+
+func add_ores_regions_prepare(region_count: int) -> void:
+	region_coal_counts.resize(region_count)
+	region_iron_counts.resize(region_count)
+	region_coal_counts.fill(0)
+	region_iron_counts.fill(0)
+
+
+func add_ores_region(x0: int, z0: int, x1: int, z1: int, region_index: int, volume: PackedByteArray) -> void:
+	_add_ores_region(volume, x0, z0, x1, z1, region_index)
+
+
+func finish_add_ores_regions() -> void:
+	for count in region_coal_counts:
+		coal_ore_cells_placed += int(count)
+	for count in region_iron_counts:
+		iron_ore_cells_placed += int(count)
+
+
+func _add_ores_region(volume: PackedByteArray, x0: int, z0: int, x1: int, z1: int, region_index: int) -> void:
+	var coal_count := 0
+	var iron_count := 0
+	var max_surface_y := 0
+	for local_z in range(z0, z1):
+		for local_x in range(x0, x1):
+			max_surface_y = maxi(max_surface_y, elevation[_map_index(local_x, local_z)])
+	for y in range(2, max(2, max_surface_y - 3)):
+		for local_z in range(z0, z1):
+			var wz: int = _world_z(local_z)
+			for local_x in range(x0, x1):
+				var surface_y: int = elevation[_map_index(local_x, local_z)]
+				if y >= surface_y - 3:
+					continue
+				var wx: int = _world_x(local_x)
 				var idx: int = _volume_index(local_x, y, local_z)
 				if not _is_ore_replaceable(volume[idx]):
 					continue
 				var depth: int = surface_y - y
 				var depth_factor: float = clampf(float(depth) / 70.0, 0.0, 1.0)
-				var coal_value: float = _normalized_noise_3d(coal_noise, wx, y, wz)
-				if coal_value > 0.79 - depth_factor * 0.04:
+				var coal_threshold: float = (0.79 - depth_factor * 0.04) * 2.0 - 1.0
+				if coal_noise.get_noise_3d(float(wx), float(y), float(wz)) > coal_threshold:
 					volume[idx] = World.BLOCK_ID_COAL
-					coal_ore_cells_placed += 1
+					coal_count += 1
 					continue
 				if y < sea_level - 10:
-					var iron_value: float = _normalized_noise_3d(iron_noise, wx, y, wz)
-					if iron_value > 0.82 - depth_factor * 0.06:
+					var iron_threshold: float = (0.82 - depth_factor * 0.06) * 2.0 - 1.0
+					if iron_noise.get_noise_3d(float(wx), float(y), float(wz)) > iron_threshold:
 						volume[idx] = World.BLOCK_ID_IRON_ORE
-						iron_ore_cells_placed += 1
+						iron_count += 1
+	region_coal_counts[region_index] = coal_count
+	region_iron_counts[region_index] = iron_count
 
 
 func apply_surface_blocks(volume: PackedByteArray) -> void:
 	for local_z in range(world_size_z):
 		for local_x in range(world_size_x):
+			var map_idx: int = _map_index(local_x, local_z)
+			var surface_y: int = elevation[map_idx]
+			var surface_idx: int = _volume_index(local_x, surface_y, local_z)
+			if volume[surface_idx] == World.BLOCK_ID_AIR or volume[surface_idx] == World.BLOCK_ID_WATER:
+				continue
+			volume[surface_idx] = _surface_block_for_biome(biome[map_idx])
+			var topsoil_depth: int = _topsoil_depth(local_x, local_z)
+			for y in range(maxi(0, surface_y - topsoil_depth), surface_y):
+				var idx: int = _volume_index(local_x, y, local_z)
+				if _is_ore_replaceable(volume[idx]):
+					volume[idx] = _subsurface_block_for_biome(biome[map_idx])
+
+
+func apply_surface_blocks_region(x0: int, z0: int, x1: int, z1: int, _region_index: int, volume: PackedByteArray) -> void:
+	for local_z in range(z0, z1):
+		for local_x in range(x0, x1):
 			var map_idx: int = _map_index(local_x, local_z)
 			var surface_y: int = elevation[map_idx]
 			var surface_idx: int = _volume_index(local_x, surface_y, local_z)

@@ -276,6 +276,8 @@ func get_progress() -> Dictionary:
 		"pipeline_pass_completed": pass_completed,
 		"pipeline_pass_total": pass_total,
 		"pipeline_pass_state": pass_state,
+		"pipeline_regions_completed": int(pipeline_progress.get("regions_completed", 0)),
+		"pipeline_regions_total": int(pipeline_progress.get("regions_total", 0)),
 		"generation_stats": generation_stats,
 	}
 
@@ -473,6 +475,7 @@ func _run_layered_generation_worker(worker_index: int) -> void:
 	var generator: WorldGenerator = WorldGeneratorScript.new(null)
 	var config: Dictionary = layered_generation_config.duplicate(true)
 	config["progress_callback"] = Callable(self, "_record_pipeline_progress")
+	config["report_region_progress"] = true
 	var result: Dictionary = generator.generate_layered_world(config)
 	var blocks_by_coord: Dictionary = result.get("chunks", {})
 	_set_worker_progress(worker_index, blocks_by_coord.size())
@@ -490,7 +493,12 @@ func _record_pipeline_progress(row: Dictionary) -> void:
 	var pass_completed: int = int(row.get("pass_completed", 0))
 	var pass_total: int = maxi(int(row.get("pass_total", 1)), 1)
 	var total_chunks: int = coords.size()
-	var chunk_equivalent_progress: int = clampi(int(round(float(total_chunks) * float(pass_completed) / float(pass_total))), 0, total_chunks)
+	var progress_fraction: float = float(pass_completed) / float(pass_total)
+	if str(row.get("state", "")) == "regions":
+		var regions_total: int = maxi(int(row.get("regions_total", 0)), 1)
+		var regions_completed: int = clampi(int(row.get("regions_completed", 0)), 0, regions_total)
+		progress_fraction += float(regions_completed) / float(regions_total) / float(pass_total)
+	var chunk_equivalent_progress: int = clampi(int(round(float(total_chunks) * progress_fraction)), 0, total_chunks)
 	progress_mutex.lock()
 	pipeline_progress = row.duplicate(true)
 	if worker_totals.size() > 0:

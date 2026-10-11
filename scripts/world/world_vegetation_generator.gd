@@ -24,6 +24,7 @@ var feature_reserved := PackedByteArray()
 
 var flowers_placed: int = 0
 var trees_placed: Dictionary = {}
+var region_flower_counts := PackedInt32Array()
 
 
 func configure(
@@ -69,6 +70,39 @@ func place_flowers(volume: PackedByteArray) -> void:
 				flowers_placed += 1
 
 
+func prepare_flower_regions(region_count: int) -> void:
+	region_flower_counts.resize(region_count)
+	region_flower_counts.fill(0)
+
+
+func place_flowers_region(x0: int, z0: int, x1: int, z1: int, region_index: int, volume: PackedByteArray) -> void:
+	var placed := 0
+	for local_z in range(maxi(1, z0), mini(world_size_z - 1, z1)):
+		for local_x in range(maxi(1, x0), mini(world_size_x - 1, x1)):
+			var map_idx: int = _map_index(local_x, local_z)
+			if feature_reserved[map_idx] != 0:
+				continue
+			var surface_y: int = elevation[map_idx]
+			var surface_idx: int = _volume_index(local_x, surface_y, local_z)
+			var surface_block: int = volume[surface_idx]
+			if surface_block != World.BLOCK_ID_GRASS and surface_block != World.BLOCK_ID_MOSS:
+				continue
+			var chance: float = FLOWER_BASE_CHANCE
+			if biome[map_idx] == biome_forest or biome[map_idx] == biome_plains:
+				chance += FLOWER_BIOME_BONUS
+			chance = clampf(chance, 0.0, 0.24)
+			if _rand01(local_x, local_z, 0x9101) <= chance:
+				volume[surface_idx] = World.BLOCK_ID_FLOWER
+				placed += 1
+	region_flower_counts[region_index] = placed
+
+
+func finish_flower_regions() -> void:
+	flowers_placed = 0
+	for count in region_flower_counts:
+		flowers_placed += int(count)
+
+
 func final_cleanup(volume: PackedByteArray) -> void:
 	for local_z in range(world_size_z):
 		for local_x in range(world_size_x):
@@ -80,6 +114,17 @@ func final_cleanup(volume: PackedByteArray) -> void:
 				var above_idx: int = _volume_index(local_x, surface_y + 1, local_z)
 				if volume[above_idx] != World.BLOCK_ID_AIR:
 					volume[idx] = World.BLOCK_ID_GRASS
+
+
+func final_cleanup_region(x0: int, z0: int, x1: int, z1: int, _region_index: int, volume: PackedByteArray) -> void:
+	for local_z in range(z0, z1):
+		for local_x in range(x0, x1):
+			var surface_y: int = elevation[_map_index(local_x, local_z)]
+			if surface_y < 0 or surface_y >= world_size_y or surface_y + 1 >= world_size_y:
+				continue
+			var idx: int = _volume_index(local_x, surface_y, local_z)
+			if volume[idx] == World.BLOCK_ID_FLOWER and volume[_volume_index(local_x, surface_y + 1, local_z)] != World.BLOCK_ID_AIR:
+				volume[idx] = World.BLOCK_ID_GRASS
 
 
 

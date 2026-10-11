@@ -70,6 +70,9 @@ func _init() -> void:
 func _run() -> int:
 	var update_fixture := _has_arg("--update")
 	var errors: Array = []
+	_validate_parallel_determinism(errors)
+	if OS.get_environment("GOB_GEN_BENCH") == "1":
+		_run_generation_benchmark()
 	var report := _build_report(errors)
 	if not errors.is_empty():
 		_print_errors(errors)
@@ -78,6 +81,107 @@ func _run() -> int:
 	if update_fixture:
 		return _write_fixture(actual_text)
 	return _compare_fixture(actual_text)
+
+
+func _validate_parallel_determinism(errors: Array) -> void:
+	var checks := 0
+	for seed in [12345, 24680, 98765]:
+		var base_config := {
+			"world_seed": seed,
+			"sea_level": 40,
+			"world_size_y": 64,
+			"chunk_size": 8,
+			"world_chunks_x": 32,
+			"world_chunks_y": 8,
+			"world_chunks_z": 32,
+			"world_min_chunk_x": -16,
+			"world_max_chunk_x": 15,
+			"world_min_chunk_z": -16,
+			"world_max_chunk_z": 15,
+		}
+		var serial_config: Dictionary = base_config.duplicate(true)
+		serial_config["parallel_generation"] = false
+		var one_worker_config: Dictionary = base_config.duplicate(true)
+		one_worker_config["parallel_generation"] = true
+		one_worker_config["generation_workers"] = 1
+		var many_workers_config: Dictionary = base_config.duplicate(true)
+		many_workers_config["parallel_generation"] = true
+		many_workers_config["generation_workers"] = 6
+		var serial_result: Dictionary = _generate_config(serial_config)
+		var one_worker_result: Dictionary = _generate_config(one_worker_config)
+		var many_workers_result: Dictionary = _generate_config(many_workers_config)
+		if seed == 12345:
+			print("Parallel generation thread count: serial %d, one worker %d, six workers %d" % [
+				int(serial_result.get("metrics", {}).get("region_thread_count", 0)),
+				int(one_worker_result.get("metrics", {}).get("region_thread_count", 0)),
+				int(many_workers_result.get("metrics", {}).get("region_thread_count", 0)),
+			])
+		checks += _compare_generation_results("seed %d serial/parallel" % seed, serial_result, one_worker_result, errors)
+		checks += _compare_generation_results("seed %d worker count" % seed, one_worker_result, many_workers_result, errors)
+	print("Parallel generation: %d checks, %d failures" % [checks, errors.size()])
+
+
+func _compare_generation_results(label: String, first: Dictionary, second: Dictionary, errors: Array) -> int:
+	_validate_result_pair(label, first, second, errors)
+	return 4
+
+
+func _validate_result_pair(label: String, first: Dictionary, second: Dictionary, errors: Array) -> void:
+	var same_blocks := _stable_json(_summarize_chunks(first.get("chunks", {}), 8)) == _stable_json(_summarize_chunks(second.get("chunks", {}), 8))
+	var same_maps := _stable_json(_summarize_maps(first.get("maps", {}))) == _stable_json(_summarize_maps(second.get("maps", {})))
+	var same_trees := _stable_json(first.get("trees", {})) == _stable_json(second.get("trees", {}))
+	var same_flower_count := int(first.get("metrics", {}).get("generation_stats", {}).get("flowers_placed", -1)) == int(second.get("metrics", {}).get("generation_stats", {}).get("flowers_placed", -2))
+	for pair in [[same_blocks, "block hash"], [same_maps, "map hashes"], [same_trees, "tree attachments"], [same_flower_count, "flower count"]]:
+		if not pair[0]:
+			errors.append("%s: %s differ" % [label, pair[1]])
+
+
+func _generate_config(config: Dictionary) -> Dictionary:
+	var pipeline = PipelineScript.new()
+	return pipeline.generate(config)
+
+
+func _run_generation_benchmark() -> void:
+	print("Generation pass timings (ms):")
+	print("size,pass,serial,parallel")
+	for width in [256, 512]:
+		var chunks: int = width / 8
+		var config := {
+			"world_seed": 12345,
+			"sea_level": 226,
+			"world_size_y": 256,
+			"chunk_size": 8,
+			"world_chunks_x": chunks,
+			"world_chunks_y": 32,
+			"world_chunks_z": chunks,
+			"world_min_chunk_x": 0,
+			"world_max_chunk_x": chunks - 1,
+			"world_min_chunk_z": 0,
+			"world_max_chunk_z": chunks - 1,
+		}
+		var serial_config: Dictionary = config.duplicate(true)
+		serial_config["parallel_generation"] = false
+		var parallel_config: Dictionary = config.duplicate(true)
+		parallel_config["parallel_generation"] = true
+		var serial_result: Dictionary = _generate_config(serial_config)
+		var parallel_result: Dictionary = _generate_config(parallel_config)
+		var serial_metrics: Dictionary = serial_result.get("metrics", {})
+		var parallel_metrics: Dictionary = parallel_result.get("metrics", {})
+		var serial_passes: Dictionary = {}
+		var parallel_passes: Dictionary = {}
+		for entry in serial_metrics.get("passes", []):
+			serial_passes[entry.name] = float(entry.ms)
+		for entry in parallel_metrics.get("passes", []):
+			parallel_passes[entry.name] = float(entry.ms)
+		for pass_name in EXPECTED_PASS_NAMES:
+			print("%d,%s,%.2f,%.2f" % [width, pass_name, float(serial_passes.get(pass_name, 0.0)), float(parallel_passes.get(pass_name, 0.0))])
+		print("%d worker threads used: serial %d, parallel %d" % [width, int(serial_metrics.get("region_thread_count", 0)), int(parallel_metrics.get("region_thread_count", 0))])
+		if width == 512:
+			var errors: Array = []
+			_validate_result_pair("512 benchmark seed", serial_result, parallel_result, errors)
+			print("512 serial/parallel determinism: %s" % ("PASS" if errors.is_empty() else "FAIL"))
+			for error in errors:
+				push_error(str(error))
 
 
 func _build_report(errors: Array) -> Dictionary:
