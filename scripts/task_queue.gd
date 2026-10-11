@@ -10,7 +10,7 @@ signal task_removed(task_id: int)
 signal task_visual_state_changed(task_id: int)
 
 #region Enums
-enum TaskType {DIG, PLACE, STAIRS, HAUL, TORCH}
+enum TaskType {DIG, PLACE, STAIRS, HAUL, TORCH, CHOP}
 enum TaskStatus {PENDING, IN_PROGRESS, COMPLETED}
 enum TaskAccessibility {UNKNOWN, REACHABLE, UNREACHABLE}
 enum TaskBlockReason {NONE, NO_WORK_POSITION, NO_WORKER_PATH, NO_ELIGIBLE_WORKER}
@@ -179,6 +179,10 @@ func add_place_task(pos: Vector3i, material: int) -> int:
 
 func add_torch_task(pos: Vector3i) -> int:
 	return add_task(pos, TaskType.TORCH, 0)
+
+
+func add_chop_task(pos: Vector3i) -> int:
+	return add_task(pos, TaskType.CHOP, 0)
 
 
 func add_stairs_task(pos: Vector3i, stair_material: int) -> int:

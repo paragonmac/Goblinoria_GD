@@ -63,6 +63,7 @@ var cook_world_size_y: int = 0
 var generation_mode: String = ""
 var pipeline_metrics: Dictionary = {}
 var pipeline_progress: Dictionary = {}
+var trees_applied: bool = false
 
 
 func _init(world_ref: World) -> void:
@@ -71,6 +72,7 @@ func _init(world_ref: World) -> void:
 
 func start_generation() -> void:
 	_reset_state()
+	trees_applied = false
 	coords = _build_all_world_chunk_targets()
 	worker_count = 1
 	cook_world_seed = world.world_seed
@@ -148,7 +150,16 @@ func merge_generation_results_step(max_chunks: int) -> int:
 
 
 func is_generation_merge_done() -> bool:
-	return stage == Stage.MERGING_BLOCKS and merge_worker_index >= generation_results.size()
+	var done := stage == Stage.MERGING_BLOCKS and merge_worker_index >= generation_results.size()
+	if done and not trees_applied:
+		var result: Dictionary = generation_results[0] if not generation_results.is_empty() and generation_results[0] is Dictionary else {}
+		var trees: Dictionary = result.get("trees", {})
+		world.tree_store.clear()
+		for base: Vector3i in trees:
+			var tree: Dictionary = trees[base]
+			world.add_generated_tree(base, int(tree.kind), int(tree.variant), int(tree.height))
+		trees_applied = true
+	return done
 
 
 func start_mesh() -> void:
@@ -466,6 +477,7 @@ func _run_layered_generation_worker(worker_index: int) -> void:
 		"chunks": blocks_by_coord.size(),
 		"generation_ms": elapsed,
 		"pipeline_metrics": result.get("metrics", {}),
+		"trees": result.get("trees", {}),
 	})
 
 

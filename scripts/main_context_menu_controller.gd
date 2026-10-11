@@ -362,6 +362,7 @@ func _rebuild_menu() -> void:
 			World.PlayerMode.ERASE: tool_icon = "erase"
 			World.PlayerMode.STOCKPILE: tool_icon = "stockpile"
 			World.PlayerMode.TORCH: tool_icon = "build"
+			World.PlayerMode.CHOP: tool_icon = "dig"
 		popup.set_item_icon(popup.item_count - 1, UiIconAtlas.texture(tool_icon))
 		popup.set_item_checked(popup.item_count - 1, tool.mode == world.player_mode)
 	popup.add_separator("This location")

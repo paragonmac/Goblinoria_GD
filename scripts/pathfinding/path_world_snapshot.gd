@@ -11,6 +11,7 @@ var chunks: Dictionary = {}
 var chunk_revisions: Dictionary = {}
 var solid_table := PackedByteArray()
 var ramp_table := PackedByteArray()
+var obstructed_cells: Dictionary = {}
 
 
 func capture_from_world(world, start: Vector3i, goals: Array, margin_xz: int, margin_y: int) -> void:
@@ -38,6 +39,16 @@ func capture_from_world(world, start: Vector3i, goals: Array, margin_xz: int, ma
 		mini(World.WORLD_MAX_BLOCK_Z, max_pos.z + margin_xz)
 	)
 	solid_table = world.block_registry.solid.duplicate()
+	obstructed_cells.clear()
+	if world.tree_store != null:
+		var min_tree_chunk: Vector3i = world.world_to_chunk_coords(min_block.x, min_block.y, min_block.z)
+		var max_tree_chunk: Vector3i = world.world_to_chunk_coords(max_block.x, max_block.y, max_block.z)
+		for cx in range(min_tree_chunk.x, max_tree_chunk.x + 1):
+			for cy in range(min_tree_chunk.y, max_tree_chunk.y + 1):
+				for cz in range(min_tree_chunk.z, max_tree_chunk.z + 1):
+					for base: Vector3i in world.tree_store.trees_in_chunk(Vector3i(cx, cy, cz)):
+						if base.x >= min_block.x and base.x <= max_block.x and base.y >= min_block.y and base.y <= max_block.y and base.z >= min_block.z and base.z <= max_block.z:
+							obstructed_cells[base] = true
 	ramp_table.resize(BlockRegistry.TABLE_SIZE)
 	for block_id in range(BlockRegistry.TABLE_SIZE):
 		ramp_table[block_id] = 1 if world.is_ramp_block_id(block_id) else 0
@@ -69,6 +80,10 @@ func is_block_coord_valid(x: int, y: int, z: int) -> bool:
 		and y >= min_block.y and y <= max_block.y \
 		and z >= min_block.z and z <= max_block.z \
 		and y >= 0 and y < world_size_y
+
+
+func is_cell_obstructed(pos: Vector3i) -> bool:
+	return obstructed_cells.has(pos)
 
 
 func get_block_no_generate(x: int, y: int, z: int) -> int:

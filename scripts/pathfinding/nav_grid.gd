@@ -246,9 +246,11 @@ func _classify_box(snapshot, pathfinder: Pathfinder, solid: PackedByteArray, ram
 			if pathfinder.is_walkable(snapshot, x + box_min.x, y + box_min.y, z + box_min.z):
 				_walkable[i] = 1
 				_walkable_indices.append(i)
-		elif solid[below] != 0 and ramp[below] == 0 and solid[id] == 0:
-			_walkable[i] = 1
-			_walkable_indices.append(i)
+		else:
+			if solid[below] != 0 and ramp[below] == 0 and solid[id] == 0 \
+					and not snapshot.is_cell_obstructed(_position(i)):
+				_walkable[i] = 1
+				_walkable_indices.append(i)
 
 
 func _build_edge_masks(snapshot, pathfinder: Pathfinder) -> void:

@@ -33,6 +33,11 @@ static func cell_details(world, pos: Vector3i, level_base_y: int) -> Dictionary:
 	var torch_text := ""
 	if has_torch:
 		torch_text = "Torch (wall)" if world.torch_store.facing(torch_pos) != Vector3i.ZERO else "Torch"
+	var tree_pos: Vector3i = pos if world.tree_store.has_tree(pos) else occupant_cell
+	var tree: Dictionary = world.tree_store.tree_at(tree_pos)
+	var tree_text := ""
+	if explored and world.light_field.is_explored(tree_pos.x, tree_pos.y, tree_pos.z) and not tree.is_empty():
+		tree_text = ["Oak tree", "Pine tree", "Bush"][clampi(int(tree.kind), 0, 2)]
 	var result := {
 		"kind": "cell",
 		"id": block_id,
@@ -48,6 +53,7 @@ static func cell_details(world, pos: Vector3i, level_base_y: int) -> Dictionary:
 		"block_light": block_light,
 		"torch": has_torch,
 		"torch_text": torch_text,
+		"tree_text": tree_text,
 		"goblin_light": goblin_light,
 		"explored": explored,
 		"occupant_cell": occupant_cell,
@@ -85,7 +91,7 @@ static func cell_details(world, pos: Vector3i, level_base_y: int) -> Dictionary:
 			if seen_tasks.has(task.id):
 				continue
 			seen_tasks[task.id] = true
-			var type_name: String = ["Dig", "Place", "Stairs", "Haul", "Torch"][clampi(task.type, 0, 4)]
+			var type_name: String = ["Dig", "Place", "Stairs", "Haul", "Torch", "Chop"][clampi(task.type, 0, 5)]
 			var status_name := "assigned" if task.status == TaskQueue.TaskStatus.IN_PROGRESS or is_instance_valid(task.assigned_worker) else "pending"
 			var access_name := "unknown"
 			if task.accessibility == TaskQueue.TaskAccessibility.REACHABLE:
@@ -630,7 +636,7 @@ func _append_reference(row: Dictionary, field: String, id: int) -> void:
 
 
 func _task_type_name(type: int) -> String:
-	return ["Dig", "Place", "Stairs", "Haul", "Torch"][clampi(type, 0, 4)]
+	return ["Dig", "Place", "Stairs", "Haul", "Torch", "Chop"][clampi(type, 0, 5)]
 
 
 func _task_display_name(task) -> String:

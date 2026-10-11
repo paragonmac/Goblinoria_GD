@@ -298,6 +298,18 @@ func _interrupt_current_task(task_queue, world = null) -> void:
 		movement_intent = MovementIntent.NONE
 
 
+func interrupt_task_and_idle(task_queue, world = null) -> void:
+	_interrupt_current_task(task_queue, world)
+	path.clear()
+	path_index = 0
+	path_segment_validated = false
+	target_pos = position
+	movement_intent = MovementIntent.NONE
+	assist_task_id = -1
+	idle_timer = IDLE_PAUSE
+	set_state(WorkerState.IDLE, world)
+
+
 func _has_standing_support(world) -> bool:
 	var coord: Vector3i = get_block_coord()
 	return _can_stand_at(world, coord.x, coord.y, coord.z)
@@ -567,7 +579,8 @@ func can_work_task(task, world = null, pathfinder = null) -> bool:
 	# Work settings govern the NEXT claim, never invalidate the owned job in transit.
 	if not can_accept_task(task) and not (task != null and current_task_id == task.id and task.assigned_worker == self):
 		return false
-	if task.type == TaskQueue.TaskType.DIG or task.type == TaskQueue.TaskType.PLACE or task.type == TaskQueue.TaskType.TORCH:
+	if task.type == TaskQueue.TaskType.DIG or task.type == TaskQueue.TaskType.PLACE \
+			or task.type == TaskQueue.TaskType.TORCH or task.type == TaskQueue.TaskType.CHOP:
 		var worker_pos := get_block_coord()
 		return _can_work_task_from_coord(task.type, worker_pos, task.pos, world, pathfinder)
 	if task.type == TaskQueue.TaskType.STAIRS:
@@ -741,6 +754,8 @@ func _get_work_duration(world, task) -> float:
 				return DIG_DURATION_DEFAULT * dig_duration_multiplier
 			var block_id: int = world.get_block(task.pos.x, task.pos.y, task.pos.z)
 			return _get_dig_duration_for_block_id(block_id) * dig_duration_multiplier
+		TaskQueue.TaskType.CHOP:
+			return DIG_DURATION_DEFAULT * dig_duration_multiplier
 		TaskQueue.TaskType.PLACE, TaskQueue.TaskType.STAIRS:
 			return BUILD_DURATION
 		TaskQueue.TaskType.HAUL:
@@ -918,6 +933,16 @@ func update_working(dt: float, world, task_queue, pathfinder) -> void:
 					if not world.torch_store.add_torch(task.pos, torch_facing):
 						task_queue.remove_task(task)
 						_trace(world, "task_cancelled", task, "reason=torch_already_exists")
+						current_task_id = -1
+						active_work_anim = &""
+						idle_timer = IDLE_PAUSE
+						set_state(WorkerState.IDLE, world)
+						return
+				TaskQueue.TaskType.CHOP:
+					var tree: Dictionary = world.tree_store.tree_at(task.pos)
+					if tree.is_empty() or not world.remove_tree(task.pos, true):
+						task_queue.remove_task(task)
+						_trace(world, "task_cancelled", task, "reason=tree_missing")
 						current_task_id = -1
 						active_work_anim = &""
 						idle_timer = IDLE_PAUSE
@@ -1249,7 +1274,7 @@ func _can_work_task_from_coord(
 			flight_rotation,
 			stair_excluded_cells
 		)
-	if task_type != TaskQueue.TaskType.DIG and task_type != TaskQueue.TaskType.PLACE and task_type != TaskQueue.TaskType.TORCH:
+	if task_type != TaskQueue.TaskType.DIG and task_type != TaskQueue.TaskType.PLACE and task_type != TaskQueue.TaskType.TORCH and task_type != TaskQueue.TaskType.CHOP:
 		return true
 	if world == null or pathfinder == null:
 		return worker_pos.y == _work_level_for_task(task_type, task_pos, world) \

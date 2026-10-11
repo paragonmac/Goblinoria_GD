@@ -11,6 +11,7 @@ const TOOLS := [
 	{"mode": World.PlayerMode.ERASE, "label": "Erase", "key": KEY_6},
 	{"mode": World.PlayerMode.STOCKPILE, "label": "Stockpile", "key": KEY_7},
 	{"mode": World.PlayerMode.TORCH, "label": "Torch", "key": KEY_8},
+	{"mode": World.PlayerMode.CHOP, "label": "Chop", "key": KEY_9},
 ]
 
 

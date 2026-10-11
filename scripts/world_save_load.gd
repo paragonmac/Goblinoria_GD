@@ -15,11 +15,12 @@ const WorldSaveTransactionScript = preload("res://scripts/world_save_transaction
 const WorldGenerationSharedScript = preload("res://scripts/world/world_generation_shared.gd")
 const WorldTerrainHeightSamplerScript = preload("res://scripts/world/world_terrain_height_sampler.gd")
 const WorldRampRulesScript = preload("res://scripts/world/world_ramp_rules.gd")
+const WorldGenerationPipelineScript = preload("res://scripts/world_generation_pipeline.gd")
 #endregion
 
 #region Constants
 const CHUNK_MAGIC := 0x43484B53
-const SAVE_VERSION := 11
+const SAVE_VERSION := 12
 const LEGACY_SAVE_VERSION := 4
 const WORKER_ROLES_LEGACY_SAVE_VERSION := 5
 const NAMED_WORK_SETTINGS_LEGACY_SAVE_VERSION := 6
@@ -28,7 +29,8 @@ const PREVIOUS_STAIR_FLIGHT_SAVE_VERSION := 7
 const NO_TASKS_LEGACY_SAVE_VERSION := 8
 const SAVE_V9_LEGACY_VERSION := 9
 const SAVE_V10_LEGACY_VERSION := 10
-const LEGACY_SAVE_VERSIONS := [LEGACY_SAVE_VERSION, WORKER_ROLES_LEGACY_SAVE_VERSION, NAMED_WORK_SETTINGS_LEGACY_SAVE_VERSION, PREVIOUS_STAIR_FLIGHT_SAVE_VERSION, NO_TASKS_LEGACY_SAVE_VERSION, SAVE_V9_LEGACY_VERSION, SAVE_V10_LEGACY_VERSION]
+const SAVE_V11_LEGACY_VERSION := 11
+const LEGACY_SAVE_VERSIONS := [LEGACY_SAVE_VERSION, WORKER_ROLES_LEGACY_SAVE_VERSION, NAMED_WORK_SETTINGS_LEGACY_SAVE_VERSION, PREVIOUS_STAIR_FLIGHT_SAVE_VERSION, NO_TASKS_LEGACY_SAVE_VERSION, SAVE_V9_LEGACY_VERSION, SAVE_V10_LEGACY_VERSION, SAVE_V11_LEGACY_VERSION]
 const CHUNK_DIR_NAME := "chunks"
 # Optional since V9: camera view at save time. Missing means the default view.
 const VIEW_FILE_NAME := "view.dat"
@@ -54,6 +56,7 @@ var explored_torch_save_load = WorldExploredTorchSaveLoadScript.new()
 var pending_task_snapshot: Dictionary = {}
 var pending_explored_snapshot: Dictionary = {}
 var pending_torch_snapshot: Dictionary = {}
+var pending_tree_snapshot: Dictionary = {}
 var pending_migration_task_snapshot: Dictionary = {}
 var has_pending_light_snapshots := false
 var save_transaction = WorldSaveTransactionScript.new()
@@ -91,6 +94,7 @@ func save_world(path: String) -> bool:
 		WorldTaskSaveLoadScript.TASK_FILE_NAME,
 		WorldExploredTorchSaveLoadScript.EXPLORED_FILE_NAME,
 		WorldExploredTorchSaveLoadScript.TORCH_FILE_NAME,
+		WorldExploredTorchSaveLoadScript.TREE_FILE_NAME,
 		VIEW_FILE_NAME,
 	]
 	if world.renderer != null:
@@ -122,7 +126,8 @@ func save_world(path: String) -> bool:
 		ok = ok and _save_items_and_stockpiles(stage_dir) and _save_workers(stage_dir) \
 			and task_save_load.save_tasks(world, stage_dir) and _write_view(stage_dir) \
 			and explored_torch_save_load.save_explored(world.light_field, stage_dir) \
-			and explored_torch_save_load.save_torches(world, stage_dir)
+			and explored_torch_save_load.save_torches(world, stage_dir) \
+			and explored_torch_save_load.save_trees(world, stage_dir)
 	if not ok or not save_transaction.promote():
 		bulk_chunk_save_load.restore_state(previous_bulk_state)
 		mesh_cache_save_load.restore_state(previous_mesh_state)
@@ -147,6 +152,7 @@ func load_world(path: String) -> bool:
 	pending_task_snapshot = {}
 	pending_explored_snapshot = {}
 	pending_torch_snapshot = {}
+	pending_tree_snapshot = {}
 	pending_migration_task_snapshot = {}
 	has_pending_light_snapshots = false
 	var world_dir := _world_dir_from_path(path)
@@ -189,6 +195,9 @@ func load_world(path: String) -> bool:
 	var torch_snapshot := explored_torch_save_load.read_torch_snapshot(world, world_dir, save_version >= SAVE_V10_LEGACY_VERSION)
 	if not bool(torch_snapshot.get("ok", false)):
 		return false
+	var tree_snapshot := explored_torch_save_load.read_tree_snapshot(world, world_dir, save_version >= SAVE_VERSION)
+	if not bool(tree_snapshot.get("ok", false)):
+		return false
 	var view_snapshot := _read_view(world_dir)
 	if not bool(view_snapshot.get("ok", false)):
 		return false
@@ -230,6 +239,7 @@ func load_world(path: String) -> bool:
 	pending_task_snapshot = task_snapshot
 	pending_explored_snapshot = explored_snapshot
 	pending_torch_snapshot = torch_snapshot
+	pending_tree_snapshot = tree_snapshot
 	pending_migration_task_snapshot = task_snapshot
 	has_pending_light_snapshots = true
 	world.loaded_view_state = view_snapshot.get("view", {})
@@ -651,6 +661,14 @@ func restore_saved_tasks() -> int:
 func apply_final_light_snapshots() -> void:
 	if not has_pending_light_snapshots:
 		return
+	if bool(pending_tree_snapshot.get("present", false)):
+		for record: Dictionary in pending_tree_snapshot.get("trees", []):
+			var base: Vector3i = record.base
+			if _tree_site_is_valid(base) and not world.is_cell_obstructed(base):
+				world.add_tree(base, int(record.kind), int(record.variant), int(record.height))
+	else:
+		_generate_legacy_trees()
+	_cancel_restored_chops_without_trees()
 	if bool(pending_torch_snapshot.get("present", false)):
 		for pos: Vector3i in pending_torch_snapshot.get("positions", []):
 			if not world.is_block_coord_valid(pos.x, pos.y, pos.z) \
@@ -680,8 +698,80 @@ func apply_final_light_snapshots() -> void:
 			world, world.light_field, pending_migration_task_snapshot)
 	pending_explored_snapshot = {}
 	pending_torch_snapshot = {}
+	pending_tree_snapshot = {}
 	pending_migration_task_snapshot = {}
 	has_pending_light_snapshots = false
+
+
+func _generate_legacy_trees() -> void:
+	var pipeline = WorldGenerationPipelineScript.new()
+	var generated: Dictionary = pipeline.generate_tree_attachments({
+		"world_seed": world.world_seed,
+		"sea_level": world.sea_level,
+		"world_size_y": world.world_size_y,
+	})
+	var added := 0
+	var invalid_sites := 0
+	var occupied_sites := 0
+	var rejected_stores := 0
+	for base: Vector3i in generated:
+		if not _tree_site_is_valid(base):
+			invalid_sites += 1
+			continue
+		if _tree_site_occupied(base):
+			occupied_sites += 1
+			continue
+		var tree: Dictionary = generated[base]
+		if world.add_tree(base, int(tree.kind), int(tree.variant), int(tree.height)):
+			added += 1
+		else:
+			rejected_stores += 1
+	last_load_metrics["legacy_tree_candidates"] = generated.size()
+	last_load_metrics["legacy_trees_added"] = added
+	last_load_metrics["legacy_tree_invalid_sites"] = invalid_sites
+	last_load_metrics["legacy_tree_occupied_sites"] = occupied_sites
+	last_load_metrics["legacy_tree_rejected_stores"] = rejected_stores
+
+
+func _cancel_restored_chops_without_trees() -> void:
+	if world.task_queue == null:
+		return
+	for task in world.task_queue.tasks.duplicate():
+		if task.type != TaskQueue.TaskType.CHOP or world.tree_store.has_tree(task.pos):
+			continue
+		if task.status == TaskQueue.TaskStatus.PENDING:
+			world.task_queue.remove_task(task)
+			world.trace_task_event(task, "task_cancelled", "reason=tree_missing_after_load")
+
+
+func _tree_site_is_valid(base: Vector3i) -> bool:
+	if not world.is_block_coord_valid(base.x, base.y, base.z) or base.y <= 0:
+		return false
+	var floor_id: int = world.get_block_no_generate(base.x, base.y - 1, base.z)
+	return (floor_id == World.BLOCK_ID_GRASS or floor_id == World.BLOCK_ID_MOSS or floor_id == World.BLOCK_ID_DIRT) \
+		and world.get_block_no_generate(base.x, base.y, base.z) == World.BLOCK_ID_AIR
+
+
+func _tree_site_occupied(base: Vector3i) -> bool:
+	if _tree_site_has_active_task(base) or _tree_site_has_active_task(base + Vector3i.DOWN) \
+			or world.is_stockpile_cell(base) \
+			or world.torch_store.has_torch(base) or pending_torch_snapshot.get("positions", []).has(base):
+		return true
+	for item: Dictionary in world.item_store.items.values():
+		if item.get("pos") == base:
+			return true
+	for worker: Worker in world.workers:
+		var worker_cell := Vector3i(int(round(worker.position.x)), int(floor(worker.position.y)), int(round(worker.position.z)))
+		if worker_cell == base:
+			return true
+	return false
+
+
+func _tree_site_has_active_task(pos: Vector3i) -> bool:
+	for task in world.task_queue.get_active_tasks_at(pos):
+		if task.status != TaskQueue.TaskStatus.COMPLETED:
+			return true
+	return false
 
 
 func _save_workers(world_dir: String) -> bool:

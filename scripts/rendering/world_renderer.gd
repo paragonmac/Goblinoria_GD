@@ -10,6 +10,7 @@ const WorldRendererRenderLevelScript = preload("res://scripts/rendering/world_re
 const WorldRendererMaterialsScript = preload("res://scripts/rendering/world_renderer_materials.gd")
 const WorldRendererStatsScript = preload("res://scripts/rendering/world_renderer_stats.gd")
 const OverlayRendererScript = preload("res://scripts/rendering/overlay_renderer.gd")
+const TreeRendererScript = preload("res://scripts/rendering/tree_renderer.gd")
 const StairExcavationMeshScript = preload("res://scripts/rendering/stair_excavation_mesh.gd")
 const FrustumCullerScript = preload("res://scripts/rendering/frustum_culler.gd")
 const ChunkMeshJobBuilderScript = preload("res://scripts/rendering/chunk_mesh_job_builder.gd")
@@ -81,6 +82,7 @@ var render_level_helper = WorldRendererRenderLevelScript.new()
 var material_helper = WorldRendererMaterialsScript.new()
 var render_stats = WorldRendererStatsScript.new()
 var overlay_renderer = OverlayRendererScript.new()
+var tree_renderer = TreeRendererScript.new()
 var excavation_preview_lining: MeshInstance3D
 var frustum_culler = FrustumCullerScript.new()
 var mesh_job_builder = ChunkMeshJobBuilderScript.new()
@@ -108,7 +110,13 @@ func initialize(world_ref: World) -> void:
 	if overlay_renderer.get_parent() == null:
 		add_child(overlay_renderer)
 	overlay_renderer.initialize(world_ref)
+	if tree_renderer.get_parent() == null:
+		tree_renderer.name = "TreeRenderer"
+		add_child(tree_renderer)
+	tree_renderer.initialize(world_ref)
 	material_helper.initialize(world_ref)
+	material_helper.register_light_material(tree_renderer.material)
+	material_helper.register_light_material(overlay_renderer.item_prop_material)
 	if not overlay_renderer.excavation_preview_changed.is_connected(_set_excavation_preview):
 		overlay_renderer.excavation_preview_changed.connect(_set_excavation_preview)
 	_ensure_block_tables()

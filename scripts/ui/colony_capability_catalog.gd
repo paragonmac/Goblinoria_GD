@@ -13,7 +13,8 @@ const TOOL_DETAILS := {
 	World.PlayerMode.DOWN_STAIRS: ["build", "down_stairs", "available", "Designate downward stairs by replacing eligible terrain."],
 	World.PlayerMode.ERASE: ["build", "erase", "available", "Cancel pending tasks, remove stockpile cells and remove torches; right-click also offers location-specific removal."],
 	World.PlayerMode.STOCKPILE: ["build", "stockpile", "available", "Designate storage cells for physical items and hauling."],
-	World.PlayerMode.TORCH: ["build", "build", "available", "Designate explored floor cells for free torches placed by miners."],
+	World.PlayerMode.TORCH: ["build", "torch", "available", "Designate explored floor cells for free torches placed by miners."],
+	World.PlayerMode.CHOP: ["build", "chop", "available", "Designate explored trees for miners to fell into logs."],
 }
 
 

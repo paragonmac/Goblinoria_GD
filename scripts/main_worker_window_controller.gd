@@ -519,5 +519,7 @@ func _task_type_text(task_type: int) -> String:
 			return "Haul"
 		TaskQueue.TaskType.TORCH:
 			return "Torch"
+		TaskQueue.TaskType.CHOP:
+			return "Chop"
 		_:
 			return "Task"

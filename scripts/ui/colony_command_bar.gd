@@ -28,6 +28,7 @@ const TOOL_LAYOUT := [
 	{"icon": "erase", "caption": "Erase", "modes": [World.PlayerMode.ERASE]},
 	{"icon": "stockpile", "caption": "Stockpile", "modes": [World.PlayerMode.STOCKPILE]},
 	{"icon": "build", "caption": "Torch", "modes": [World.PlayerMode.TORCH]},
+	{"icon": "dig", "caption": "Chop", "modes": [World.PlayerMode.CHOP]},
 ]
 const OPTION_HINTS := {
 	World.PlayerMode.INFORMATION: ["inspect", "Click a block to see it and everything on it"],
@@ -36,6 +37,7 @@ const OPTION_HINTS := {
 	World.PlayerMode.ERASE: ["erase", "Cancels pending jobs, stockpile cells and torches (not demolition)"],
 	World.PlayerMode.STOCKPILE: ["stockpile", "Drag to designate a stockpile; select one to edit it"],
 	World.PlayerMode.TORCH: ["build", "Drag to designate explored solid floors; miners place torches for free"],
+	World.PlayerMode.CHOP: ["dig", "Click or drag trees in explored areas; miners fell them for logs"],
 }
 
 var ui

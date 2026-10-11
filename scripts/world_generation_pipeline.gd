@@ -61,6 +61,7 @@ var temperature := PackedFloat32Array()
 var biome := PackedByteArray()
 var soil_region := PackedByteArray()
 var feature_reserved := PackedByteArray()
+var generated_trees: Dictionary = {}
 var pipeline_metrics: Dictionary = {}
 var progress_callback := Callable()
 var biome_counts := PackedInt32Array()
@@ -116,6 +117,7 @@ func generate(config: Dictionary) -> Dictionary:
 	pipeline_metrics["total_ms"] = _elapsed_ms(total_start_usec)
 	return {
 		"chunks": chunks,
+		"trees": generated_trees,
 		"maps": {
 			"elevation": elevation,
 			"moisture": moisture,
@@ -126,6 +128,30 @@ func generate(config: Dictionary) -> Dictionary:
 		},
 		"metrics": pipeline_metrics,
 	}
+
+
+func generate_tree_attachments(config: Dictionary) -> Dictionary:
+	_apply_config(config)
+	_configure_noises()
+	_resize_maps()
+	_reset_generation_stats()
+	_build_climate_maps()
+	_build_biome_map()
+	_configure_terrain_material_generator()
+	_build_geology_maps()
+	var volume := PackedByteArray()
+	volume.resize(world_size_x * world_size_y * world_size_z)
+	volume.fill(World.BLOCK_ID_AIR)
+	for local_z in range(world_size_z):
+		for local_x in range(world_size_x):
+			var surface_y: int = elevation[_map_index(local_x, local_z)]
+			volume[_volume_index(local_x, surface_y, local_z)] = World.BLOCK_ID_GRANITE
+	_apply_surface_blocks(volume)
+	_apply_ramps(volume)
+	_configure_vegetation_generator()
+	vegetation_generator.place_flowers(volume)
+	generated_trees = vegetation_generator.place_trees(volume, world_min_block_x, world_min_block_z, 0, 0)
+	return generated_trees.duplicate(true)
 
 func _set_progress_callback(value: Variant) -> void:
 	if typeof(value) == TYPE_CALLABLE:
@@ -321,6 +347,7 @@ func _apply_ramps(volume: PackedByteArray) -> void:
 func _place_flowers(volume: PackedByteArray) -> void:
 	vegetation_generator.place_flowers(volume)
 	feature_reserved = vegetation_generator.get_feature_reserved()
+	generated_trees = vegetation_generator.place_trees(volume, world_min_block_x, world_min_block_z, 0, 0)
 
 
 func _final_cleanup(volume: PackedByteArray) -> void:

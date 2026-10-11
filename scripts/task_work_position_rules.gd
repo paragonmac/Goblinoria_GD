@@ -57,7 +57,7 @@ static func task_work_positions(
 	task_type: int
 ) -> Array[Vector3i]:
 	match task_type:
-		TaskQueue.TaskType.DIG, TaskQueue.TaskType.PLACE, TaskQueue.TaskType.TORCH:
+		TaskQueue.TaskType.DIG, TaskQueue.TaskType.PLACE, TaskQueue.TaskType.TORCH, TaskQueue.TaskType.CHOP:
 			return _cardinal_work_positions(world, pathfinder, target)
 	var empty: Array[Vector3i] = []
 	return empty
@@ -70,7 +70,7 @@ static func can_work_task_from(
 	task_pos: Vector3i,
 	task_type: int
 ) -> bool:
-	if task_type != TaskQueue.TaskType.DIG and task_type != TaskQueue.TaskType.PLACE and task_type != TaskQueue.TaskType.TORCH:
+	if task_type != TaskQueue.TaskType.DIG and task_type != TaskQueue.TaskType.PLACE and task_type != TaskQueue.TaskType.TORCH and task_type != TaskQueue.TaskType.CHOP:
 		return false
 	return can_work_face_from(world, pathfinder, worker_pos, task_pos)
 

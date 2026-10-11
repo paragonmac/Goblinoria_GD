@@ -7,6 +7,9 @@ const WorldGenerationSharedScript = preload("res://scripts/world/world_generatio
 const SEED_MASK := WorldGenerationSharedScript.SEED_MASK
 const FLOWER_BASE_CHANCE := 0.008
 const FLOWER_BIOME_BONUS := 0.025
+const TREE_FOREST_CHANCE := 0.12
+const TREE_PLAINS_CHANCE := 0.006
+const TREE_OTHER_CHANCE := 0.0015
 
 var world_seed: int = 0
 var world_size_x: int = 0
@@ -20,6 +23,7 @@ var biome := PackedByteArray()
 var feature_reserved := PackedByteArray()
 
 var flowers_placed: int = 0
+var trees_placed: Dictionary = {}
 
 
 func configure(
@@ -42,6 +46,7 @@ func configure(
 	biome_plains = int(biome_ids.get("plains", 0))
 	biome_forest = int(biome_ids.get("forest", 0))
 	flowers_placed = 0
+	trees_placed.clear()
 
 
 func place_flowers(volume: PackedByteArray) -> void:
@@ -77,6 +82,63 @@ func final_cleanup(volume: PackedByteArray) -> void:
 					volume[idx] = World.BLOCK_ID_GRASS
 
 
+
+func place_trees(volume: PackedByteArray, world_min_x: int, world_min_z: int, spawn_x: int = 0, spawn_z: int = 0) -> Dictionary:
+	var accepted: Dictionary = {}
+	for local_z in range(1, world_size_z - 1):
+		for local_x in range(1, world_size_x - 1):
+			var wx: int = world_min_x + local_x
+			var wz: int = world_min_z + local_z
+			if Vector2(wx - spawn_x, wz - spawn_z).length_squared() <= 225.0:
+				continue
+			var map_idx: int = _map_index(local_x, local_z)
+			if feature_reserved[map_idx] != 0:
+				continue
+			var surface_y: int = elevation[map_idx]
+			if surface_y < 0 or surface_y + 1 >= world_size_y:
+				continue
+			var surface_idx: int = _volume_index(local_x, surface_y, local_z)
+			var surface_block: int = int(volume[surface_idx])
+			if surface_block != World.BLOCK_ID_GRASS and surface_block != World.BLOCK_ID_MOSS:
+				continue
+			if volume[_volume_index(local_x, surface_y + 1, local_z)] != World.BLOCK_ID_AIR:
+				continue
+			var chance: float = TREE_OTHER_CHANCE
+			if biome[map_idx] == biome_forest:
+				chance = TREE_FOREST_CHANCE
+			elif biome[map_idx] == biome_plains:
+				chance = TREE_PLAINS_CHANCE
+			if _rand01(wx, wz, 0xA731) >= chance:
+				continue
+			var crowded := false
+			for dx in range(-1, 2):
+				for dz in range(-1, 2):
+					if accepted.has(Vector2i(wx + dx, wz + dz)) and dx * dx + dz * dz < 4:
+						crowded = true
+						break
+				if crowded:
+					break
+			if crowded:
+				continue
+			accepted[Vector2i(wx, wz)] = true
+			var kind := WorldTreeKindScript.KIND_OAK
+			var kind_roll := _hash_u31(wx, 1, wz, 0xA732) & 0xffff
+			if kind_roll < 16384:
+				kind = WorldTreeKindScript.KIND_BUSH
+			elif kind_roll < 32768:
+				kind = WorldTreeKindScript.KIND_PINE
+			var height := 1
+			match kind:
+				WorldTreeKindScript.KIND_OAK:
+					height = 5 + (_hash_u31(wx, 2, wz, 0xA733) % 3)
+				WorldTreeKindScript.KIND_PINE:
+					height = 6 + (_hash_u31(wx, 2, wz, 0xA733) % 4)
+			var variant := _hash_u31(wx, 3, wz, 0xA734) & 0xff
+			var base := Vector3i(wx, surface_y + 1, wz)
+			trees_placed[base] = {"kind": kind, "variant": variant, "height": height}
+	return trees_placed.duplicate(true)
+
+
 func get_feature_reserved() -> PackedByteArray:
 	return feature_reserved
 
@@ -85,6 +147,9 @@ func get_stats() -> Dictionary:
 	return {
 		"flowers_placed": flowers_placed,
 	}
+
+
+const WorldTreeKindScript = preload("res://scripts/world/tree_store.gd")
 
 
 func _rand01(a: int, b: int, salt: int) -> float:

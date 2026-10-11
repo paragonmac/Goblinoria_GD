@@ -36,7 +36,7 @@ static func is_valid_setting(work_id: String, value: int) -> bool:
 static func task_work_id(task_type: int) -> String:
 	match task_type:
 		TaskQueue.TaskType.HAUL: return "hauling"
-		TaskQueue.TaskType.DIG: return "mining"
+		TaskQueue.TaskType.DIG, TaskQueue.TaskType.CHOP: return "mining"
 		TaskQueue.TaskType.PLACE, TaskQueue.TaskType.STAIRS, TaskQueue.TaskType.TORCH: return "building"
 	return ""
 

@@ -33,6 +33,8 @@ const CARDINAL_DIRS_3D := [
 #region State
 var debug_profiler: DebugProfiler
 var last_search_stats := {}
+var _obstruction_world_id := 0
+var _obstruction_query := Callable()
 #endregion
 
 
@@ -58,7 +60,17 @@ func is_walkable(world, x: int, y: int, z: int) -> bool:
 		return false
 	if is_blocking(world, current_block):
 		return false
+	if _is_cell_obstructed(world, Vector3i(x, y, z)):
+		return false
 	return true
+
+
+func _is_cell_obstructed(world, pos: Vector3i) -> bool:
+	var world_id: int = world.get_instance_id()
+	if world_id != _obstruction_world_id:
+		_obstruction_world_id = world_id
+		_obstruction_query = Callable(world, "is_cell_obstructed") if world.has_method("is_cell_obstructed") else Callable()
+	return _obstruction_query.is_valid() and bool(_obstruction_query.call(pos))
 
 
 func can_traverse(world, from: Vector3i, to: Vector3i) -> bool:

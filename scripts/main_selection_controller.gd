@@ -134,6 +134,9 @@ func update_hover_preview() -> void:
 	if world.player_mode == World.PlayerMode.TORCH:
 		pos = _torch_target_from_hit(hit_pos)
 		valid = _can_place_torch_at(pos)
+	elif world.player_mode == World.PlayerMode.CHOP:
+		pos = _chop_target_from_hit(hit_pos)
+		valid = _is_explored(hit_pos) and _can_chop_at(pos)
 	elif world.player_mode == World.PlayerMode.STOCKPILE:
 		pos = _stockpile_target_from_hit(hit_pos)
 		valid = _can_create_stockpile_at(pos)
@@ -207,6 +210,9 @@ func _update_drag_preview() -> void:
 		return
 	if world.player_mode == World.PlayerMode.TORCH:
 		world.set_drag_preview_entries(_build_torch_preview_entries(drag_rect), world.player_mode)
+		return
+	if world.player_mode == World.PlayerMode.CHOP:
+		world.set_drag_preview_entries(_build_chop_preview_entries(drag_rect), world.player_mode)
 		return
 	if world.player_mode == World.PlayerMode.STOCKPILE:
 		world.set_drag_preview_entries(_build_stockpile_preview_entries(drag_rect), world.player_mode)
@@ -336,6 +342,24 @@ func _enqueue_rect_tasks(rect: Dictionary) -> void:
 				results.append({"pos": pos, "queued": false, "reason": _torch_reject_reason(pos)})
 		_trace_selection("drag", min_x, max_x, min_z, max_z, y, results)
 		return
+	if world != null and world.player_mode == World.PlayerMode.CHOP:
+		for hit_pos: Vector3i in _rect_positions(rect):
+			var tree_pos := _chop_target_from_hit(hit_pos)
+			if not _is_explored(hit_pos) or not _is_explored(tree_pos):
+				results.append({"pos": tree_pos, "queued": false, "reason": "unexplored"})
+			elif _can_chop_at(tree_pos):
+				var queued: bool = world.queue_task_request(TaskQueue.TaskType.CHOP, tree_pos, 0)
+				results.append({"pos": tree_pos, "queued": queued, "reason": "queued" if queued else "duplicate"})
+			else:
+				results.append({"pos": tree_pos, "queued": false, "reason": "no_tree"})
+		_trace_selection("drag", min_x, max_x, min_z, max_z, y, results)
+		return
+	if world != null and world.player_mode == World.PlayerMode.ERASE:
+		for hit_pos: Vector3i in _rect_positions(rect):
+			var erase_pos := _erase_target_from_hit(hit_pos)
+			results.append(_enqueue_task_at(erase_pos.x, erase_pos.y, erase_pos.z))
+		_trace_selection("drag", min_x, max_x, min_z, max_z, y, results)
+		return
 
 	for x in range(min_x, max_x + 1):
 		for z in range(min_z, max_z + 1):
@@ -400,6 +424,16 @@ func _enqueue_task_at(x: int, y: int, z: int) -> Dictionary:
 				result["reason"] = "queued" if result["queued"] else "duplicate"
 			else:
 				result["reason"] = _torch_reject_reason(pos)
+		World.PlayerMode.CHOP:
+			var tree_pos := _chop_target_from_hit(pos)
+			result["pos"] = tree_pos
+			if not _is_explored(pos) or not _is_explored(tree_pos):
+				result["reason"] = "unexplored"
+			elif _can_chop_at(tree_pos):
+				result["queued"] = world.queue_task_request(TaskQueue.TaskType.CHOP, tree_pos, 0)
+				result["reason"] = "queued" if result["queued"] else "duplicate"
+			else:
+				result["reason"] = "no_tree"
 		World.PlayerMode.DIG:
 			var reject_reason := _dig_selection_reject_reason(pos)
 			if reject_reason == "not_diggable" and not _is_explored(pos):
@@ -481,7 +515,7 @@ func _trace_selection(
 	if unexplored > 0 and queued.is_empty() and kind == "drag":
 		message = "%d cells unexplored" % unexplored
 	elif results.size() == 1 and queued.is_empty():
-		var reasons := {"no_stock": "Requires one stored iron ore", "not_empty": "Target is occupied", "no_valid_stockpile_cells": "No valid stockpile cells", "unsupported": "Requires a solid floor", "torch_exists": "Already has a torch", "torch_unavailable": "No valid torch cells", "duplicate": "Already designated", "nothing_to_erase": "Nothing to erase", "unexplored": "Unexplored"}
+		var reasons := {"no_stock": "Requires one stored iron ore", "not_empty": "Target is occupied", "no_valid_stockpile_cells": "No valid stockpile cells", "unsupported": "Requires a solid floor", "torch_exists": "Already has a torch", "torch_unavailable": "No valid torch cells", "duplicate": "Already designated", "nothing_to_erase": "Nothing to erase", "unexplored": "Unexplored", "no_tree": "No tree here"}
 		message = str(results[0].get("feedback", reasons.get(results[0].get("reason", ""), "Action unavailable: " + str(results[0].get("reason", "unknown")))))
 	elif unexplored > 0:
 		message += ", %d cells unexplored" % unexplored
@@ -517,6 +551,7 @@ func _uses_hover_preview() -> bool:
 		or world.player_mode == World.PlayerMode.ERASE
 		or world.player_mode == World.PlayerMode.STOCKPILE
 		or world.player_mode == World.PlayerMode.TORCH
+		or world.player_mode == World.PlayerMode.CHOP
 	)
 
 
@@ -552,7 +587,8 @@ func _flight_preview_entries(anchor: Vector3i) -> Array[Dictionary]:
 
 func _build_erase_preview_entries(rect: Dictionary) -> Array[Dictionary]:
 	var entries: Array[Dictionary] = []
-	for pos: Vector3i in _rect_positions(rect):
+	for hit_pos: Vector3i in _rect_positions(rect):
+		var pos := _erase_target_from_hit(hit_pos)
 		entries.append({
 			"pos": pos,
 			"valid": _can_erase_at(pos),
@@ -651,6 +687,28 @@ func _erase_target_from_hit(hit_pos: Vector3i) -> Vector3i:
 
 func _can_erase_at(pos: Vector3i) -> bool:
 	return world != null and _is_explored(pos) and (world.has_pending_task_request_at(pos) or world.is_stockpile_cell(pos) or world.torch_store.has_torch(pos))
+
+
+func _chop_target_from_hit(hit_pos: Vector3i) -> Vector3i:
+	if world == null:
+		return hit_pos
+	if world.tree_store.has_tree(hit_pos):
+		return hit_pos
+	var above := hit_pos + Vector3i.UP
+	return above if world.tree_store.has_tree(above) else hit_pos
+
+
+func _can_chop_at(pos: Vector3i) -> bool:
+	return world != null and world.tree_store.has_tree(pos) and _is_explored(pos) \
+		and world.task_queue.get_active_tasks_at(pos).is_empty()
+
+
+func _build_chop_preview_entries(rect: Dictionary) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for hit_pos: Vector3i in _rect_positions(rect):
+		var tree_pos := _chop_target_from_hit(hit_pos)
+		result.append({"pos": tree_pos, "valid": _is_explored(hit_pos) and _can_chop_at(tree_pos)})
+	return result
 
 
 func _torch_target_from_hit(hit_pos: Vector3i) -> Vector3i:

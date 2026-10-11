@@ -257,6 +257,7 @@ static func tool_hint(mode: int) -> String:
 		World.PlayerMode.PLACE: return "Place one block using one stored iron ore. Construction delivery is not implemented yet."
 		World.PlayerMode.ERASE: return "Cancel pending jobs or remove stockpiles and torches. Not demolition or undo."
 		World.PlayerMode.TORCH: return "Designate explored floor cells for miners to illuminate with free torches."
+		World.PlayerMode.CHOP: return "Designate explored trees for miners to fell into logs."
 		World.PlayerMode.UP_STAIRS, World.PlayerMode.DOWN_STAIRS: return "Place one 2 x 1 stair flight. Mouse wheel rotates 90 degrees; red ghost means unavailable. No material cost."
 	return Tools.mode_label(mode)
 

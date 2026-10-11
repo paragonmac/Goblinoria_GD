@@ -4,6 +4,8 @@ class_name OverlayRenderer
 
 const ChunkMesherScript = preload("res://scripts/rendering/chunk_mesher.gd")
 const TorchMeshBuilder = preload("res://scripts/rendering/torch_mesh_builder.gd")
+const ItemMeshBuilder = preload("res://scripts/rendering/item_mesh_builder.gd")
+const PropMeshUtil = preload("res://scripts/rendering/prop_mesh_util.gd")
 const StairFlightScript = preload("res://scripts/stair_flight.gd")
 
 signal excavation_preview_changed(cells: Array[Vector3i])
@@ -34,27 +36,7 @@ const DRAG_ERASE_COLOR := Color(0.95, 0.95, 0.95)
 const DRAG_STOCKPILE_COLOR := Color(0.15, 0.85, 0.85)
 const DRAG_DEFAULT_COLOR := Color(0.8, 0.8, 0.8)
 const DRAG_INVALID_COLOR := Color(1.0, 0.15, 0.15)
-const ITEM_OVERLAY_SIZE := Vector3(0.35, 0.35, 0.35)
-const ITEM_SPRITE_SIZE := Vector2(0.46, 0.46)
-const ITEM_GROUND_OFFSET := -0.5 + ITEM_SPRITE_SIZE.y * 0.5 + 0.02
 const STORAGE_RENDER_MARGIN := 0.55
-const ITEM_ATLAS_PATH := "res://assets/textures/fantasy_resource_icons_6x6_real_alpha.png"
-const ITEM_ATLAS_COLUMNS := 6
-const ITEM_ATLAS_ROWS := 6
-const ITEM_ATLAS_TILES := {
-	1: 7,   # granite
-	2: 1,   # dirt
-	3: 1,   # clay
-	4: 2,   # sandstone
-	5: 6,   # limestone
-	6: 13,  # basalt
-	7: 8,   # slate
-	8: 26,  # iron ore
-	9: 8,   # coal
-	10: 0,  # grass
-	15: 6,  # gravel
-	16: 3,  # moss
-}
 const STOCKPILE_OVERLAY_SIZE := Vector3(1.0, 0.06, 1.0)
 const STOCKPILE_GROUND_OFFSET := -0.5 + STOCKPILE_OVERLAY_SIZE.y * 0.5 + 0.01
 const STOCKPILE_OVERLAY_COLOR := Color(0.15, 0.85, 0.85, 0.25)
@@ -90,42 +72,8 @@ void fragment() {
 	ALPHA = albedo_color.a;
 }
 """
-const ITEM_ATLAS_SHADER_CODE := """shader_type spatial;
-render_mode unshaded, cull_disabled, depth_prepass_alpha;
-
-uniform sampler2D atlas_texture : source_color, filter_linear_mipmap_anisotropic;
-uniform vec2 atlas_cell = vec2(0.0);
-uniform vec2 atlas_grid = vec2(6.0);
-uniform float top_render_y = 1000.0;
-uniform float top_render_margin = 0.55;
-
-varying float world_y;
-
-void vertex() {
-	world_y = (MODEL_MATRIX * vec4(VERTEX, 1.0)).y;
-	MODELVIEW_MATRIX = VIEW_MATRIX * mat4(
-		INV_VIEW_MATRIX[0],
-		INV_VIEW_MATRIX[1],
-		INV_VIEW_MATRIX[2],
-		MODEL_MATRIX[3]
-	);
-	MODELVIEW_NORMAL_MATRIX = mat3(MODELVIEW_MATRIX);
-}
-
-void fragment() {
-	if (world_y > top_render_y + 0.5 + top_render_margin) {
-		discard;
-	}
-	vec2 atlas_uv = (UV + atlas_cell) / atlas_grid;
-	vec4 sampled = texture(atlas_texture, atlas_uv);
-	ALBEDO = sampled.rgb;
-	ALPHA = sampled.a;
-	ALPHA_SCISSOR_THRESHOLD = 0.1;
-}
-"""
 var overlay_shader: Shader = null
 var downstairs_overlay_shader: Shader = null
-var item_atlas_shader: Shader = null
 var all_overlay_materials: Array = []
 #endregion
 
@@ -141,8 +89,10 @@ var drag_materials: Dictionary = {}
 var drag_preview_mode := -1
 var item_overlays: Dictionary = {}
 var stockpile_overlays: Dictionary = {}
-var item_materials: Dictionary = {}
-var item_atlas_texture: Texture2D
+var item_prop_material: ShaderMaterial
+var _item_meshes: Dictionary = {} # Vector2i(material id, pieces) -> ArrayMesh
+var _last_items: Dictionary = {}
+var _item_render_level := -1
 var stockpile_material: ShaderMaterial
 var stair_preview_mesher = ChunkMesherScript.new()
 var stair_preview_mesh_cache: Dictionary = {}
@@ -160,13 +110,13 @@ func initialize(world_ref: World) -> void:
 	world = world_ref
 	_ensure_shader()
 	_create_torch_multimesh()
-	item_atlas_texture = _load_item_atlas_texture()
-	if item_atlas_texture == null:
-		push_warning("Item drop atlas failed to load: %s" % ITEM_ATLAS_PATH)
+	item_prop_material = PropMeshUtil.make_prop_material()
 
 
 func _process(_delta: float) -> void:
 	_sync_torch_multimesh()
+	if world != null and _item_render_level != -1 and _item_render_level != world.top_render_y:
+		_update_item_overlays(_last_items)
 
 
 func _create_torch_multimesh() -> void:
@@ -221,27 +171,12 @@ func _ensure_shader() -> void:
 	if overlay_shader == null:
 		overlay_shader = Shader.new()
 		overlay_shader.code = OVERLAY_SHADER_CODE
-	if item_atlas_shader == null:
-		item_atlas_shader = Shader.new()
-		item_atlas_shader.code = ITEM_ATLAS_SHADER_CODE
 	if downstairs_overlay_shader == null:
 		downstairs_overlay_shader = Shader.new()
 		downstairs_overlay_shader.code = OVERLAY_SHADER_CODE.replace(
 			"depth_draw_never;",
 			"depth_draw_never, depth_test_disabled;"
 		)
-
-
-func _load_item_atlas_texture() -> Texture2D:
-	if ResourceLoader.exists(ITEM_ATLAS_PATH):
-		var imported_texture := load(ITEM_ATLAS_PATH) as Texture2D
-		if imported_texture != null:
-			return imported_texture
-	var image := Image.new()
-	var err := image.load(ITEM_ATLAS_PATH)
-	if err != OK:
-		return null
-	return ImageTexture.create_from_image(image)
 
 
 func _create_overlay_shader_material(
@@ -752,28 +687,43 @@ func _is_explored(pos: Vector3i) -> bool:
 
 
 func _update_item_overlays(items: Dictionary) -> void:
-	var live_ids: Dictionary = {}
+	# Loose and stored stacks render as blocky piles (item_mesh_builder), one
+	# MultiMesh per (material, piece count); hidden on unexplored cells.
+	_last_items = items
+	_item_render_level = world.top_render_y
+	var groups: Dictionary = {}
 	for item_id in items.keys():
 		var item: Dictionary = items[item_id]
 		if bool(item.get("is_carried", false)):
 			continue
 		var pos: Vector3i = item.get("pos", Vector3i.ZERO)
-		if not _is_explored(pos):
+		if not _is_explored(pos) or not world.is_visible_at_level(pos.y - 1):
 			continue
-		live_ids[item_id] = true
-		var overlay: MeshInstance3D
-		if not item_overlays.has(item_id):
-			overlay = _create_item_overlay(int(item.get("material_id", 0)))
-			item_overlays[item_id] = overlay
-		else:
-			overlay = item_overlays[item_id]
-		overlay.position = Vector3(pos.x, pos.y + ITEM_GROUND_OFFSET, pos.z)
-		overlay.visible = world.is_visible_at_level(pos.y - 1)
-		overlay.material_override = _get_item_material(int(item.get("material_id", 0)))
+		var key := Vector2i(int(item.get("material_id", 0)), ItemMeshBuilder.pieces_for_count(int(item.get("count", 1))))
+		if not groups.has(key):
+			groups[key] = []
+		var turn := Basis(Vector3.UP, fmod(float(int(item_id)) * 2.399, TAU))
+		groups[key].append(Transform3D(turn, Vector3(pos)))
 	for key in item_overlays.keys():
-		if not live_ids.has(key):
-			item_overlays[key].queue_free()
-			item_overlays.erase(key)
+		if not groups.has(key):
+			(item_overlays[key] as MultiMeshInstance3D).multimesh.instance_count = 0
+	for key: Vector2i in groups.keys():
+		var instance: MultiMeshInstance3D = item_overlays.get(key)
+		if instance == null:
+			if not _item_meshes.has(key):
+				_item_meshes[key] = ItemMeshBuilder.build(key.x, key.y)
+			instance = MultiMeshInstance3D.new()
+			var multimesh := MultiMesh.new()
+			multimesh.transform_format = MultiMesh.TRANSFORM_3D
+			multimesh.mesh = _item_meshes[key]
+			instance.multimesh = multimesh
+			instance.material_override = item_prop_material
+			add_child(instance)
+			item_overlays[key] = instance
+		var transforms: Array = groups[key]
+		instance.multimesh.instance_count = transforms.size()
+		for index in range(transforms.size()):
+			instance.multimesh.set_instance_transform(index, transforms[index])
 
 
 func _update_stockpile_overlays(stockpiles: Dictionary) -> void:
@@ -802,21 +752,6 @@ func _update_stockpile_overlays(stockpiles: Dictionary) -> void:
 			stockpile_overlays.erase(key)
 
 
-func _create_item_overlay(material_id: int) -> MeshInstance3D:
-	var mesh_instance := MeshInstance3D.new()
-	if item_atlas_texture != null and ITEM_ATLAS_TILES.has(material_id):
-		var quad := QuadMesh.new()
-		quad.size = ITEM_SPRITE_SIZE
-		mesh_instance.mesh = quad
-	else:
-		var box := BoxMesh.new()
-		box.size = ITEM_OVERLAY_SIZE
-		mesh_instance.mesh = box
-	_apply_overlay_instance_settings(mesh_instance)
-	add_child(mesh_instance)
-	return mesh_instance
-
-
 func _create_stockpile_overlay() -> MeshInstance3D:
 	var mesh_instance := MeshInstance3D.new()
 	var box := BoxMesh.new()
@@ -826,36 +761,6 @@ func _create_stockpile_overlay() -> MeshInstance3D:
 	_apply_overlay_instance_settings(mesh_instance)
 	add_child(mesh_instance)
 	return mesh_instance
-
-
-func _get_item_material(material_id: int) -> ShaderMaterial:
-	if item_materials.has(material_id):
-		return item_materials[material_id]
-	if item_atlas_texture != null and ITEM_ATLAS_TILES.has(material_id):
-		var tile_index: int = int(ITEM_ATLAS_TILES[material_id])
-		var atlas_material := ShaderMaterial.new()
-		atlas_material.shader = item_atlas_shader
-		atlas_material.set_shader_parameter("atlas_texture", item_atlas_texture)
-		atlas_material.set_shader_parameter(
-			"atlas_cell",
-			Vector2(tile_index % ITEM_ATLAS_COLUMNS, floori(float(tile_index) / ITEM_ATLAS_COLUMNS))
-		)
-		atlas_material.set_shader_parameter(
-			"atlas_grid",
-			Vector2(ITEM_ATLAS_COLUMNS, ITEM_ATLAS_ROWS)
-		)
-		if world != null:
-			atlas_material.set_shader_parameter("top_render_y", float(world.top_render_y))
-		atlas_material.set_shader_parameter("top_render_margin", STORAGE_RENDER_MARGIN)
-		atlas_material.render_priority = 100
-		all_overlay_materials.append(atlas_material)
-		item_materials[material_id] = atlas_material
-		return atlas_material
-	var color := world.get_block_color(material_id)
-	color.a = 0.95
-	var material := _create_overlay_shader_material(color, 0.05, STORAGE_RENDER_MARGIN)
-	item_materials[material_id] = material
-	return material
 
 
 func _get_stockpile_material() -> ShaderMaterial:

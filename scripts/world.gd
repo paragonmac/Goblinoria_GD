@@ -36,6 +36,7 @@ const StairFlightScript = preload("res://scripts/stair_flight.gd")
 const LightFieldScript = preload("res://scripts/world/light_field.gd")
 const GoblinLightScript = preload("res://scripts/world/goblin_light.gd")
 const TorchStoreScript = preload("res://scripts/world/torch_store.gd")
+const TreeStoreScript = preload("res://scripts/world/tree_store.gd")
 const ChunkDataType = ChunkDataScript
 #endregion
 
@@ -227,6 +228,7 @@ var light_field_built: bool = false
 var light_field_arena_cook_seen: bool = false
 var goblin_light: GoblinLightScript = GoblinLightScript.new()
 var torch_store = TorchStoreScript.new()
+var tree_store = TreeStoreScript.new()
 var streaming: WorldStreamingScript
 var raycaster: WorldRaycasterScript
 var debug_profiler: DebugProfiler
@@ -252,7 +254,7 @@ var worker_activity_timer: float = 0.0
 #endregion
 
 #region Player State
-enum PlayerMode {INFORMATION, DIG, PLACE, UP_STAIRS, DOWN_STAIRS, ERASE, STOCKPILE, TORCH}
+enum PlayerMode {INFORMATION, DIG, PLACE, UP_STAIRS, DOWN_STAIRS, ERASE, STOCKPILE, TORCH, CHOP}
 var player_mode := PlayerMode.DIG
 var selected_blocks: Dictionary = {}
 #endregion
@@ -312,6 +314,10 @@ func init_world(seed_world_flag: bool = true) -> void:
 	goblin_light = GoblinLightScript.new()
 	torch_store = TorchStoreScript.new()
 	torch_store.bind_world(self)
+	if tree_store != null:
+		tree_store.clear()
+	tree_store = TreeStoreScript.new()
+	tree_store.set_chunk_size(CHUNK_SIZE)
 	light_field_built = false
 	light_field_arena_cook_seen = false
 	runtime_epoch += 1
@@ -395,6 +401,10 @@ func load_world(path: String) -> bool:
 		goblin_light = GoblinLightScript.new()
 		torch_store = TorchStoreScript.new()
 		torch_store.bind_world(self)
+		if tree_store != null:
+			tree_store.clear()
+		tree_store = TreeStoreScript.new()
+		tree_store.set_chunk_size(CHUNK_SIZE)
 		clear_tasks()
 		save_load.restore_saved_tasks()
 	if ok and renderer != null:
@@ -571,6 +581,14 @@ func set_block_raw(x: int, y: int, z: int, value: int, mark_dirty: bool) -> void
 				var wall_torch_pos := changed_pos + direction
 				if torch_store.has_torch(wall_torch_pos) and torch_store.facing(wall_torch_pos) == -direction:
 					_reassess_torch_support(wall_torch_pos)
+	if tree_store != null:
+		var changed_pos := Vector3i(x, y, z)
+		if tree_store.has_tree(changed_pos) and is_block_solid_id(value):
+			remove_tree(changed_pos, false)
+		if is_block_solid_id(prev) and not is_block_solid_id(value):
+			var supported_tree := changed_pos + Vector3i.UP
+			if tree_store.has_tree(supported_tree):
+				remove_tree(supported_tree, true)
 	# Path snapshots key on block content, not on render state.
 	chunk.block_revision += 1
 	if mark_dirty:
@@ -646,6 +664,70 @@ func torch_mount_facing(pos: Vector3i) -> Vector3i:
 		if is_block_solid_id(get_block_no_generate(wall_pos.x, wall_pos.y, wall_pos.z)):
 			return direction
 	return Vector3i.ZERO
+
+
+func is_cell_obstructed(pos: Vector3i) -> bool:
+	return tree_store != null and tree_store.has_tree(pos)
+
+
+func add_generated_tree(base: Vector3i, kind: int, variant: int, height: int) -> bool:
+	return _add_tree_attachment(base, kind, variant, height)
+
+
+func add_tree(base: Vector3i, kind: int, variant: int, height: int) -> bool:
+	return _add_tree_attachment(base, kind, variant, height)
+
+
+func _add_tree_attachment(base: Vector3i, kind: int, variant: int, height: int) -> bool:
+	if tree_store == null or not tree_store.add_tree(base, kind, variant, height):
+		return false
+	_bump_attachment_path_revision(base)
+	return true
+
+
+func remove_tree(base: Vector3i, drop_logs: bool = false) -> bool:
+	if tree_store == null:
+		return false
+	var tree: Dictionary = tree_store.tree_at(base)
+	if tree.is_empty() or not tree_store.remove_tree(base):
+		return false
+	_bump_attachment_path_revision(base)
+	if task_manager != null and task_queue != null:
+		for task in task_queue.get_active_tasks_at(base):
+			if task.type != TaskQueue.TaskType.CHOP:
+				continue
+			if task.status == TaskQueue.TaskStatus.IN_PROGRESS and task.assigned_worker != null:
+				task.assigned_worker.interrupt_task_and_idle(task_queue, self)
+			if task.status == TaskQueue.TaskStatus.PENDING:
+				task_manager.cancel_pending_task(task.id, task)
+	if drop_logs:
+		spawn_tree_drops(tree, base)
+	return true
+
+
+func _bump_attachment_path_revision(pos: Vector3i) -> void:
+	var chunk: ChunkDataType = get_chunk(world_to_chunk_coords(pos.x, pos.y, pos.z))
+	if chunk != null:
+		chunk.block_revision += 1
+	if task_manager != null:
+		task_manager.invalidate_task_accessibility(pos)
+
+
+func spawn_tree_drops(tree: Dictionary, pos: Vector3i) -> Array[int]:
+	var kind := int(tree.get("kind", -1))
+	var count := 0
+	match kind:
+		TreeStoreScript.KIND_OAK:
+			count = drop_rng.randi_range(3, 4)
+		TreeStoreScript.KIND_PINE:
+			count = drop_rng.randi_range(4, 5)
+	if count <= 0:
+		return []
+	var item_id := item_store.add_stack(BLOCK_ID_LOG, count, item_rest_cell(pos))
+	if item_id < 0:
+		return []
+	trace_system_event("item_drop_spawned", "item_id=%d material=%d count=%d pos=%d,%d,%d source=tree" % [item_id, BLOCK_ID_LOG, count, pos.x, pos.y, pos.z])
+	return [item_id]
 
 
 func _reassess_torch_support(pos: Vector3i) -> void:

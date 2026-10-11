@@ -11,7 +11,7 @@ const WorldSaveTransactionScript = preload("res://scripts/world_save_transaction
 const TASK_FILE_NAME := "tasks.dat"
 const TASK_MAGIC := 0x5441534B
 const MAX_TASKS := 65536
-const SAVED_TYPES := [TaskQueue.TaskType.DIG, TaskQueue.TaskType.PLACE, TaskQueue.TaskType.STAIRS, TaskQueue.TaskType.TORCH]
+const SAVED_TYPES := [TaskQueue.TaskType.DIG, TaskQueue.TaskType.PLACE, TaskQueue.TaskType.STAIRS, TaskQueue.TaskType.TORCH, TaskQueue.TaskType.CHOP]
 const DATA_KEYS := ["flight", "rotation", "up", "footprint", "materials", "remove_stairs"]
 
 

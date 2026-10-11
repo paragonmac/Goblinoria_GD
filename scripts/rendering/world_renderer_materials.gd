@@ -97,11 +97,22 @@ func set_poly_debug_enabled(enabled: bool) -> void:
 
 ## SEE-ADR-021: binds the light/explored layer textures and darkness switches.
 var _light_params := {}
+var _prop_light_materials: Array[ShaderMaterial] = []
 
 func set_light_params(params: Dictionary) -> void:
 	for key in params:
 		_light_params[key] = params[key]
 	_apply_light_params(get_block_material() as ShaderMaterial)
+	for material: ShaderMaterial in _prop_light_materials:
+		_apply_light_params(material)
+
+
+## Props (trees, item piles) share the terrain's darkness uniforms.
+func register_light_material(material: ShaderMaterial) -> void:
+	if material == null or _prop_light_materials.has(material):
+		return
+	_prop_light_materials.append(material)
+	_apply_light_params(material)
 
 
 func _apply_light_params(material: ShaderMaterial) -> void:

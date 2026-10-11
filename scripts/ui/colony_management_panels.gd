@@ -108,6 +108,7 @@ static func _feature_icon(feature: Dictionary) -> String:
 			World.PlayerMode.ERASE: return "erase"
 			World.PlayerMode.STOCKPILE: return "stockpile"
 			World.PlayerMode.TORCH: return "build"
+			World.PlayerMode.CHOP: return "dig"
 	if action.begins_with("open:"):
 		return {"colony": "colony", "workers": "workers", "assignments": "jobs", "jobs": "tasks", "stockpiles": "stockpiles", "resources": "resources"}.get(action.trim_prefix("open:"), "more")
 	if action.begins_with("game:") or action.begins_with("debug:") or action.begins_with("diagnostics:"):
@@ -185,7 +186,7 @@ func _build_list(category: String, parent: VBoxContainer) -> void:
 	ui.filter.tooltip_text = "Filter"
 	var options: Array = ["All"]
 	if category in ["workers", "assignments"]: options.append_array(["Working", "Travelling", "Waiting", "Reserve", "Hauling", "Mining", "Building"])
-	if category == "jobs": options.append_array(["Pending", "Assigned", "Blocked", "Dig", "Place", "Stairs", "Haul", "Torch"])
+	if category == "jobs": options.append_array(["Pending", "Assigned", "Blocked", "Dig", "Place", "Stairs", "Haul", "Torch", "Chop"])
 	for value in options:
 		ui.filter.add_item(value)
 	parent.add_child(ui.filter)
@@ -215,8 +216,8 @@ func row_matches(row: Dictionary, query: String, filter_value: String) -> bool:
 	if filter == "assigned": return int(row.get("status", -1)) == TaskQueue.TaskStatus.IN_PROGRESS
 	if filter == "blocked": return int(row.get("accessibility", -1)) == TaskQueue.TaskAccessibility.UNREACHABLE
 	var task_type := int(row.get("task_type", -1))
-	if task_type >= 0 and task_type < 5:
-		return ["dig", "place", "stairs", "haul", "torch"][task_type] == filter
+	if task_type >= 0 and task_type < 6:
+		return ["dig", "place", "stairs", "haul", "torch", "chop"][task_type] == filter
 	return false
 
 func render_rows() -> void:
@@ -340,6 +341,8 @@ func update_details(kind: String, row: Dictionary) -> void:
 		detail_text.text += "\nLight S%d B%d%s" % [int(row.get("sky_light", 0)), int(row.get("block_light", 0)), " Explored" if bool(row.get("explored", false)) else ""]
 		if bool(row.get("torch", false)):
 			detail_text.text += "\nTorch"
+		if not str(row.get("tree_text", "")).is_empty():
+			detail_text.text += "\n" + str(row.tree_text)
 		var protection_reason := str(row.get("protection_reason", ""))
 		if not protection_reason.is_empty():
 			detail_text.text += "\nProtected: " + protection_reason.replace("_", " ")

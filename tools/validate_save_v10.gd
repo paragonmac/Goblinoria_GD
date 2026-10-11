@@ -1,5 +1,5 @@
 extends SceneTree
-## V11 torch facing and V10 migration contract.
+## V12 torch facing and V10 migration contract.
 
 const WorldSaveLoadScript = preload("res://scripts/world_save_load.gd")
 const TransactionScript = preload("res://scripts/world_save_transaction.gd")
@@ -31,26 +31,26 @@ func _run() -> void:
 	var source_slot := root_dir.path_join("v10.save")
 	var source_explored: PackedByteArray = source.light_field.explored.duplicate()
 	var source_torches := source.torch_store.torch_positions()
-	_check(source.save_world(source_slot), "write V11 fixture")
+	_check(source.save_world(source_slot), "write V12 fixture")
 	var reader := _make_world()
-	_check(reader.load_world(source_slot), "load V11 fixture")
+	_check(reader.load_world(source_slot), "load V12 fixture")
 	_load_fixture_chunks(reader)
 	reader.rebuild_light_field()
-	_check(reader.light_field.explored == source_explored, "V11 round trip preserves explored bytes")
-	_check(reader.torch_store.torch_positions().size() == source_torches.size() and reader.torch_store.has_torch(Vector3i(4, 20, 1)), "V11 restores torch positions")
-	_check(reader.torch_store.facing(Vector3i(4, 20, 1)) == Vector3i.LEFT, "V11 round trip preserves wall torch facing")
+	_check(reader.light_field.explored == source_explored, "V12 round trip preserves explored bytes")
+	_check(reader.torch_store.torch_positions().size() == source_torches.size() and reader.torch_store.has_torch(Vector3i(4, 20, 1)), "V12 restores torch positions")
+	_check(reader.torch_store.facing(Vector3i(4, 20, 1)) == Vector3i.LEFT, "V12 round trip preserves wall torch facing")
 	_check(reader.light_field.get_block_light(4, 20, 1) == 15 and reader.light_field.pending_events() == 0, "restored torch light is ready at level 15")
-	_check(reader.task_queue.has_active_task_at(Vector3i(6, 20, 1), TaskQueue.TaskType.TORCH), "V11 restores pending TORCH task")
+	_check(reader.task_queue.has_active_task_at(Vector3i(6, 20, 1), TaskQueue.TaskType.TORCH), "V12 restores pending TORCH task")
 	var support_changed_reader := _make_world()
-	_check(support_changed_reader.load_world(source_slot), "load V11 for stale torch support recovery")
+	_check(support_changed_reader.load_world(source_slot), "load V12 for stale torch support recovery")
 	_load_fixture_chunks(support_changed_reader)
 	support_changed_reader.set_block_raw(3, 20, 1, World.BLOCK_ID_AIR, false)
 	support_changed_reader.set_block_raw(5, 20, 1, World.BLOCK_ID_GRANITE, false)
 	support_changed_reader.rebuild_light_field()
 	_check(support_changed_reader.torch_store.facing(Vector3i(4, 20, 1)) == Vector3i.RIGHT,
-		"V11 restored torch remounts when its saved wall support is gone")
+		"V12 restored torch remounts when its saved wall support is gone")
 	var second_slot := root_dir.path_join("v10_second.save")
-	_check(reader.save_world(second_slot), "write second V11 fixture")
+	_check(reader.save_world(second_slot), "write second V12 fixture")
 	_check(FileAccess.get_file_as_bytes(source_slot.path_join("explored.dat")) == FileAccess.get_file_as_bytes(second_slot.path_join("explored.dat")), "explored.dat content is byte-identical after round trip")
 	_check(FileAccess.get_file_as_bytes(source_slot.path_join("torches.dat")) == FileAccess.get_file_as_bytes(second_slot.path_join("torches.dat")), "torches.dat content is byte-identical after round trip")
 	var legacy_torch_slot := root_dir.path_join("v10_torch_format.save")
@@ -91,15 +91,15 @@ func _run() -> void:
 
 	var future_slot := root_dir.path_join("v12.save")
 	_check(_copy_slot(source_slot.get_basename(), future_slot.get_basename()), "copy future-version fixture")
-	_check(source.save_load.metadata_save_load.write_world_meta(source, future_slot.get_basename(), 12, source.save_load._get_block_table_hash()), "write V12 metadata")
+	_check(source.save_load.metadata_save_load.write_world_meta(source, future_slot.get_basename(), 13, source.save_load._get_block_table_hash()), "write V12 metadata")
 	var future_reader := _make_world()
-	_check(not future_reader.load_world(future_slot), "V12 rejected")
+	_check(not future_reader.load_world(future_slot), "V13 rejected")
 
 	for world in [source, reader, support_changed_reader, legacy_reader, legacy_torch_reader, future_reader]:
 		if world.task_manager != null: world.task_manager.shutdown()
 		world.free()
 	_check(_remove_tree(root_dir), "remove isolated save fixtures")
-	print("Save V11: %d checks, %d failures" % [checks, failures])
+	print("Save V12: %d checks, %d failures" % [checks, failures])
 	quit(1 if failures else 0)
 
 
