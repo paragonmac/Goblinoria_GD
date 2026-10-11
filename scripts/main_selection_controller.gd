@@ -131,7 +131,10 @@ func update_hover_preview() -> void:
 		return
 	var pos := hit_pos
 	var valid := true
-	if world.player_mode == World.PlayerMode.STOCKPILE:
+	if world.player_mode == World.PlayerMode.TORCH:
+		pos = _torch_target_from_hit(hit_pos)
+		valid = _can_place_torch_at(pos)
+	elif world.player_mode == World.PlayerMode.STOCKPILE:
 		pos = _stockpile_target_from_hit(hit_pos)
 		valid = _can_create_stockpile_at(pos)
 	else:
@@ -202,6 +205,9 @@ func _update_drag_preview() -> void:
 	if world.player_mode == World.PlayerMode.DIG:
 		world.set_drag_preview_entries(_build_drag_preview_entries(drag_rect), world.player_mode)
 		return
+	if world.player_mode == World.PlayerMode.TORCH:
+		world.set_drag_preview_entries(_build_torch_preview_entries(drag_rect), world.player_mode)
+		return
 	if world.player_mode == World.PlayerMode.STOCKPILE:
 		world.set_drag_preview_entries(_build_stockpile_preview_entries(drag_rect), world.player_mode)
 		return
@@ -234,6 +240,8 @@ func _get_drag_plane_y(screen_pos: Vector2) -> float:
 		var hit_pos: Vector3i = hit["pos"]
 		var base_y := float(hit_pos.y)
 		if world != null and world.player_mode == World.PlayerMode.PLACE:
+			base_y += PLACE_HEIGHT_OFFSET
+		elif world != null and world.player_mode == World.PlayerMode.TORCH:
 			base_y += PLACE_HEIGHT_OFFSET
 		elif world != null and world.player_mode == World.PlayerMode.UP_STAIRS:
 			base_y = float(_up_stair_target_from_hit(hit_pos).y)
@@ -317,6 +325,17 @@ func _enqueue_rect_tasks(rect: Dictionary) -> void:
 				result["reason"] = "unexplored"
 		_trace_selection("drag", min_x, max_x, min_z, max_z, y, [result])
 		return
+	if world != null and world.player_mode == World.PlayerMode.TORCH:
+		for pos: Vector3i in _rect_positions(rect):
+			if not _is_explored(pos):
+				results.append({"pos": pos, "queued": false, "reason": "unexplored"})
+			elif _can_place_torch_at(pos):
+				var queued: bool = world.queue_task_request(TaskQueue.TaskType.TORCH, pos, 0)
+				results.append({"pos": pos, "queued": queued, "reason": "queued" if queued else "duplicate"})
+			else:
+				results.append({"pos": pos, "queued": false, "reason": _torch_reject_reason(pos)})
+		_trace_selection("drag", min_x, max_x, min_z, max_z, y, results)
+		return
 
 	for x in range(min_x, max_x + 1):
 		for z in range(min_z, max_z + 1):
@@ -333,6 +352,8 @@ func _handle_click(screen_pos: Vector2) -> void:
 	var pos: Vector3i = hit["pos"]
 	if world != null and world.player_mode == World.PlayerMode.PLACE:
 		pos.y += 1
+	elif world != null and world.player_mode == World.PlayerMode.TORCH:
+		pos = _torch_target_from_hit(pos)
 	elif world != null and world.player_mode == World.PlayerMode.UP_STAIRS:
 		pos = _up_stair_target_from_hit(pos)
 	elif world != null and world.player_mode == World.PlayerMode.DOWN_STAIRS:
@@ -376,6 +397,12 @@ func _enqueue_task_at(x: int, y: int, z: int) -> Dictionary:
 			return result
 
 	match world.player_mode:
+		World.PlayerMode.TORCH:
+			if _can_place_torch_at(pos):
+				result["queued"] = world.queue_task_request(TaskQueue.TaskType.TORCH, pos, 0)
+				result["reason"] = "queued" if result["queued"] else "duplicate"
+			else:
+				result["reason"] = _torch_reject_reason(pos)
 		World.PlayerMode.DIG:
 			var reject_reason := _dig_selection_reject_reason(pos)
 			if reject_reason.is_empty():
@@ -386,7 +413,9 @@ func _enqueue_task_at(x: int, y: int, z: int) -> Dictionary:
 				if reject_reason == "stairs_require_removal" or reject_reason == "stair_support_protected":
 					result["feedback"] = "Right-click the stairs and choose Remove stairs first"
 		World.PlayerMode.PLACE:
-			if world.is_empty(x, y, z) and _has_place_stock():
+			if world.is_empty(x, y, z) and world.task_queue.has_active_task_at(pos, TaskQueue.TaskType.TORCH):
+				result["reason"] = "duplicate"
+			elif world.is_empty(x, y, z) and _has_place_stock():
 				result["queued"] = world.queue_task_request(TaskQueue.TaskType.PLACE, pos, PLACE_MATERIAL_ID)
 				result["reason"] = "queued" if result["queued"] else "duplicate"
 			elif not world.is_empty(x, y, z):
@@ -408,7 +437,8 @@ func _enqueue_task_at(x: int, y: int, z: int) -> Dictionary:
 		World.PlayerMode.ERASE:
 			var removed: Array = world.cancel_pending_task_requests_at(pos)
 			var removed_stockpiles: Array[int] = world.remove_stockpile_cells([pos])
-			result["queued"] = not removed.is_empty() or not removed_stockpiles.is_empty()
+			var removed_torch: bool = world.torch_store.remove_torch(pos)
+			result["queued"] = not removed.is_empty() or not removed_stockpiles.is_empty() or removed_torch
 			result["reason"] = "cancelled:%d stockpile_cells:%d" % [removed.size(), removed_stockpiles.size()] if result["queued"] else "nothing_to_erase"
 		World.PlayerMode.STOCKPILE:
 			var cells: Array[Vector3i] = []
@@ -449,7 +479,7 @@ func _trace_selection(
 	if unexplored > 0 and queued.is_empty() and kind == "drag":
 		message = "%d cells unexplored" % unexplored
 	elif results.size() == 1 and queued.is_empty():
-		var reasons := {"no_stock": "Requires one stored iron ore", "not_empty": "Target is occupied", "no_valid_stockpile_cells": "No valid stockpile cells", "duplicate": "Already designated", "nothing_to_erase": "No pending designation to erase", "unexplored": "Unexplored"}
+		var reasons := {"no_stock": "Requires one stored iron ore", "not_empty": "Target is occupied", "no_valid_stockpile_cells": "No valid stockpile cells", "unsupported": "Requires a solid floor", "torch_exists": "Already has a torch", "torch_unavailable": "No valid torch cells", "duplicate": "Already designated", "nothing_to_erase": "Nothing to erase", "unexplored": "Unexplored"}
 		message = str(results[0].get("feedback", reasons.get(results[0].get("reason", ""), "Action unavailable: " + str(results[0].get("reason", "unknown")))))
 	elif unexplored > 0:
 		message += ", %d cells unexplored" % unexplored
@@ -484,6 +514,7 @@ func _uses_hover_preview() -> bool:
 		or world.player_mode == World.PlayerMode.DIG
 		or world.player_mode == World.PlayerMode.ERASE
 		or world.player_mode == World.PlayerMode.STOCKPILE
+		or world.player_mode == World.PlayerMode.TORCH
 	)
 
 
@@ -620,7 +651,36 @@ func _erase_target_from_hit(hit_pos: Vector3i) -> Vector3i:
 
 
 func _can_erase_at(pos: Vector3i) -> bool:
-	return world != null and _is_explored(pos) and (world.has_pending_task_request_at(pos) or world.is_stockpile_cell(pos))
+	return world != null and _is_explored(pos) and (world.has_pending_task_request_at(pos) or world.is_stockpile_cell(pos) or world.torch_store.has_torch(pos))
+
+
+func _torch_target_from_hit(hit_pos: Vector3i) -> Vector3i:
+	if world == null:
+		return hit_pos
+	var above := hit_pos + Vector3i.UP
+	return above if _can_place_torch_at(above) else hit_pos
+
+
+func _torch_reject_reason(pos: Vector3i) -> String:
+	if not _is_explored(pos):
+		return "unexplored"
+	var site_reason: String = world.torch_site_reject_reason(pos)
+	if not site_reason.is_empty():
+		return site_reason
+	if not world.task_queue.get_active_tasks_at(pos).is_empty():
+		return "duplicate"
+	return ""
+
+
+func _can_place_torch_at(pos: Vector3i) -> bool:
+	return world != null and _torch_reject_reason(pos).is_empty()
+
+
+func _build_torch_preview_entries(rect: Dictionary) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for pos: Vector3i in _rect_positions(rect):
+		result.append({"pos": pos, "valid": _can_place_torch_at(pos)})
+	return result
 
 
 func _stockpile_target_from_hit(hit_pos: Vector3i) -> Vector3i:

@@ -20,6 +20,7 @@ func save_tasks(world: World, world_dir: String) -> bool:
 		return false
 	var records: Array = []
 	for task in world.task_queue.tasks:
+		# Phase 6 adds torches.dat; V9 tasks.dat intentionally omits TORCH jobs.
 		if task == null or task.status == TaskQueue.TaskStatus.COMPLETED or not SAVED_TYPES.has(task.type):
 			continue
 		var data := {}

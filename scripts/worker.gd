@@ -567,7 +567,7 @@ func can_work_task(task, world = null, pathfinder = null) -> bool:
 	# Work settings govern the NEXT claim, never invalidate the owned job in transit.
 	if not can_accept_task(task) and not (task != null and current_task_id == task.id and task.assigned_worker == self):
 		return false
-	if task.type == TaskQueue.TaskType.DIG or task.type == TaskQueue.TaskType.PLACE:
+	if task.type == TaskQueue.TaskType.DIG or task.type == TaskQueue.TaskType.PLACE or task.type == TaskQueue.TaskType.TORCH:
 		var worker_pos := get_block_coord()
 		return _can_work_task_from_coord(task.type, worker_pos, task.pos, world, pathfinder)
 	if task.type == TaskQueue.TaskType.STAIRS:
@@ -904,6 +904,24 @@ func update_working(dt: float, world, task_queue, pathfinder) -> void:
 					else:
 						world.set_block(task.pos.x, task.pos.y, task.pos.z, task.material)
 						world.cancel_digs_protected_by_stairs([task.pos])
+				TaskQueue.TaskType.TORCH:
+					var torch_reject_reason: String = world.torch_site_reject_reason(task.pos)
+					if not torch_reject_reason.is_empty():
+						task_queue.remove_task(task)
+						_trace(world, "task_cancelled", task, "reason=torch_site_invalid:%s" % torch_reject_reason)
+						current_task_id = -1
+						active_work_anim = &""
+						idle_timer = IDLE_PAUSE
+						set_state(WorkerState.IDLE, world)
+						return
+					if not world.torch_store.add_torch(task.pos):
+						task_queue.remove_task(task)
+						_trace(world, "task_cancelled", task, "reason=torch_already_exists")
+						current_task_id = -1
+						active_work_anim = &""
+						idle_timer = IDLE_PAUSE
+						set_state(WorkerState.IDLE, world)
+						return
 				TaskQueue.TaskType.HAUL:
 					if not _advance_haul_task(world, task_queue, task):
 						return
@@ -1230,7 +1248,7 @@ func _can_work_task_from_coord(
 			flight_rotation,
 			stair_excluded_cells
 		)
-	if task_type != TaskQueue.TaskType.DIG and task_type != TaskQueue.TaskType.PLACE:
+	if task_type != TaskQueue.TaskType.DIG and task_type != TaskQueue.TaskType.PLACE and task_type != TaskQueue.TaskType.TORCH:
 		return true
 	if world == null or pathfinder == null:
 		return worker_pos.y == _work_level_for_task(task_type, task_pos, world) \

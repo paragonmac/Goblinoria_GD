@@ -41,6 +41,7 @@ static func cell_details(world, pos: Vector3i, level_base_y: int) -> Dictionary:
 		"protection_reason": protection_reason,
 		"sky_light": sky_light,
 		"block_light": block_light,
+		"torch": world.torch_store.has_torch(pos) or world.torch_store.has_torch(occupant_cell),
 		"goblin_light": goblin_light,
 		"explored": explored,
 		"occupant_cell": occupant_cell,
@@ -78,7 +79,7 @@ static func cell_details(world, pos: Vector3i, level_base_y: int) -> Dictionary:
 			if seen_tasks.has(task.id):
 				continue
 			seen_tasks[task.id] = true
-			var type_name: String = ["Dig", "Place", "Stairs", "Haul"][clampi(task.type, 0, 3)]
+			var type_name: String = ["Dig", "Place", "Stairs", "Haul", "Torch"][clampi(task.type, 0, 4)]
 			var status_name := "assigned" if task.status == TaskQueue.TaskStatus.IN_PROGRESS or is_instance_valid(task.assigned_worker) else "pending"
 			var access_name := "unknown"
 			if task.accessibility == TaskQueue.TaskAccessibility.REACHABLE:
@@ -623,7 +624,7 @@ func _append_reference(row: Dictionary, field: String, id: int) -> void:
 
 
 func _task_type_name(type: int) -> String:
-	return ["Dig", "Place", "Stairs", "Haul"][clampi(type, 0, 3)]
+	return ["Dig", "Place", "Stairs", "Haul", "Torch"][clampi(type, 0, 4)]
 
 
 func _task_display_name(task) -> String:

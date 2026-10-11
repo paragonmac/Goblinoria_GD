@@ -847,6 +847,7 @@ func _set_world_draw_enabled(enabled: bool) -> void:
 func _finish_world_start_or_load(status_prefix: String, schedule_full_map_warmup: bool) -> void:
 	if colony_ui != null:
 		colony_ui.reset_world()
+	world.rebuild_light_field()
 	_set_render_level_base()
 	if camera_controller != null:
 		camera_controller.setup_camera(world)

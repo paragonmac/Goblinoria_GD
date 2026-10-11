@@ -58,6 +58,7 @@ static func allowed_task_types(role_id: int) -> Array[int]:
 				TaskQueue.TaskType.DIG,
 				TaskQueue.TaskType.PLACE,
 				TaskQueue.TaskType.STAIRS,
+				TaskQueue.TaskType.TORCH,
 			]
 		Role.HAULER:
 			return [TaskQueue.TaskType.HAUL]
@@ -71,7 +72,7 @@ static func can_accept_task(role_id: int, task_type: int) -> bool:
 
 static func task_role_name(task_type: int) -> String:
 	match task_type:
-		TaskQueue.TaskType.DIG, TaskQueue.TaskType.PLACE, TaskQueue.TaskType.STAIRS:
+		TaskQueue.TaskType.DIG, TaskQueue.TaskType.PLACE, TaskQueue.TaskType.STAIRS, TaskQueue.TaskType.TORCH:
 			return display_name(Role.MINER)
 		TaskQueue.TaskType.HAUL:
 			return display_name(Role.HAULER)

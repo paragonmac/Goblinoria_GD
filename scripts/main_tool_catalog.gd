@@ -10,6 +10,7 @@ const TOOLS := [
 	{"mode": World.PlayerMode.DOWN_STAIRS, "label": "Down Stairs", "key": KEY_5},
 	{"mode": World.PlayerMode.ERASE, "label": "Erase", "key": KEY_6},
 	{"mode": World.PlayerMode.STOCKPILE, "label": "Stockpile", "key": KEY_7},
+	{"mode": World.PlayerMode.TORCH, "label": "Torch", "key": KEY_8},
 ]
 
 

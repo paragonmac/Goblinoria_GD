@@ -27,13 +27,15 @@ const TOOL_LAYOUT := [
 	{"icon": "stairs", "caption": "Stairs", "modes": [World.PlayerMode.UP_STAIRS, World.PlayerMode.DOWN_STAIRS]},
 	{"icon": "erase", "caption": "Erase", "modes": [World.PlayerMode.ERASE]},
 	{"icon": "stockpile", "caption": "Stockpile", "modes": [World.PlayerMode.STOCKPILE]},
+	{"icon": "build", "caption": "Torch", "modes": [World.PlayerMode.TORCH]},
 ]
 const OPTION_HINTS := {
 	World.PlayerMode.INFORMATION: ["inspect", "Click a block to see it and everything on it"],
 	World.PlayerMode.DIG: ["dig", "Drag to mark blocks. Workers dig sideways on their own level"],
 	World.PlayerMode.PLACE: ["build", "Uses 1 stored iron ore per block"],
-	World.PlayerMode.ERASE: ["erase", "Cancels pending jobs and stockpile cells (not demolition)"],
+	World.PlayerMode.ERASE: ["erase", "Cancels pending jobs, stockpile cells and torches (not demolition)"],
 	World.PlayerMode.STOCKPILE: ["stockpile", "Drag to designate a stockpile; select one to edit it"],
+	World.PlayerMode.TORCH: ["build", "Drag to designate explored solid floors; miners place torches for free"],
 }
 
 var ui

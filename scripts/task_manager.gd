@@ -20,6 +20,7 @@ const ASSIGNMENT_TASK_TYPES := [
 	TaskQueue.TaskType.STAIRS,
 	TaskQueue.TaskType.PLACE,
 	TaskQueue.TaskType.HAUL,
+	TaskQueue.TaskType.TORCH,
 ]
 
 var assignment_task_id := -1
@@ -1422,6 +1423,11 @@ func reassess_waiting_tasks() -> void:
 func queue_task_request(task_type: int, pos: Vector3i, material: int) -> bool:
 	if world == null or not world.is_block_coord_valid(pos.x, pos.y, pos.z):
 		return false
+	if task_type == TaskQueue.TaskType.TORCH:
+		if not world.torch_site_reject_reason(pos).is_empty() or not task_queue.get_active_tasks_at(pos).is_empty():
+			return false
+	if task_type == TaskQueue.TaskType.PLACE and task_queue.has_active_task_at(pos, TaskQueue.TaskType.TORCH):
+		return false
 	if task_type == TaskQueue.TaskType.DIG and not world.stair_dig_reject_reason(pos).is_empty():
 		return false
 	if is_task_already_queued(task_type, pos):
@@ -1505,6 +1511,8 @@ func add_task_to_queue(task_type: int, pos: Vector3i, material: int) -> bool:
 			return task_queue.add_stairs_task(pos, material) >= 0
 		TaskQueue.TaskType.HAUL:
 			return false
+		TaskQueue.TaskType.TORCH:
+			return task_queue.add_torch_task(pos) >= 0
 	return false
 
 

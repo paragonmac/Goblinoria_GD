@@ -35,6 +35,7 @@ const WorkerRolesScript = preload("res://scripts/worker_roles.gd")
 const StairFlightScript = preload("res://scripts/stair_flight.gd")
 const LightFieldScript = preload("res://scripts/world/light_field.gd")
 const GoblinLightScript = preload("res://scripts/world/goblin_light.gd")
+const TorchStoreScript = preload("res://scripts/world/torch_store.gd")
 const ChunkDataType = ChunkDataScript
 #endregion
 
@@ -224,6 +225,7 @@ var light_field: LightFieldScript = LightFieldScript.new()
 var light_field_built: bool = false
 var light_field_arena_cook_seen: bool = false
 var goblin_light: GoblinLightScript = GoblinLightScript.new()
+var torch_store = TorchStoreScript.new()
 var streaming: WorldStreamingScript
 var raycaster: WorldRaycasterScript
 var debug_profiler: DebugProfiler
@@ -249,7 +251,7 @@ var worker_activity_timer: float = 0.0
 #endregion
 
 #region Player State
-enum PlayerMode {INFORMATION, DIG, PLACE, UP_STAIRS, DOWN_STAIRS, ERASE, STOCKPILE}
+enum PlayerMode {INFORMATION, DIG, PLACE, UP_STAIRS, DOWN_STAIRS, ERASE, STOCKPILE, TORCH}
 var player_mode := PlayerMode.DIG
 var selected_blocks: Dictionary = {}
 #endregion
@@ -304,7 +306,11 @@ func _ready() -> void:
 
 #region World Initialization
 func init_world(seed_world_flag: bool = true) -> void:
+	if torch_store != null:
+		torch_store.clear()
 	goblin_light = GoblinLightScript.new()
+	torch_store = TorchStoreScript.new()
+	torch_store.bind_world(self)
 	light_field_built = false
 	light_field_arena_cook_seen = false
 	runtime_epoch += 1
@@ -336,7 +342,19 @@ func init_world(seed_world_flag: bool = true) -> void:
 		generator.prime_spawn_chunks()
 		light_field.build(self)
 		light_field_built = true
+		torch_store.register_light_sources()
 		spawn_initial_workers()
+
+
+## SEE-ADR-021: one full light build once every block of a started/loaded world
+## is present. Chunks streamed in during loading queue per-chunk relights that
+## would take minutes to drain; the build replaces them.
+func rebuild_light_field() -> void:
+	light_field.build(self)
+	light_field_built = true
+	light_field_arena_cook_seen = false
+	goblin_light = GoblinLightScript.new()
+	torch_store.register_light_sources()
 
 
 func start_new_world(seed_value: int = -1) -> void:
@@ -347,6 +365,7 @@ func start_new_world(seed_value: int = -1) -> void:
 	generator.prime_spawn_chunks()
 	light_field.build(self)
 	light_field_built = true
+	torch_store.register_light_sources()
 	spawn_initial_workers()
 #endregion
 
@@ -362,7 +381,11 @@ func save_world(path: String) -> bool:
 
 
 func load_world(path: String) -> bool:
+	if torch_store != null:
+		torch_store.clear()
 	goblin_light = GoblinLightScript.new()
+	torch_store = TorchStoreScript.new()
+	torch_store.bind_world(self)
 	if live_diagnostics != null:
 		live_diagnostics.mark_event("loading_started")
 	var ok := save_load.load_world(path)
@@ -379,6 +402,7 @@ func load_world(path: String) -> bool:
 	if ok:
 		light_field.build(self)
 		light_field_built = true
+		torch_store.register_light_sources()
 	return ok
 #endregion
 
@@ -530,6 +554,15 @@ func set_block_raw(x: int, y: int, z: int, value: int, mark_dirty: bool) -> void
 		light_field.notify_block_changed(x, y, z, prev, value)
 	if goblin_light != null and light_field_built:
 		goblin_light.notify_block_changed(x, y, z)
+	# Attachments are indexed by the changed cell and the air cell above it.
+	# Support loss and solid occupancy therefore stay O(1) per terrain edit.
+	if torch_store != null:
+		var changed_pos := Vector3i(x, y, z)
+		if torch_store.has_torch(changed_pos) and is_block_solid_id(value):
+			torch_store.remove_torch(changed_pos)
+		var supported_pos := changed_pos + Vector3i.UP
+		if torch_store.has_torch(supported_pos) and not is_block_solid_id(value):
+			torch_store.remove_torch(supported_pos)
 	# Path snapshots key on block content, not on render state.
 	chunk.block_revision += 1
 	if mark_dirty:
@@ -876,6 +909,7 @@ func update_world_controlled(dt: float, advance_simulation: bool) -> void:
 	if light_field_arena_cook_seen and arena_cooker.stage == WorldArenaCooker.Stage.DONE:
 		light_field.build(self)
 		light_field_built = true
+		torch_store.register_light_sources()
 		light_field_arena_cook_seen = false
 	if light_field != null:
 		run_performance_timed("World.process_light_events", light_field.process_events)
@@ -1075,6 +1109,19 @@ func queue_task_request(task_type: int, pos: Vector3i, material: int) -> bool:
 	if task_manager != null:
 		return task_manager.queue_task_request(task_type, pos, material)
 	return false
+
+
+func torch_site_reject_reason(pos: Vector3i) -> String:
+	if not is_block_coord_valid(pos.x, pos.y, pos.z):
+		return "invalid_position"
+	if get_block_no_generate(pos.x, pos.y, pos.z) != BLOCK_ID_AIR:
+		return "not_empty"
+	if pos.y <= 0 or not is_block_solid_id(get_block_no_generate(pos.x, pos.y - 1, pos.z)) \
+			or pathfinder == null or not pathfinder.is_walkable(self, pos.x, pos.y, pos.z):
+		return "unsupported"
+	if torch_store != null and torch_store.has_torch(pos):
+		return "torch_exists"
+	return ""
 
 
 func queue_stair_flight(anchor: Vector3i, rotation: int, up: bool) -> bool:

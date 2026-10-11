@@ -16,6 +16,7 @@ const ACTION_CANCEL_TASKS := 101
 const ACTION_REMOVE_STOCKPILE := 102
 const ACTION_WORKERS := 103
 const ACTION_REMOVE_STAIRS := 104
+const ACTION_REMOVE_TORCH := 105
 
 # Embedded windows receive their own input before the main viewport does.
 class ContextPopup extends PopupMenu:
@@ -54,6 +55,7 @@ var _hit: Dictionary = {}
 var _pending_target: Dictionary = {}
 var _stockpile_target: Dictionary = {}
 var _stair_target: Dictionary = {}
+var _torch_target: Dictionary = {}
 
 
 func initialize(world_ref: World, camera_ref: Camera3D, viewport_ref: Viewport,
@@ -222,6 +224,7 @@ func cancel(clear_snapshot: bool = false) -> void:
 	_pending_target.clear()
 	_stockpile_target.clear()
 	_stair_target.clear()
+	_torch_target.clear()
 	_action_dispatched = true
 	if clear_snapshot:
 		if is_instance_valid(snapshot_panel):
@@ -358,6 +361,7 @@ func _rebuild_menu() -> void:
 			World.PlayerMode.DOWN_STAIRS: tool_icon = "stairs_down"
 			World.PlayerMode.ERASE: tool_icon = "erase"
 			World.PlayerMode.STOCKPILE: tool_icon = "stockpile"
+			World.PlayerMode.TORCH: tool_icon = "build"
 		popup.set_item_icon(popup.item_count - 1, UiIconAtlas.texture(tool_icon))
 		popup.set_item_checked(popup.item_count - 1, tool.mode == world.player_mode)
 	popup.add_separator("This location")
@@ -367,6 +371,7 @@ func _rebuild_menu() -> void:
 	_add_context_item("Cancel pending tasks", ACTION_CANCEL_TASKS, not _pending_target.is_empty() and not hit_unexplored, "Unexplored" if hit_unexplored else "No pending tasks at this location.", "erase")
 	_add_context_item("Remove stockpile designation", ACTION_REMOVE_STOCKPILE, not _stockpile_target.is_empty() and not hit_unexplored, "Unexplored" if hit_unexplored else "No stockpile designation at this location.", "stockpile")
 	_add_context_item("Remove stairs", ACTION_REMOVE_STAIRS, not _stair_target.is_empty() and not hit_unexplored, "Unexplored" if hit_unexplored else "No player stairs at this location.", "stairs")
+	_add_context_item("Remove torch", ACTION_REMOVE_TORCH, not _torch_target.is_empty() and not hit_unexplored, "Unexplored" if hit_unexplored else "No torch at this location.", "build")
 	popup.add_separator("Colony")
 	popup.add_item("Open Workers [W]", ACTION_WORKERS)
 	popup.set_item_icon(popup.item_count - 1, UiIconAtlas.texture("workers"))
@@ -386,6 +391,7 @@ func _capture_targets(screen_pos: Vector2) -> void:
 	_pending_target.clear()
 	_stockpile_target.clear()
 	_stair_target.clear()
+	_torch_target.clear()
 	var hit := world.raycast_block(camera.project_ray_origin(screen_pos),
 		camera.project_ray_normal(screen_pos), RAYCAST_DISTANCE, false)
 	if not hit.get("hit", false):
@@ -406,6 +412,8 @@ func _capture_targets(screen_pos: Vector2) -> void:
 		if _pending_target.is_empty() and world.has_pending_task_request_at(candidate):
 			_pending_target = _capture_cell(candidate)
 			_pending_target["tasks"] = _pending_tasks_at(candidate)
+		if _torch_target.is_empty() and world.torch_store.has_torch(candidate):
+			_torch_target = _capture_cell(candidate)
 		if _stockpile_target.is_empty() and world.is_stockpile_cell(candidate):
 			_stockpile_target = _capture_cell(candidate)
 			_stockpile_target["stockpile_id"] = world.stockpile_store.stockpile_at(candidate)
@@ -536,6 +544,11 @@ func _on_action_selected(id: int) -> void:
 			var queued: bool = world.queue_stair_removal(_stair_target.anchor)
 			if not queued:
 				_action_failed("Could not queue stair removal; the stairs changed or already have an active task.")
+		ACTION_REMOVE_TORCH:
+			if not _cell_unchanged(_torch_target) or not world.torch_store.has_torch(_torch_target.pos):
+				_target_changed()
+				return
+			world.torch_store.remove_torch(_torch_target.pos)
 		ACTION_WORKERS:
 			workers.open()
 

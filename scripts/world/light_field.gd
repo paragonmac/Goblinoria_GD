@@ -166,6 +166,13 @@ func add_light_source(pos: Vector3i, level: int) -> void:
 	_events.append({"kind": "source_add", "index": idx, "level": clampi(level, 0, 15)})
 
 
+func has_light_source(pos: Vector3i) -> bool:
+	if not _valid(pos.x, pos.y, pos.z):
+		return false
+	var idx := _index(pos.x - World.WORLD_MIN_BLOCK_X, pos.y, pos.z - World.WORLD_MIN_BLOCK_Z)
+	return _sources.has(idx)
+
+
 func remove_light_source(pos: Vector3i) -> void:
 	if not _valid(pos.x, pos.y, pos.z):
 		return
@@ -478,6 +485,9 @@ func _run_add(queue: PackedInt32Array, channel: int) -> void:
 	while head < queue.size():
 		var idx: int = queue[head]
 		head += 1
+		if channel == 1 and opacity[block_mirror[idx]] != 0:
+			_set_channel(idx, 1, 0)
+			continue
 		var current: int = int(light[idx] >> 4) if channel == 1 else int(light[idx] & 15)
 		var next_level := current - 1
 		if next_level <= 0:

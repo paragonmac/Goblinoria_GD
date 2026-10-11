@@ -11,8 +11,9 @@ const TOOL_DETAILS := {
 	World.PlayerMode.PLACE: ["build", "place", "partial", "Place blocks using globally stored iron ore; material choice and delivery to sites are future work."],
 	World.PlayerMode.UP_STAIRS: ["build", "up_stairs", "available", "Designate upward stairs by replacing eligible terrain; stairs currently cost no material."],
 	World.PlayerMode.DOWN_STAIRS: ["build", "down_stairs", "available", "Designate downward stairs by replacing eligible terrain."],
-	World.PlayerMode.ERASE: ["build", "erase", "available", "Cancel pending tasks and remove stockpile cells; right-click also offers location-specific removal."],
+	World.PlayerMode.ERASE: ["build", "erase", "available", "Cancel pending tasks, remove stockpile cells and remove torches; right-click also offers location-specific removal."],
 	World.PlayerMode.STOCKPILE: ["build", "stockpile", "available", "Designate storage cells for physical items and hauling."],
+	World.PlayerMode.TORCH: ["build", "build", "available", "Designate explored floor cells for free torches placed by miners."],
 }
 
 

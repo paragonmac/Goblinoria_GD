@@ -146,6 +146,10 @@ var stockpile_material: ShaderMaterial
 var stair_preview_mesher = ChunkMesherScript.new()
 var stair_preview_mesh_cache: Dictionary = {}
 var excavation_preview_cells: Array[Vector3i] = []
+var torch_multimesh_instance: MultiMeshInstance3D
+var _torch_revision := -1
+var _torch_render_level := -1
+var _torch_min_render_level := -1
 #endregion
 
 
@@ -153,9 +157,63 @@ var excavation_preview_cells: Array[Vector3i] = []
 func initialize(world_ref: World) -> void:
 	world = world_ref
 	_ensure_shader()
+	_create_torch_multimesh()
 	item_atlas_texture = _load_item_atlas_texture()
 	if item_atlas_texture == null:
 		push_warning("Item drop atlas failed to load: %s" % ITEM_ATLAS_PATH)
+
+
+func _process(_delta: float) -> void:
+	_sync_torch_multimesh()
+
+
+func _create_torch_multimesh() -> void:
+	torch_multimesh_instance = MultiMeshInstance3D.new()
+	torch_multimesh_instance.name = "Torches"
+	var mesh := BoxMesh.new()
+	mesh.size = Vector3(0.12, 0.72, 0.12)
+	var multimesh := MultiMesh.new()
+	multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	multimesh.mesh = mesh
+	torch_multimesh_instance.multimesh = multimesh
+	var material := StandardMaterial3D.new()
+	material.albedo_color = Color(1.0, 0.55, 0.12)
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.emission_enabled = true
+	material.emission = Color(1.0, 0.35, 0.06)
+	torch_multimesh_instance.material_override = material
+	add_child(torch_multimesh_instance)
+	_sync_torch_multimesh()
+
+
+func _sync_torch_multimesh() -> void:
+	if world == null or torch_multimesh_instance == null or world.torch_store == null:
+		return
+	if _torch_revision == world.torch_store.revision and _torch_render_level == world.top_render_y \
+			and _torch_min_render_level == world.get_min_render_y():
+		return
+	_torch_revision = world.torch_store.revision
+	_torch_render_level = world.top_render_y
+	_torch_min_render_level = world.get_min_render_y()
+	var visible: Array[Vector3i] = []
+	for pos: Vector3i in world.torch_store.torches.keys():
+		if pos.y <= world.top_render_y and pos.y >= world.get_min_render_y():
+			visible.append(pos)
+	var multimesh: MultiMesh = torch_multimesh_instance.multimesh
+	multimesh.instance_count = visible.size()
+	multimesh.visible_instance_count = visible.size()
+	var instance_buffer := PackedFloat32Array()
+	instance_buffer.resize(visible.size() * 12)
+	for index in range(visible.size()):
+		var pos: Vector3i = visible[index]
+		var offset := index * 12
+		instance_buffer[offset] = 1.0
+		instance_buffer[offset + 4] = 1.0
+		instance_buffer[offset + 8] = 1.0
+		instance_buffer[offset + 9] = float(pos.x)
+		instance_buffer[offset + 10] = float(pos.y) - 0.14
+		instance_buffer[offset + 11] = float(pos.z)
+	multimesh.buffer = instance_buffer
 
 
 func _ensure_shader() -> void:
