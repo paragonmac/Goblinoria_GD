@@ -25,7 +25,8 @@ Player-facing rules:
   explored at once; sealed caves stay black until lit.
 - Rendering: unexplored = black (still drawn, so nothing behind shows through);
   explored but unlit = dim and desaturated; lit = full colour scaled by level.
-- Unexplored cells cannot be inspected or designated; pathing is unaffected;
+- Unexplored cells cannot be inspected or designated, except excavation (Dig,
+  Stairs), which tunnels blind into the dark; pathing is unaffected;
   darkness has no gameplay effect on goblins yet.
 - Torches: a Torch tool designates a floor cell; a goblin places it as a job
   (free for now). Erase removes a torch instantly; losing its support removes

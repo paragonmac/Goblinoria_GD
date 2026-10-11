@@ -50,9 +50,10 @@ func _run() -> void:
 	world.light_field.mark_explored(known.x, known.y, known.z)
 	world.light_field.mark_explored(known.x, known.y + 1, known.z)
 
+	# Excavation tunnels blind: dig designations reach into unexplored rock.
 	var result: Dictionary = controller._enqueue_task_at(dark.x, dark.y, dark.z)
-	_check(str(result.get("reason", "")) == "unexplored" and not world.has_pending_task_request_at(dark),
-		"Dig on an unexplored cell is rejected (%s)" % str(result))
+	_check(str(result.get("reason", "")) != "unexplored" and world.has_pending_task_request_at(dark),
+		"Dig on an unexplored cell is queued (%s)" % str(result))
 	result = controller._enqueue_task_at(known.x, known.y, known.z)
 	_check(str(result.get("reason", "")) != "unexplored" and world.has_pending_task_request_at(known),
 		"Dig on an explored cell is queued (%s)" % str(result))
@@ -65,10 +66,14 @@ func _run() -> void:
 	world.player_mode = World.PlayerMode.STOCKPILE
 	_check(not controller._can_create_stockpile_at(dark + Vector3i.UP), "Stockpile cannot cover unexplored cells")
 
-	world.player_mode = World.PlayerMode.UP_STAIRS
-	_check(not controller._stair_preview_is_valid(dark), "Stairs preview rejects unexplored footprints")
-	result = controller._enqueue_task_at(dark.x, dark.y, dark.z)
-	_check(str(result.get("reason", "")) == "unexplored", "Stairs on an unexplored cell are rejected")
+	world.player_mode = World.PlayerMode.TORCH
+	result = controller._enqueue_task_at(dark.x, dark.y + 1, dark.z)
+	_check(str(result.get("reason", "")) == "unexplored", "Torch on an unexplored cell is rejected (%s)" % str(result))
+
+	world.player_mode = World.PlayerMode.DOWN_STAIRS
+	var deep := Vector3i(6, 0, 6)
+	result = controller._enqueue_task_at(deep.x, deep.y, deep.z)
+	_check(str(result.get("reason", "")) != "unexplored", "Stairs into unexplored rock are not fog-gated (%s)" % str(result))
 
 	# Inspect: unexplored clicks report instead of opening details.
 	world.player_mode = World.PlayerMode.INFORMATION

@@ -387,14 +387,11 @@ func _enqueue_task_at(x: int, y: int, z: int) -> Dictionary:
 		return result
 	var block_id := world.get_block_no_generate(x, y, z) if _is_stair_mode() else world.get_block(x, y, z)
 	result["block_id"] = block_id
-	# Fog of war: unexplored cells cannot be designated; stairs check both cells.
-	var footprint: Array = [pos]
-	if _is_stair_mode():
-		footprint = Flight.cells(pos, stair_rotation)
-	for cell: Vector3i in footprint:
-		if not _is_explored(cell):
-			result["reason"] = "unexplored"
-			return result
+	# Fog of war: unexplored cells cannot be designated, except excavation (dig,
+	# stairs), which tunnels blind into the dark.
+	if not _is_excavation_mode() and not _is_explored(pos):
+		result["reason"] = "unexplored"
+		return result
 
 	match world.player_mode:
 		World.PlayerMode.TORCH:
@@ -612,9 +609,6 @@ func _has_horizontal_dig_work_position(pos: Vector3i) -> bool:
 func _stair_preview_is_valid(pos: Vector3i) -> bool:
 	if world == null:
 		return false
-	for cell: Vector3i in Flight.cells(pos, stair_rotation):
-		if not _is_explored(cell):
-			return false
 	if world.player_mode == World.PlayerMode.UP_STAIRS:
 		return _can_place_up_stairs_at(pos)
 	if world.player_mode == World.PlayerMode.DOWN_STAIRS:
@@ -723,6 +717,10 @@ func _unexplored_count(result: Dictionary) -> int:
 	if result.has("unexplored_count"):
 		return int(result["unexplored_count"])
 	return 1 if str(result.get("reason", "")) == "unexplored" else 0
+
+
+func _is_excavation_mode() -> bool:
+	return world != null and (world.player_mode == World.PlayerMode.DIG or _is_stair_mode())
 
 
 func _is_explored(pos: Vector3i) -> bool:
