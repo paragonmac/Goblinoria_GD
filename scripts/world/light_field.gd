@@ -34,7 +34,7 @@ var _sources: Dictionary = {}
 var _events: Array[Dictionary] = []
 
 
-func build(world) -> void:
+func build(world, initial_explored: PackedByteArray = PackedByteArray()) -> void:
 	_world = world
 	NX = World.WORLD_CHUNKS_X * World.CHUNK_SIZE
 	NZ = World.WORLD_CHUNKS_Z * World.CHUNK_SIZE
@@ -47,11 +47,15 @@ func build(world) -> void:
 	block_mirror.resize(VOLUME)
 	light.resize(VOLUME)
 	light.fill(0)
-	explored.resize(VOLUME)
-	explored.fill(0)
+	if initial_explored.size() == VOLUME:
+		explored = initial_explored.duplicate()
+		explored_count = VOLUME - explored.count(0)
+	else:
+		explored.resize(VOLUME)
+		explored.fill(0)
+		explored_count = 0
 	display.resize(VOLUME)
 	display.fill(0)
-	explored_count = 0
 	_build_opacity()
 	dirty_light_layers.clear()
 	dirty_explored_layers.clear()
@@ -116,6 +120,11 @@ func build(world) -> void:
 	_bulk_build = false
 	build_count += 1
 	last_build_ms = float(Time.get_ticks_usec() - started) / 1000.0
+
+
+func clear_sources_for_build() -> void:
+	_sources.clear()
+	_events.clear()
 
 
 func notify_block_changed(x: int, y: int, z: int, old_id: int, new_id: int) -> void:
@@ -220,17 +229,6 @@ func mark_explored_indices(indices: PackedInt32Array) -> void:
 		return
 	for idx in indices:
 		_set_explored(idx)
-
-
-## Unions a persisted fog snapshot with exploration discovered during this build.
-func apply_explored(snapshot: PackedByteArray) -> void:
-	if snapshot.size() != VOLUME or explored.size() != VOLUME:
-		return
-	for idx in VOLUME:
-		if snapshot[idx] != 0 and explored[idx] == 0:
-			explored[idx] = 255
-			explored_count += 1
-			dirty_explored_layers[idx >> _shift_layer] = true
 
 
 func pending_events() -> int:

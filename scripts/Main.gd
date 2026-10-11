@@ -95,6 +95,7 @@ var loading_active := false:
 		if performance_controller != null:
 			performance_controller.sync_segment()
 var world_started := false
+var world_start_or_load_succeeded := false
 var default_bg_mode: int = -1
 var default_bg_color: Color = Color.BLACK
 var hud_refresh_mask := 0
@@ -135,9 +136,10 @@ func _process(dt: float) -> void:
 	_process_game_frame(dt)
 	if colony_ui != null:
 		world.run_performance_timed("Main.colony_ui_ms", Callable(colony_ui, "tick").bind(dt))
-	# One visibility pump also services pending results behind menus/loading.
-	# It is measured before profiling finalization, never inside prewarm loops.
-	if world != null and world.renderer != null:
+	# Visibility and light uploads continue behind the loading screen except while
+	# the worker is reading the world to build a replacement light field.
+	if world_started and world != null and world.renderer != null \
+			and not world.light_field_build_active:
 		world.renderer.observe_visibility_view(camera)
 		world.renderer.pump_visibility(world.renderer.VISIBILITY_PUMP_MS, world.renderer.VISIBILITY_PUMP_STEPS)
 	if debug_overlay != null:
@@ -844,10 +846,36 @@ func _set_world_draw_enabled(enabled: bool) -> void:
 		hud_layer.visible = enabled
 
 
+func _ensure_light_field_ready() -> bool:
+	if world == null:
+		return false
+	var target_world = world
+	var expected_nx: int = target_world.world_size_x
+	var expected_nz: int = target_world.world_size_z
+	var expected_ny: int = target_world.world_size_y
+	var field = target_world.light_field
+	var field_current: bool = target_world.light_field_built and field != null \
+			and field.NX == expected_nx and field.NZ == expected_nz and field.NY == expected_ny
+	if field_current:
+		return true
+	if await target_world.rebuild_light_field_async():
+		return true
+	if world != target_world or target_world.is_queued_for_deletion():
+		return false
+	# The main-thread implementation is the recovery path for a failed worker build.
+	target_world.rebuild_light_field()
+	field = target_world.light_field
+	return target_world.light_field_built and field.NX == expected_nx \
+		and field.NZ == expected_nz and field.NY == expected_ny
+
+
 func _finish_world_start_or_load(status_prefix: String, schedule_full_map_warmup: bool) -> void:
+	world_start_or_load_succeeded = false
 	if colony_ui != null:
 		colony_ui.reset_world()
-	world.rebuild_light_field()
+	if not await _ensure_light_field_ready():
+		_set_loading_status("Light build failed. Please retry.")
+		return
 	_set_render_level_base()
 	if camera_controller != null:
 		camera_controller.setup_camera(world)
@@ -857,6 +885,13 @@ func _finish_world_start_or_load(status_prefix: String, schedule_full_map_warmup
 	if render_level_controller != null:
 		render_level_controller.update_world(world)
 		await render_level_controller.prepare_world_for_reveal(status_prefix)
+	var reveal_pump_started_usec: int = Time.get_ticks_usec()
+	if world.renderer != null:
+		if camera != null:
+			world.renderer.observe_visibility_view(camera)
+		world.renderer.pump_visibility(world.renderer.VISIBILITY_PUMP_MS, world.renderer.VISIBILITY_PUMP_STEPS)
+	world.light_field_reveal_pump_ms = float(Time.get_ticks_usec() - reveal_pump_started_usec) / 1000.0
+	print("Light reveal pump: %.2f ms" % world.light_field_reveal_pump_ms)
 	if schedule_full_map_warmup and render_level_controller != null:
 		render_level_controller.schedule_background_warmup(
 			render_level_controller.chunk_y_for_render_y(world.top_render_y)
@@ -864,6 +899,7 @@ func _finish_world_start_or_load(status_prefix: String, schedule_full_map_warmup
 	world_started = true
 	_set_world_draw_enabled(true)
 	_refresh_menu_buttons()
+	world_start_or_load_succeeded = true
 
 
 func _start_new_world_with_loading() -> void:
@@ -874,6 +910,7 @@ func _start_new_world_with_loading() -> void:
 		performance_controller.begin_operation("loading")
 	_show_loading_screen("Starting new world...")
 	await get_tree().process_frame
+	world.defer_light_build_on_start = true
 	if not world.start_new_world():
 		_set_loading_status("Could not start a new world.")
 		await get_tree().process_frame
@@ -891,6 +928,17 @@ func _start_new_world_with_loading() -> void:
 		render_level_controller.reset_loading_state()
 	if generate_full_map_on_startup:
 		await _prepare_full_map_arena_cook("Generating and caching full finite map")
+	if not await _ensure_light_field_ready():
+		_set_loading_status("Light build failed. New world could not be started.")
+		_hide_loading_screen()
+		_set_menu_status("New world failed to start.")
+		_refresh_menu_buttons()
+		if diagnostics_controller != null:
+			diagnostics_controller.finish_operation("loading", false)
+		if performance_controller != null:
+			performance_controller.finish_operation("loading", false)
+		return
+	if generate_full_map_on_startup:
 		var save_ms: float = await _save_generated_world_after_create()
 		if world != null and world.arena_cooker != null:
 			world.arena_cooker.set_save_ms(save_ms)
@@ -900,7 +948,17 @@ func _start_new_world_with_loading() -> void:
 				await get_tree().process_frame
 	_set_loading_status("Preparing view...")
 	await get_tree().process_frame
+	world_start_or_load_succeeded = true
 	await _finish_world_start_or_load("Generating startup view", generate_full_map_on_startup)
+	if not world_start_or_load_succeeded:
+		_hide_loading_screen()
+		_set_menu_status("New world failed to start.")
+		_refresh_menu_buttons()
+		if diagnostics_controller != null:
+			diagnostics_controller.finish_operation("loading", false)
+		if performance_controller != null:
+			performance_controller.finish_operation("loading", false)
+		return
 	_report_load_metrics("New world", load_start_usec)
 	if diagnostics_controller != null:
 		diagnostics_controller.finish_operation("loading", true)
@@ -917,7 +975,9 @@ func _load_world_with_loading() -> void:
 	var reveal_previous_world := world_started
 	_show_loading_screen("Loading world...")
 	await get_tree().process_frame
+	world.defer_light_build_on_load = true
 	var ok := world.load_world(SAVE_PATH)
+	world.defer_light_build_on_load = false
 	if not ok:
 		_hide_loading_screen()
 		_set_world_draw_enabled(reveal_previous_world)
@@ -934,7 +994,16 @@ func _load_world_with_loading() -> void:
 		await _prepare_full_map_block_data("Loading full finite map")
 	_set_loading_status("Preparing view...")
 	await get_tree().process_frame
+	world_start_or_load_succeeded = true
 	await _finish_world_start_or_load("Loading startup view", generate_full_map_on_startup)
+	if not world_start_or_load_succeeded:
+		_hide_loading_screen()
+		_set_world_draw_enabled(reveal_previous_world)
+		_set_menu_status("Load failed.")
+		_refresh_menu_buttons()
+		if performance_controller != null:
+			performance_controller.finish_operation("loading", false)
+		return
 	_report_load_metrics("Load world", load_start_usec)
 	_hide_loading_screen()
 	close_menu()

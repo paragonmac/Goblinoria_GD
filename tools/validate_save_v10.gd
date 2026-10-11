@@ -5,6 +5,7 @@ const WorldSaveLoadScript = preload("res://scripts/world_save_load.gd")
 const TransactionScript = preload("res://scripts/world_save_transaction.gd")
 const WorkerScript = preload("res://scripts/worker.gd")
 const CHUNK := preload("res://scripts/chunk_data.gd")
+const LightFieldScript = preload("res://scripts/world/light_field.gd")
 
 class TestWorld extends World:
 	func _ready() -> void:
@@ -88,6 +89,13 @@ func _run() -> void:
 	var live_torches := reader.torch_store.torch_positions()
 	_check(not reader.load_world(corrupt_slot), "corrupt explored file rejects load")
 	_check(reader.world_seed == live_seed and reader.light_field.explored == live_explored and reader.torch_store.torch_positions() == live_torches, "corrupt explored file leaves live world intact")
+	var invalid_cell_slot := root_dir.path_join("invalid_explored_cell.save")
+	_check(_copy_slot(source_slot.get_basename(), invalid_cell_slot.get_basename()), "copy invalid explored cell fixture")
+	var invalid_explored := source_explored.duplicate()
+	invalid_explored[0] = 1
+	_check(_write_explored_payload(invalid_cell_slot.get_basename().path_join("explored.dat"), invalid_explored),
+		"write correctly sized explored.dat with invalid cell value")
+	_check(not reader.load_world(invalid_cell_slot), "explored.dat validator rejects value other than 0 or 255")
 
 	var future_slot := root_dir.path_join("v14.save")
 	_check(_copy_slot(source_slot.get_basename(), future_slot.get_basename()), "copy future-version fixture")
@@ -95,10 +103,31 @@ func _run() -> void:
 	var future_reader := _make_world()
 	_check(not future_reader.load_world(future_slot), "V14 rejected")
 
-	for world in [source, reader, support_changed_reader, legacy_reader, legacy_torch_reader, future_reader]:
+	_check(World.configure_dimensions(64, 32), "Configure prior 512x256 world dimensions")
+	var prior_light_field = LightFieldScript.new()
+	prior_light_field.NX = 512
+	prior_light_field.NZ = 256
+	prior_light_field.NY = 256
+	prior_light_field.VOLUME = 512 * 256 * 256
+	prior_light_field.explored.resize(prior_light_field.VOLUME)
+	prior_light_field.explored.fill(255)
+	_check(World.configure_dimensions(32, 32), "Configure new 256x256 world dimensions")
+	var new_world := _make_world()
+	new_world.light_field = prior_light_field
+	new_world.light_field_built = false
+	var new_world_slot := root_dir.path_join("new_world_after_wide.save")
+	_check(new_world.save_world(new_world_slot), "New world save writes explored data using current dimensions")
+	var new_world_reader := _make_world()
+	_check(new_world_reader.load_world(new_world_slot), "Load 256x256 save after 512x256 previous world")
+	_check(new_world_reader.light_field.NX == 256 and new_world_reader.light_field.NZ == 256 \
+		and new_world_reader.light_field_built and new_world_reader.light_field.explored.size() == 256 * 256 * 256,
+		"Wide-to-default new-world save/load keeps explored dimensions valid")
+
+	for world in [source, reader, support_changed_reader, legacy_reader, legacy_torch_reader, future_reader, new_world, new_world_reader]:
 		if world.task_manager != null: world.task_manager.shutdown()
 		world.free()
 	_check(_remove_tree(root_dir), "remove isolated save fixtures")
+	_check(World.configure_dimensions(32, 32), "Restore default dimensions after explored save regression")
 	print("Save V13: %d checks, %d failures" % [checks, failures])
 	quit(1 if failures else 0)
 
@@ -174,6 +203,18 @@ func _write_v1_torches(path: String, pos: Vector3i) -> bool:
 		return false
 	var ok := file.store_32(0x544F5243) and file.store_16(1) and file.store_32(1) \
 		and file.store_32(pos.x) and file.store_32(pos.y) and file.store_32(pos.z)
+	return TransactionScript.finish_write(file) and ok
+
+
+func _write_explored_payload(path: String, raw: PackedByteArray) -> bool:
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if file == null:
+		return false
+	var compressed := raw.compress(FileAccess.COMPRESSION_DEFLATE)
+	var ok := file.store_32(0x4558504C) and file.store_16(2) \
+		and file.store_8(FileAccess.COMPRESSION_DEFLATE) and file.store_16(World.WORLD_CHUNKS_X * World.CHUNK_SIZE) \
+		and file.store_16(World.WORLD_CHUNKS_Z * World.CHUNK_SIZE) and file.store_16(World.WORLD_CHUNKS_Y * World.CHUNK_SIZE) \
+		and file.store_32(raw.size()) and file.store_32(compressed.size()) and file.store_buffer(compressed)
 	return TransactionScript.finish_write(file) and ok
 
 

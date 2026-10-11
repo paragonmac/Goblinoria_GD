@@ -89,6 +89,29 @@ func _run() -> void:
 	var field := LightFieldScript.new()
 	field.build(world)
 	print("Light field build ms: %.2f" % field.last_build_ms)
+	var explored_snapshot := PackedByteArray()
+	explored_snapshot.resize(field.VOLUME)
+	explored_snapshot.fill(0)
+	var snapshot_only_index := field._world_index(100, 40, 100)
+	var snapshot_overlaps_lit_index := field._world_index(OPEN.x, OPEN.y, OPEN.z)
+	explored_snapshot[snapshot_only_index] = 255
+	explored_snapshot[snapshot_overlaps_lit_index] = 255
+	var previous_union := field.explored.duplicate()
+	for idx in field.VOLUME:
+		if explored_snapshot[idx] != 0 and previous_union[idx] == 0:
+			previous_union[idx] = 255
+	var preloaded_field = LightFieldScript.new()
+	preloaded_field.build(world, explored_snapshot)
+	_check(preloaded_field.explored == previous_union,
+		"preloaded explored build is byte-identical to post-build snapshot union")
+	_check(preloaded_field.is_explored(100, 40, 100) and preloaded_field.is_explored(OPEN.x, OPEN.y, OPEN.z),
+		"preloaded explored bytes survive and union with newly lit cells")
+	var brute_explored_count := 0
+	for value in preloaded_field.explored:
+		if value != 0:
+			brute_explored_count += 1
+	_check(preloaded_field.explored_count == brute_explored_count,
+		"native explored count matches brute-force fixture count")
 	_check(field.get_sky(OPEN.x, OPEN.y, OPEN.z) == 15, "open ground receives sky 15")
 	_check(field.get_sky(ROOM.x, ROOM.y, ROOM.z) == 0, "sealed room under roof stays dark")
 	_check(field.get_sky(SHAFT.x, 60, SHAFT.z) == 15, "shaft carries sky 15 into cave")

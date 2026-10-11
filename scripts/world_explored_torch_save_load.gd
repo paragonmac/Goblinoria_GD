@@ -16,14 +16,20 @@ const MAX_TORCHES := 65536
 const MAX_TREES := 1048576
 
 
-func save_explored(light_field, world_dir: String) -> bool:
-	if light_field == null:
+func save_explored(world, world_dir: String) -> bool:
+	if world == null or world.light_field == null:
 		return false
+	var light_field = world.light_field
+	var nx: int = World.WORLD_CHUNKS_X * World.CHUNK_SIZE
+	var nz: int = World.WORLD_CHUNKS_Z * World.CHUNK_SIZE
+	var ny: int = World.WORLD_CHUNKS_Y * World.CHUNK_SIZE
+	var volume: int = nx * nz * ny
 	var raw: PackedByteArray
-	if light_field.explored.size() == light_field.VOLUME:
+	if world.light_field_built and light_field.NX == nx and light_field.NZ == nz \
+			and light_field.NY == ny and light_field.explored.size() == volume:
 		raw = light_field.explored
 	else:
-		raw.resize(light_field.VOLUME)
+		raw.resize(volume)
 		raw.fill(0)
 	var compressed := raw.compress(COMPRESSION_MODE)
 	var file := FileAccess.open(world_dir.path_join(EXPLORED_FILE_NAME), FileAccess.WRITE)
@@ -31,8 +37,8 @@ func save_explored(light_field, world_dir: String) -> bool:
 		push_warning("Explored save failed")
 		return false
 	var ok := file.store_32(EXPLORED_MAGIC) and file.store_16(EXPLORED_FORMAT_VERSION) \
-		and file.store_8(COMPRESSION_MODE) and file.store_16(light_field.NX) \
-		and file.store_16(light_field.NZ) and file.store_16(light_field.NY) and file.store_32(raw.size()) \
+		and file.store_8(COMPRESSION_MODE) and file.store_16(nx) \
+		and file.store_16(nz) and file.store_16(ny) and file.store_32(raw.size()) \
 		and file.store_32(compressed.size()) and file.store_buffer(compressed)
 	return WorldSaveTransactionScript.finish_write(file) and ok
 
@@ -75,10 +81,9 @@ func read_explored_snapshot(world_dir: String, required: bool, world = null) -> 
 	if raw.size() != raw_size:
 		push_warning("Explored load failed: decompressed length mismatch")
 		return {"ok": false}
-	for value in raw:
-		if value != 0 and value != 255:
-			push_warning("Explored load failed: invalid cell value")
-			return {"ok": false}
+	if raw.count(0) + raw.count(255) != raw.size():
+		push_warning("Explored load failed: invalid cell value")
+		return {"ok": false}
 	return {"ok": true, "present": true, "explored": raw}
 
 

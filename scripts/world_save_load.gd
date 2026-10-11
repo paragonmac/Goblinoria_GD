@@ -126,7 +126,7 @@ func save_world(path: String) -> bool:
 			mesh_cache_save_load.restore_state(previous_mesh_state)
 		ok = ok and _save_items_and_stockpiles(stage_dir) and _save_workers(stage_dir) \
 			and task_save_load.save_tasks(world, stage_dir) and _write_view(stage_dir) \
-			and explored_torch_save_load.save_explored(world.light_field, stage_dir) \
+			and explored_torch_save_load.save_explored(world, stage_dir) \
 			and explored_torch_save_load.save_torches(world, stage_dir) \
 			and explored_torch_save_load.save_trees(world, stage_dir)
 	if not ok or not save_transaction.promote():
@@ -506,31 +506,30 @@ func _migrate_legacy_terrain_slopes(world_seed: int) -> int:
 		var coord: Vector3i = coord_value
 		var blocks := bulk_chunk_save_load.get_chunk_blocks(coord)
 		var changed := false
-		for index in range(blocks.size()):
-			var old_id: int = int(blocks[index])
-			if old_id < World.RAMP_NORTH_ID or old_id > World.INNER_NORTHEAST_ID:
-				continue
-			var local_x: int = index % World.CHUNK_SIZE
-			var local_y: int = (index / World.CHUNK_SIZE) % World.CHUNK_SIZE
-			var local_z: int = index / (World.CHUNK_SIZE * World.CHUNK_SIZE)
-			var world_pos := Vector3i(
-				coord.x * World.CHUNK_SIZE + local_x,
-				coord.y * World.CHUNK_SIZE + local_y,
-				coord.z * World.CHUNK_SIZE + local_z
-			)
-			var terrain_id := _legacy_terrain_slope_id_at(
-				world_pos,
-				old_id,
-				flat_noise,
-				small_noise,
-				large_noise,
-				macro_noise
-			)
-			if terrain_id < 0:
-				continue
-			blocks[index] = terrain_id
-			changed = true
-			migrated += 1
+		for old_id in range(World.RAMP_NORTH_ID, World.INNER_NORTHEAST_ID + 1):
+			var index := blocks.find(old_id)
+			while index >= 0:
+				var local_x: int = index % World.CHUNK_SIZE
+				var local_y: int = (index / World.CHUNK_SIZE) % World.CHUNK_SIZE
+				var local_z: int = index / (World.CHUNK_SIZE * World.CHUNK_SIZE)
+				var world_pos := Vector3i(
+					coord.x * World.CHUNK_SIZE + local_x,
+					coord.y * World.CHUNK_SIZE + local_y,
+					coord.z * World.CHUNK_SIZE + local_z
+				)
+				var terrain_id := _legacy_terrain_slope_id_at(
+					world_pos,
+					old_id,
+					flat_noise,
+					small_noise,
+					large_noise,
+					macro_noise
+				)
+				if terrain_id >= 0:
+					blocks[index] = terrain_id
+					changed = true
+					migrated += 1
+				index = blocks.find(old_id, index + 1)
 		if changed:
 			bulk_chunk_save_load.replace_chunk_blocks(coord, blocks)
 	return migrated
@@ -712,9 +711,7 @@ func apply_final_light_snapshots() -> void:
 	# Drain restored sources synchronously so the first rendered frame has correct light.
 	while world.light_field.pending_events() > 0:
 		world.light_field.process_events(1000000)
-	if bool(pending_explored_snapshot.get("present", false)):
-		world.light_field.apply_explored(pending_explored_snapshot.explored)
-	else:
+	if not bool(pending_explored_snapshot.get("present", false)):
 		last_load_metrics["explored_migration_ms"] = explored_torch_save_load.migrate_explored(
 			world, world.light_field, pending_migration_task_snapshot)
 	pending_explored_snapshot = {}
@@ -722,6 +719,12 @@ func apply_final_light_snapshots() -> void:
 	pending_tree_snapshot = {}
 	pending_migration_task_snapshot = {}
 	has_pending_light_snapshots = false
+
+
+func get_pending_explored_bytes() -> PackedByteArray:
+	if bool(pending_explored_snapshot.get("present", false)):
+		return pending_explored_snapshot.get("explored", PackedByteArray())
+	return PackedByteArray()
 
 
 func _generate_legacy_trees() -> void:

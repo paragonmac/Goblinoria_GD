@@ -137,6 +137,7 @@ func _run() -> void:
 	for cy in range(WorldScript.WORLD_CHUNKS_Y):
 		_fixture_chunk(world, Vector3i(0, cy, 0))
 	world.light_field.build(world)
+	world.light_field_built = true
 	var field = world.light_field
 	_check(field.NX == 128 and field.NZ == 128 and field.NY == 256 \
 		and field.LAYER_SIZE == 128 * 128 and field.VOLUME == 128 * 128 * 256,
@@ -201,7 +202,7 @@ func _run() -> void:
 	DirAccess.make_dir_recursive_absolute(explored_path.get_basename())
 	field.mark_explored(WorldScript.WORLD_MIN_BLOCK_X, 0, WorldScript.WORLD_MIN_BLOCK_Z)
 	field.mark_explored(WorldScript.WORLD_MAX_BLOCK_X, 255, WorldScript.WORLD_MAX_BLOCK_Z)
-	_check(world.save_load.explored_torch_save_load.save_explored(field, explored_path.get_basename()),
+	_check(world.save_load.explored_torch_save_load.save_explored(world, explored_path.get_basename()),
 		"Save 128-wide explored.dat")
 	var explored_snapshot: Dictionary = world.save_load.explored_torch_save_load.read_explored_snapshot(
 		explored_path.get_basename(), true, world)

@@ -9,6 +9,13 @@ signal render_level_changed(level: int)
 
 # Runtime-only identity, independent of optional diagnostics and persistence.
 var runtime_epoch := 0
+var light_field_async_max_frame_ms := 0.0
+var light_field_async_total_ms := 0.0
+var light_field_reveal_pump_ms := 0.0
+var light_field_task_id := -1
+var light_field_build_active := false
+var defer_light_build_on_start := false
+var defer_light_build_on_load := false
 
 const OVERLAY_REFRESH_TASKS := 1
 const OVERLAY_REFRESH_ITEMS := 2
@@ -407,6 +414,7 @@ func init_world(seed_world_flag: bool = true) -> bool:
 		if world_seed == 0:
 			world_seed = generator.generate_world_seed()
 		generator.prime_spawn_chunks()
+		light_field.clear_sources_for_build()
 		light_field.build(self)
 		light_field_built = true
 		torch_store.register_light_sources()
@@ -418,7 +426,9 @@ func init_world(seed_world_flag: bool = true) -> bool:
 ## is present. Chunks streamed in during loading queue per-chunk relights that
 ## would take minutes to drain; the build replaces them.
 func rebuild_light_field() -> void:
-	light_field.build(self)
+	var initial_explored := save_load.get_pending_explored_bytes() if save_load != null else PackedByteArray()
+	light_field.clear_sources_for_build()
+	light_field.build(self, initial_explored)
 	light_field_built = true
 	light_field_arena_cook_seen = false
 	goblin_light = GoblinLightScript.new()
@@ -427,7 +437,54 @@ func rebuild_light_field() -> void:
 		save_load.apply_final_light_snapshots()
 
 
+func rebuild_light_field_async() -> bool:
+	if _dimension_jobs_in_flight > 0 or light_field_task_id >= 0:
+		push_error("Cannot rebuild light field while dimension or light build jobs are in flight")
+		return false
+	var expected_epoch := runtime_epoch
+	var build_started_usec := Time.get_ticks_usec()
+	var previous_frame_usec := build_started_usec
+	light_field_async_max_frame_ms = 0.0
+	light_field_async_total_ms = 0.0
+	var build_world = self
+	var candidate = LightFieldScript.new()
+	var initial_explored := save_load.get_pending_explored_bytes() if save_load != null else PackedByteArray()
+	light_field_task_id = WorkerThreadPool.add_task(Callable(candidate, "build").bind(build_world, initial_explored), true, "LightField build")
+	if light_field_task_id < 0:
+		light_field_task_id = -1
+		return false
+	light_field_build_active = true
+	while not WorkerThreadPool.is_task_completed(light_field_task_id):
+		await get_tree().process_frame
+		var frame_usec := Time.get_ticks_usec()
+		light_field_async_max_frame_ms = maxf(light_field_async_max_frame_ms,
+			float(frame_usec - previous_frame_usec) / 1000.0)
+		previous_frame_usec = frame_usec
+	WorkerThreadPool.wait_for_task_completion(light_field_task_id)
+	light_field_task_id = -1
+	light_field_build_active = false
+	light_field_async_total_ms = float(Time.get_ticks_usec() - build_started_usec) / 1000.0
+	if is_queued_for_deletion() or runtime_epoch != expected_epoch or build_world != self:
+		return false
+	if int(candidate.get("build_count")) != 1:
+		return false
+	light_field = candidate
+	light_field_built = true
+	light_field_arena_cook_seen = false
+	goblin_light = GoblinLightScript.new()
+	torch_store.register_light_sources()
+	if save_load != null:
+		save_load.apply_final_light_snapshots()
+	return true
+
+
 func start_new_world(seed_value: int = -1, chunks_x: int = 32, chunks_z: int = 32) -> bool:
+	var defer_build := defer_light_build_on_start
+	defer_light_build_on_start = false
+	return _start_new_world(seed_value, chunks_x, chunks_z, defer_build)
+
+
+func _start_new_world(seed_value: int, chunks_x: int, chunks_z: int, defer_light_build: bool) -> bool:
 	if not _drain_world_jobs():
 		push_error("Cannot start a new world because worker jobs could not be drained")
 		return false
@@ -442,9 +499,13 @@ func start_new_world(seed_value: int = -1, chunks_x: int = 32, chunks_z: int = 3
 		return false
 	world_seed = seed_value if seed_value >= 0 else generator.generate_world_seed()
 	generator.prime_spawn_chunks()
-	light_field.build(self)
-	light_field_built = true
-	torch_store.register_light_sources()
+	if defer_light_build:
+		light_field_built = false
+	else:
+		light_field.clear_sources_for_build()
+		light_field.build(self)
+		light_field_built = true
+		torch_store.register_light_sources()
 	spawn_initial_workers()
 	return true
 #endregion
@@ -461,6 +522,12 @@ func save_world(path: String) -> bool:
 
 
 func load_world(path: String) -> bool:
+	var defer_build := defer_light_build_on_load
+	defer_light_build_on_load = false
+	return _load_world_with_light_option(path, defer_build)
+
+
+func _load_world_with_light_option(path: String, defer_light_build: bool) -> bool:
 	if not _drain_world_jobs():
 		push_error("Cannot load a world because worker jobs could not be drained")
 		return false
@@ -487,9 +554,13 @@ func load_world(path: String) -> bool:
 	if ok and generator != null:
 		generator.reset_generation_jobs()
 	if ok:
-		light_field.build(self)
-		light_field_built = true
-		torch_store.register_light_sources()
+		if defer_light_build:
+			light_field_built = false
+		else:
+			light_field.clear_sources_for_build()
+			light_field.build(self, save_load.get_pending_explored_bytes())
+			light_field_built = true
+			torch_store.register_light_sources()
 	return ok
 
 
@@ -1614,12 +1685,26 @@ func _prewarm_sync_chunks(view_rect: Rect2, plane_y: float) -> void:
 
 
 func _exit_tree() -> void:
+	_wait_for_light_field_task()
 	worker_trace.stop()
 	anomaly_watchdog.close()
 	if task_manager != null:
 		task_manager.shutdown()
 	if generator != null:
 		generator.shutdown_generation_thread()
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_PREDELETE:
+		_wait_for_light_field_task()
+
+
+func _wait_for_light_field_task() -> void:
+	if light_field_task_id < 0:
+		return
+	WorkerThreadPool.wait_for_task_completion(light_field_task_id)
+	light_field_task_id = -1
+	light_field_build_active = false
 
 
 #region Workers
