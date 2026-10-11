@@ -182,7 +182,8 @@ func _benchmark_full_world() -> void:
 		chunk.generated = true
 		world.chunks[coord] = chunk
 	generated_chunks.clear()
-	_check(world.chunks.size() == 32768, "performance world has all 32,768 generated chunks")
+	_check(world.chunks.size() == World.WORLD_CHUNKS_X * World.WORLD_CHUNKS_Y * World.WORLD_CHUNKS_Z,
+		"performance world has all generated chunks")
 	var field = LightFieldScript.new()
 	var best_build_ms := INF
 	for attempt in range(3):
@@ -196,28 +197,28 @@ func _benchmark_full_world() -> void:
 	var best_all_explored_slices_ms := INF
 	for attempt in range(3):
 		var slice_started := Time.get_ticks_usec()
-		for y in range(256):
+		for y in range(field.NY):
 			var slice: PackedByteArray = field.layer_slice("light", y)
-			if slice.size() != 65536:
-				_check(false, "light layer slice has 65,536 bytes")
+			if slice.size() != field.LAYER_SIZE:
+				_check(false, "light layer slice matches its dimensions")
 		best_all_slices_ms = minf(best_all_slices_ms, (Time.get_ticks_usec() - slice_started) / 1000.0)
-		best_slices_us = minf(best_slices_us, (Time.get_ticks_usec() - slice_started) / 256.0)
+		best_slices_us = minf(best_slices_us, (Time.get_ticks_usec() - slice_started) / float(field.NY))
 		slice_started = Time.get_ticks_usec()
-		for y in range(256):
+		for y in range(field.NY):
 			var explored_slice: PackedByteArray = field.layer_slice("explored", y)
-			if explored_slice.size() != 65536:
-				_check(false, "explored layer slice has 65,536 bytes")
+			if explored_slice.size() != field.LAYER_SIZE:
+				_check(false, "explored layer slice matches its dimensions")
 		best_all_explored_slices_ms = minf(best_all_explored_slices_ms, (Time.get_ticks_usec() - slice_started) / 1000.0)
-		best_explored_slices_us = minf(best_explored_slices_us, (Time.get_ticks_usec() - slice_started) / 256.0)
-	print("Light field benchmark layer_slice best average us: light %.2f / explored %.2f (target <= 100 each); 256 slices ms: light %.2f / explored %.2f (target <= 60 each)" % [best_slices_us, best_explored_slices_us, best_all_slices_ms, best_all_explored_slices_ms])
+		best_explored_slices_us = minf(best_explored_slices_us, (Time.get_ticks_usec() - slice_started) / float(field.NY))
+	print("Light field benchmark layer_slice best average us: light %.2f / explored %.2f (target <= 100 each); all layers ms: light %.2f / explored %.2f (target <= 60 each)" % [best_slices_us, best_explored_slices_us, best_all_slices_ms, best_all_explored_slices_ms])
 	_soft_check(best_slices_us <= 100.0, "layer_slice meets 0.1 ms target")
 	_soft_check(best_explored_slices_us <= 100.0, "explored layer_slice meets 0.1 ms target")
-	_soft_check(best_all_slices_ms <= 60.0, "all 256 light layers slice within 60 ms")
-	_soft_check(best_all_explored_slices_ms <= 60.0, "all 256 explored layers slice within 60 ms")
+	_soft_check(best_all_slices_ms <= 60.0, "all light layers slice within 60 ms")
+	_soft_check(best_all_explored_slices_ms <= 60.0, "all explored layers slice within 60 ms")
 	var cave_idx := _find_cave_cell(field)
 	_check(cave_idx >= 0, "generated world contains a dark cave cell for torch timing")
 	if cave_idx >= 0:
-		var cave_pos := Vector3i((cave_idx & 255) + World.WORLD_MIN_BLOCK_X, cave_idx >> 16, ((cave_idx >> 8) & 255) + World.WORLD_MIN_BLOCK_Z)
+		var cave_pos := Vector3i((cave_idx & (field.NX - 1)) + World.WORLD_MIN_BLOCK_X, cave_idx >> field._shift_layer, ((cave_idx >> field._shift_x) & (field.NZ - 1)) + World.WORLD_MIN_BLOCK_Z)
 		var best_add_us := INF
 		var best_remove_us := INF
 		for attempt in range(3):
@@ -252,20 +253,20 @@ func _benchmark_full_world() -> void:
 
 func _find_cave_cell(field) -> int:
 	for y in range(1, 240):
-		var layer_start := y * 65536
-		for i in range(layer_start, layer_start + 65536):
-			if field.block_mirror[i] == World.BLOCK_ID_AIR and field.block_mirror[i - 65536] != World.BLOCK_ID_AIR and field.get_level((i & 255) + World.WORLD_MIN_BLOCK_X, y, ((i >> 8) & 255) + World.WORLD_MIN_BLOCK_Z) == 0:
+		var layer_start: int = y * field.LAYER_SIZE
+		for i in range(layer_start, layer_start + field.LAYER_SIZE):
+			if field.block_mirror[i] == World.BLOCK_ID_AIR and field.block_mirror[i - field.LAYER_SIZE] != World.BLOCK_ID_AIR and field.get_level((i & (field.NX - 1)) + World.WORLD_MIN_BLOCK_X, y, ((i >> field._shift_x) & (field.NZ - 1)) + World.WORLD_MIN_BLOCK_Z) == 0:
 				return i
 	return -1
 
 
 func _find_surface_cells(field, count: int) -> Array[Vector3i]:
 	var result: Array[Vector3i] = []
-	for z in range(16, 240, 8):
-		for x in range(16, 240, 8):
-			for y in range(240, 0, -1):
-				var idx := (y * 256 + z) * 256 + x
-				if field.block_mirror[idx] != World.BLOCK_ID_AIR and field.block_mirror[idx + 65536] == World.BLOCK_ID_AIR:
+	for z in range(16, field.NZ - 16, 8):
+		for x in range(16, field.NX - 16, 8):
+			for y in range(field.NY - 16, 0, -1):
+				var idx: int = field._index(x, y, z)
+				if field.block_mirror[idx] != World.BLOCK_ID_AIR and field.block_mirror[idx + field.LAYER_SIZE] == World.BLOCK_ID_AIR:
 					result.append(Vector3i(x + World.WORLD_MIN_BLOCK_X, y + 1, z + World.WORLD_MIN_BLOCK_Z))
 					break
 			if result.size() >= count:

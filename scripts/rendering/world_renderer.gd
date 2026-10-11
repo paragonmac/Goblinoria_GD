@@ -1043,6 +1043,7 @@ func pump_light() -> void:
 		material_helper.set_light_params({
 			"light_tex": light_sync.light_tex, "explored_tex": light_sync.explored_tex,
 			"light_origin": Vector2i(World.WORLD_MIN_BLOCK_X, World.WORLD_MIN_BLOCK_Z),
+			"light_size": Vector2i(world.light_field.NX, world.light_field.NZ),
 			"light_layers": world.world_size_y,
 		})
 		_apply_light_switches()

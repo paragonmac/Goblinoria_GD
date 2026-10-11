@@ -43,17 +43,69 @@ const ChunkDataType = ChunkDataScript
 #region Constants - World Size
 const CHUNK_SIZE := 8
 const CHUNK_VOLUME := CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE
-const WORLD_CHUNKS_X := 32
+static var WORLD_CHUNKS_X := 32
 const WORLD_CHUNKS_Y := 32
-const WORLD_CHUNKS_Z := 32
-const WORLD_MIN_CHUNK_X := -16
-const WORLD_MAX_CHUNK_X := 15
-const WORLD_MIN_CHUNK_Z := -16
-const WORLD_MAX_CHUNK_Z := 15
-const WORLD_MIN_BLOCK_X := WORLD_MIN_CHUNK_X * CHUNK_SIZE
-const WORLD_MAX_BLOCK_X := (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE - 1
-const WORLD_MIN_BLOCK_Z := WORLD_MIN_CHUNK_Z * CHUNK_SIZE
-const WORLD_MAX_BLOCK_Z := (WORLD_MAX_CHUNK_Z + 1) * CHUNK_SIZE - 1
+static var WORLD_CHUNKS_Z := 32
+static var WORLD_MIN_CHUNK_X := -16
+static var WORLD_MAX_CHUNK_X := 15
+static var WORLD_MIN_CHUNK_Z := -16
+static var WORLD_MAX_CHUNK_Z := 15
+static var WORLD_MIN_BLOCK_X := WORLD_MIN_CHUNK_X * CHUNK_SIZE
+static var WORLD_MAX_BLOCK_X := (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE - 1
+static var WORLD_MIN_BLOCK_Z := WORLD_MIN_CHUNK_Z * CHUNK_SIZE
+static var WORLD_MAX_BLOCK_Z := (WORLD_MAX_CHUNK_Z + 1) * CHUNK_SIZE - 1
+static var _dimension_jobs_in_flight := 0
+static var _dimension_worlds: Array = []
+
+
+func _init() -> void:
+	var live_worlds: Array = []
+	for world_ref: WeakRef in _dimension_worlds:
+		if world_ref.get_ref() != null:
+			live_worlds.append(world_ref)
+	_dimension_worlds = live_worlds
+	_dimension_worlds.append(weakref(self))
+
+
+static func configure_dimensions(chunks_x: int, chunks_z: int) -> bool:
+	if chunks_x < 16 or chunks_x > 128 or chunks_z < 16 or chunks_z > 128 \
+			or not _is_power_of_two(chunks_x) or not _is_power_of_two(chunks_z):
+		push_error("World dimensions must be powers of two from 16 to 128 chunks")
+		return false
+	if chunks_x == WORLD_CHUNKS_X and chunks_z == WORLD_CHUNKS_Z:
+		return true
+	if _dimension_jobs_in_flight > 0:
+		push_error("Cannot reconfigure world dimensions while worker jobs are in flight")
+		return false
+	WORLD_CHUNKS_X = chunks_x
+	WORLD_CHUNKS_Z = chunks_z
+	WORLD_MIN_CHUNK_X = -chunks_x / 2
+	WORLD_MAX_CHUNK_X = WORLD_MIN_CHUNK_X + chunks_x - 1
+	WORLD_MIN_CHUNK_Z = -chunks_z / 2
+	WORLD_MAX_CHUNK_Z = WORLD_MIN_CHUNK_Z + chunks_z - 1
+	WORLD_MIN_BLOCK_X = WORLD_MIN_CHUNK_X * CHUNK_SIZE
+	WORLD_MAX_BLOCK_X = (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE - 1
+	WORLD_MIN_BLOCK_Z = WORLD_MIN_CHUNK_Z * CHUNK_SIZE
+	WORLD_MAX_BLOCK_Z = (WORLD_MAX_CHUNK_Z + 1) * CHUNK_SIZE - 1
+	for world_ref: WeakRef in _dimension_worlds:
+		var world = world_ref.get_ref()
+		if world != null:
+			world.world_size_x = CHUNK_SIZE * WORLD_CHUNKS_X
+			world.world_size_y = CHUNK_SIZE * WORLD_CHUNKS_Y
+			world.world_size_z = CHUNK_SIZE * WORLD_CHUNKS_Z
+	return true
+
+
+static func _is_power_of_two(value: int) -> bool:
+	return value > 0 and (value & (value - 1)) == 0
+
+
+static func register_dimension_job_started() -> void:
+	_dimension_jobs_in_flight += 1
+
+
+static func register_dimension_job_finished() -> void:
+	_dimension_jobs_in_flight = maxi(0, _dimension_jobs_in_flight - 1)
 #endregion
 
 #region Constants - Block IDs
@@ -308,7 +360,15 @@ func _ready() -> void:
 
 
 #region World Initialization
-func init_world(seed_world_flag: bool = true) -> void:
+func init_world(seed_world_flag: bool = true) -> bool:
+	if not _drain_world_jobs():
+		push_error("Cannot initialize world because worker jobs could not be drained")
+		return false
+	if not configure_dimensions(WORLD_CHUNKS_X, WORLD_CHUNKS_Z):
+		return false
+	world_size_x = CHUNK_SIZE * WORLD_CHUNKS_X
+	world_size_y = CHUNK_SIZE * WORLD_CHUNKS_Y
+	world_size_z = CHUNK_SIZE * WORLD_CHUNKS_Z
 	if torch_store != null:
 		torch_store.clear()
 	goblin_light = GoblinLightScript.new()
@@ -351,6 +411,7 @@ func init_world(seed_world_flag: bool = true) -> void:
 		light_field_built = true
 		torch_store.register_light_sources()
 		spawn_initial_workers()
+	return true
 
 
 ## SEE-ADR-021: one full light build once every block of a started/loaded world
@@ -366,16 +427,26 @@ func rebuild_light_field() -> void:
 		save_load.apply_final_light_snapshots()
 
 
-func start_new_world(seed_value: int = -1) -> void:
+func start_new_world(seed_value: int = -1, chunks_x: int = 32, chunks_z: int = 32) -> bool:
+	if not _drain_world_jobs():
+		push_error("Cannot start a new world because worker jobs could not be drained")
+		return false
+	if not configure_dimensions(chunks_x, chunks_z):
+		return false
+	world_size_x = CHUNK_SIZE * WORLD_CHUNKS_X
+	world_size_z = CHUNK_SIZE * WORLD_CHUNKS_Z
+	world_size_y = CHUNK_SIZE * WORLD_CHUNKS_Y
 	if save_load != null:
 		save_load.clear_world_dir()
-	init_world(false)
+	if not init_world(false):
+		return false
 	world_seed = seed_value if seed_value >= 0 else generator.generate_world_seed()
 	generator.prime_spawn_chunks()
 	light_field.build(self)
 	light_field_built = true
 	torch_store.register_light_sources()
 	spawn_initial_workers()
+	return true
 #endregion
 
 
@@ -390,6 +461,9 @@ func save_world(path: String) -> bool:
 
 
 func load_world(path: String) -> bool:
+	if not _drain_world_jobs():
+		push_error("Cannot load a world because worker jobs could not be drained")
+		return false
 	if live_diagnostics != null:
 		live_diagnostics.mark_event("loading_started")
 	var ok := save_load.load_world(path)
@@ -417,6 +491,16 @@ func load_world(path: String) -> bool:
 		light_field_built = true
 		torch_store.register_light_sources()
 	return ok
+
+
+func _drain_world_jobs() -> bool:
+	if generator != null:
+		generator.reset_generation_jobs()
+	if renderer != null:
+		renderer.clear_chunks()
+		if renderer.visibility_state != null:
+			renderer.visibility_state.clear()
+	return _dimension_jobs_in_flight == 0
 #endregion
 
 

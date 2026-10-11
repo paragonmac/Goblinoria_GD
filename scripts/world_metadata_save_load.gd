@@ -74,7 +74,9 @@ func read_world_meta_snapshot(
 	var chunks_x: int = file.get_16()
 	var chunks_y: int = file.get_16()
 	var chunks_z: int = file.get_16()
-	if chunks_x != World.WORLD_CHUNKS_X or chunks_y != World.WORLD_CHUNKS_Y or chunks_z != World.WORLD_CHUNKS_Z:
+	if chunks_y != World.WORLD_CHUNKS_Y or chunks_x < 16 or chunks_x > 128 \
+			or chunks_z < 16 or chunks_z > 128 or (chunks_x & (chunks_x - 1)) != 0 \
+			or (chunks_z & (chunks_z - 1)) != 0:
 		push_warning("World load failed: world dimensions mismatch")
 		return {"ok": false}
 	var world_size_y: int = file.get_32()
@@ -99,6 +101,9 @@ func read_world_meta_snapshot(
 		"spawn_coord": Vector3i(spawn_x, spawn_y, spawn_z),
 		"top_render_y": clampi(top_y, 0, world.world_size_y - 1),
 		"save_version": version,
+		"chunks_x": chunks_x,
+		"chunks_y": chunks_y,
+		"chunks_z": chunks_z,
 		"block_table_hash": block_hash,
 		"legacy_block_table": legacy_block_table,
 	}

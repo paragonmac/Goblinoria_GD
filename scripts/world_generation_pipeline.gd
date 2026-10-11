@@ -41,18 +41,18 @@ enum Biome {
 #region State
 var world_seed: int = 0
 var chunk_size: int = World.CHUNK_SIZE
-var world_chunks_x: int = World.WORLD_CHUNKS_X
+var world_chunks_x: int = 0
 var world_chunks_y: int = World.WORLD_CHUNKS_Y
-var world_chunks_z: int = World.WORLD_CHUNKS_Z
-var world_min_chunk_x: int = World.WORLD_MIN_CHUNK_X
-var world_max_chunk_x: int = World.WORLD_MAX_CHUNK_X
-var world_min_chunk_z: int = World.WORLD_MIN_CHUNK_Z
-var world_max_chunk_z: int = World.WORLD_MAX_CHUNK_Z
-var world_min_block_x: int = World.WORLD_MIN_BLOCK_X
-var world_min_block_z: int = World.WORLD_MIN_BLOCK_Z
-var world_size_x: int = World.WORLD_CHUNKS_X * World.CHUNK_SIZE
+var world_chunks_z: int = 0
+var world_min_chunk_x: int = 0
+var world_max_chunk_x: int = 0
+var world_min_chunk_z: int = 0
+var world_max_chunk_z: int = 0
+var world_min_block_x: int = 0
+var world_min_block_z: int = 0
+var world_size_x: int = 0
 var world_size_y: int = World.WORLD_CHUNKS_Y * World.CHUNK_SIZE
-var world_size_z: int = World.WORLD_CHUNKS_Z * World.CHUNK_SIZE
+var world_size_z: int = 0
 var sea_level: int = 0
 
 var elevation := PackedInt32Array()

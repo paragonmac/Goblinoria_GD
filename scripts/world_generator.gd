@@ -131,7 +131,11 @@ func queue_chunk_generation(coord: Vector3i, high_priority: bool = false, queue_
 		"high_priority": high_priority,
 		"queue_mesh_on_complete": queue_mesh_on_complete,
 	}
-	return generation_queue.enqueue(coord, job, high_priority, queue_mesh_on_complete)
+	var existed := generation_queue.contains(coord)
+	var queued := generation_queue.enqueue(coord, job, high_priority, queue_mesh_on_complete)
+	if queued and not existed:
+		World.register_dimension_job_started()
+	return queued
 
 
 func process_generation_results(budget: int) -> int:
@@ -151,7 +155,7 @@ func process_generation_results(budget: int) -> int:
 		var chunk: ChunkData = world.get_chunk(coord)
 		if chunk == null or chunk.generated:
 			_record_generation_counter("Generation.discarded")
-			_clear_generation_job(coord)
+			_clear_generation_job(coord, epoch)
 			continue
 		var blocks: PackedByteArray = result.get("blocks", PackedByteArray())
 		if blocks.size() > 0:
@@ -167,7 +171,7 @@ func process_generation_results(budget: int) -> int:
 		if queue_mesh_on_complete and world.renderer != null:
 			var high_priority: bool = bool(result.get("high_priority", false))
 			world.renderer.queue_chunk_mesh_build(coord, -1, false, high_priority)
-		_clear_generation_job(coord)
+		_clear_generation_job(coord, epoch)
 		applied += 1
 		_record_generation_counter("Generation.applied")
 	return applied
@@ -183,7 +187,9 @@ func get_generation_stats() -> Dictionary:
 
 
 func reset_generation_jobs() -> void:
-	generation_queue.reset()
+	var outstanding: int = generation_queue.reset()
+	for _i in range(outstanding):
+		World.register_dimension_job_finished()
 
 
 func shutdown_generation_thread() -> void:
@@ -254,8 +260,9 @@ func _generate_chunk_blocks(job: Dictionary, flat_noise: FastNoiseLite, small_no
 	)
 
 
-func _clear_generation_job(coord: Vector3i) -> void:
-	generation_queue.clear_job(coord)
+func _clear_generation_job(coord: Vector3i, epoch: int) -> void:
+	if generation_queue.clear_job(coord, epoch):
+		World.register_dimension_job_finished()
 
 
 #endregion

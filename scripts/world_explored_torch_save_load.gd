@@ -9,7 +9,7 @@ const TREE_FILE_NAME := "trees.dat"
 const EXPLORED_MAGIC := 0x4558504C
 const TORCH_MAGIC := 0x544F5243
 const TREE_MAGIC := 0x54524545
-const FORMAT_VERSION := 1
+const EXPLORED_FORMAT_VERSION := 2
 const TORCH_FORMAT_VERSION := 2
 const COMPRESSION_MODE := FileAccess.COMPRESSION_DEFLATE
 const MAX_TORCHES := 65536
@@ -23,20 +23,21 @@ func save_explored(light_field, world_dir: String) -> bool:
 	if light_field.explored.size() == light_field.VOLUME:
 		raw = light_field.explored
 	else:
-		raw.resize(256 * 256 * 256)
+		raw.resize(light_field.VOLUME)
 		raw.fill(0)
 	var compressed := raw.compress(COMPRESSION_MODE)
 	var file := FileAccess.open(world_dir.path_join(EXPLORED_FILE_NAME), FileAccess.WRITE)
 	if file == null:
 		push_warning("Explored save failed")
 		return false
-	var ok := file.store_32(EXPLORED_MAGIC) and file.store_16(FORMAT_VERSION) \
-		and file.store_8(COMPRESSION_MODE) and file.store_32(raw.size()) \
+	var ok := file.store_32(EXPLORED_MAGIC) and file.store_16(EXPLORED_FORMAT_VERSION) \
+		and file.store_8(COMPRESSION_MODE) and file.store_16(light_field.NX) \
+		and file.store_16(light_field.NZ) and file.store_16(light_field.NY) and file.store_32(raw.size()) \
 		and file.store_32(compressed.size()) and file.store_buffer(compressed)
 	return WorldSaveTransactionScript.finish_write(file) and ok
 
 
-func read_explored_snapshot(world_dir: String, required: bool) -> Dictionary:
+func read_explored_snapshot(world_dir: String, required: bool, world = null) -> Dictionary:
 	var path := world_dir.path_join(EXPLORED_FILE_NAME)
 	if not FileAccess.file_exists(path):
 		return {"ok": not required, "present": false, "explored": PackedByteArray()}
@@ -46,9 +47,24 @@ func read_explored_snapshot(world_dir: String, required: bool) -> Dictionary:
 		return {"ok": false}
 	var version := file.get_16()
 	var mode := file.get_8()
+	var nx := 256
+	var nz := 256
+	var ny := 256
+	if version == EXPLORED_FORMAT_VERSION:
+		nx = file.get_16()
+		nz = file.get_16()
+		ny = file.get_16()
+	elif version != 1:
+		push_warning("Explored load failed: unsupported version")
+		return {"ok": false}
 	var raw_size := file.get_32()
 	var compressed_size := file.get_32()
-	if version != FORMAT_VERSION or mode != COMPRESSION_MODE or raw_size != 256 * 256 * 256 \
+	var expected_nx := World.WORLD_CHUNKS_X * World.CHUNK_SIZE
+	var expected_nz := World.WORLD_CHUNKS_Z * World.CHUNK_SIZE
+	var expected_ny := World.WORLD_CHUNKS_Y * World.CHUNK_SIZE
+	if world == null or mode != COMPRESSION_MODE or nx != expected_nx or nz != expected_nz \
+			or ny != expected_ny or (version == 1 and (nx != 256 or nz != 256 or ny != 256)) \
+			or raw_size != nx * nz * ny \
 			or compressed_size < 0 or file.get_length() - file.get_position() != compressed_size:
 		push_warning("Explored load failed: invalid format or length")
 		return {"ok": false}
@@ -100,7 +116,7 @@ func read_torch_snapshot(world, world_dir: String, required: bool) -> Dictionary
 		return {"ok": false}
 	var version := file.get_16()
 	var count := file.get_32()
-	if (version != FORMAT_VERSION and version != TORCH_FORMAT_VERSION) or count < 0 or count > MAX_TORCHES \
+	if (version != 1 and version != TORCH_FORMAT_VERSION) or count < 0 or count > MAX_TORCHES \
 			or file.get_length() - file.get_position() != count * (13 if version == TORCH_FORMAT_VERSION else 12):
 		push_warning("Torch load failed: invalid format or length")
 		return {"ok": false}
@@ -223,7 +239,7 @@ func migrate_explored(world, light_field, task_snapshot: Dictionary, cell_cap: i
 	var block_mirror: PackedByteArray = light_field.block_mirror
 	var light: PackedByteArray = light_field.light
 	var layer: int = light_field.LAYER_SIZE
-	var offsets := PackedInt32Array([1, -1, 256, -256, layer, -layer])
+	var offsets := PackedInt32Array([1, -1, light_field.NX, -light_field.NX, layer, -layer])
 	while head < queue.size():
 		if filled >= cell_cap:
 			capped = true
@@ -232,11 +248,11 @@ func migrate_explored(world, light_field, task_snapshot: Dictionary, cell_cap: i
 		head += 1
 		filled += 1
 		light_field._mark_explored_neighborhood(idx)
-		var x: int = idx & 255
-		var z: int = (idx >> 8) & 255
-		var y: int = idx >> 16
+		var x: int = idx & (light_field.NX - 1)
+		var z: int = (idx >> light_field._shift_x) & (light_field.NZ - 1)
+		var y: int = idx >> light_field._shift_layer
 		for i in 6:
-			if (i == 0 and x == 255) or (i == 1 and x == 0) or (i == 2 and z == 255) 					or (i == 3 and z == 0) or (i == 4 and y == 255) or (i == 5 and y == 0):
+			if (i == 0 and x == light_field.NX - 1) or (i == 1 and x == 0) or (i == 2 and z == light_field.NZ - 1) 					or (i == 3 and z == 0) or (i == 4 and y == light_field.NY - 1) or (i == 5 and y == 0):
 				continue
 			var neighbor: int = idx + offsets[i]
 			if visited[neighbor] != 0 or opacity[block_mirror[neighbor]] != 0 or (light[neighbor] & 15) == 15:

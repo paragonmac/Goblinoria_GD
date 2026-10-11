@@ -51,11 +51,11 @@ func _run() -> void:
 		and material.get_shader_parameter("explored_tex") is Texture2DArray, "Light and explored textures are bound")
 	_check(bool(material.get_shader_parameter("darkness_enabled")), "Darkness is enabled once light is bound")
 	var light_tex: Texture2DArray = material.get_shader_parameter("light_tex")
-	_check(light_tex.get_layers() == world.world_size_y and light_tex.get_width() == 256 and light_tex.get_height() == 256,
-		"One 256x256 layer per world Y")
+	_check(light_tex.get_layers() == world.world_size_y and light_tex.get_width() == world.light_field.NX and light_tex.get_height() == world.light_field.NZ,
+		"One world-sized layer per world Y")
 	_check(material.get_shader_parameter("light_origin") == Vector2i(World.WORLD_MIN_BLOCK_X, World.WORLD_MIN_BLOCK_Z),
 		"Texture origin matches the world minimum")
-	_check(world.light_field.take_dirty_layers(256, 0).is_empty(), "Binding uploads every layer and clears dirty state")
+	_check(world.light_field.take_dirty_layers(world.light_field.NY, 0).is_empty(), "Binding uploads every layer and clears dirty state")
 
 	# Dig a shaft: only changed layers upload, budgeted, nearest the render level.
 	for y in range(220, 227):

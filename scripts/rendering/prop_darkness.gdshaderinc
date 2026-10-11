@@ -7,6 +7,7 @@ uniform bool darkness_enabled = false;
 uniform bool fog_enabled = true;
 uniform bool light_view = false;
 uniform ivec2 light_origin = ivec2(-128, -128);
+uniform ivec2 light_size = ivec2(256, 256);
 uniform int light_layers = 256;
 uniform sampler2D goblin_atlas : filter_nearest;
 uniform vec4 goblin_cells[64];
@@ -23,7 +24,7 @@ vec3 prop_darkness(vec3 albedo, ivec3 cell) {
 	ivec3 texel = ivec3(cell.x - light_origin.x, cell.z - light_origin.y, cell.y);
 	float level = 0.0;
 	float explored = 1.0;
-	if (texel.x >= 0 && texel.x < 256 && texel.y >= 0 && texel.y < 256 && texel.z >= 0 && texel.z < light_layers) {
+	if (texel.x >= 0 && texel.x < light_size.x && texel.y >= 0 && texel.y < light_size.y && texel.z >= 0 && texel.z < light_layers) {
 		level = texelFetch(light_tex, texel, 0).r * 15.0;
 		explored = texelFetch(explored_tex, texel, 0).r;
 	}

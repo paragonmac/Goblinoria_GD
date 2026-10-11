@@ -4,7 +4,6 @@ class_name LightTextureSync
 ## per world Y: light, explored) for the terrain shader. Only dirty layers are
 ## uploaded, a budget per frame, nearest the render level first.
 
-const LAYER_SIZE := 256
 const LAYER_BUDGET := 16
 
 var light_tex: Texture2DArray
@@ -27,10 +26,12 @@ func bind(field) -> bool:
 	_field_build = build
 	var light_images: Array[Image] = []
 	var explored_images: Array[Image] = []
-	var layers: int = field.layer_count() if field.has_method("layer_count") else LAYER_SIZE
+	var layers: int = field.layer_count() if field.has_method("layer_count") else field.NY
+	var width: int = field.NX
+	var height: int = field.NZ
 	for y in range(layers):
-		light_images.append(_image(field.layer_slice("light", y)))
-		explored_images.append(_image(field.layer_slice("explored", y)))
+		light_images.append(_image(field.layer_slice("light", y), width, height))
+		explored_images.append(_image(field.layer_slice("explored", y), width, height))
 	light_tex = Texture2DArray.new()
 	light_tex.create_from_images(light_images)
 	explored_tex = Texture2DArray.new()
@@ -46,12 +47,12 @@ func pump(field, near_y: int, budget: int = LAYER_BUDGET) -> int:
 	if field == null or light_tex == null:
 		return 0
 	for y: int in field.take_dirty_layers(budget, near_y):
-		light_tex.update_layer(_image(field.layer_slice("light", y)), y)
-		explored_tex.update_layer(_image(field.layer_slice("explored", y)), y)
+		light_tex.update_layer(_image(field.layer_slice("light", y), field.NX, field.NZ), y)
+		explored_tex.update_layer(_image(field.layer_slice("explored", y), field.NX, field.NZ), y)
 		last_layers_uploaded += 1
 	layers_uploaded_total += last_layers_uploaded
 	return last_layers_uploaded
 
 
-static func _image(data: PackedByteArray) -> Image:
-	return Image.create_from_data(LAYER_SIZE, LAYER_SIZE, false, Image.FORMAT_R8, data)
+static func _image(data: PackedByteArray, width: int, height: int) -> Image:
+	return Image.create_from_data(width, height, false, Image.FORMAT_R8, data)

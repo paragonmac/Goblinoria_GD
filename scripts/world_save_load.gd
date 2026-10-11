@@ -20,7 +20,7 @@ const WorldGenerationPipelineScript = preload("res://scripts/world_generation_pi
 
 #region Constants
 const CHUNK_MAGIC := 0x43484B53
-const SAVE_VERSION := 12
+const SAVE_VERSION := 13
 const LEGACY_SAVE_VERSION := 4
 const WORKER_ROLES_LEGACY_SAVE_VERSION := 5
 const NAMED_WORK_SETTINGS_LEGACY_SAVE_VERSION := 6
@@ -30,7 +30,8 @@ const NO_TASKS_LEGACY_SAVE_VERSION := 8
 const SAVE_V9_LEGACY_VERSION := 9
 const SAVE_V10_LEGACY_VERSION := 10
 const SAVE_V11_LEGACY_VERSION := 11
-const LEGACY_SAVE_VERSIONS := [LEGACY_SAVE_VERSION, WORKER_ROLES_LEGACY_SAVE_VERSION, NAMED_WORK_SETTINGS_LEGACY_SAVE_VERSION, PREVIOUS_STAIR_FLIGHT_SAVE_VERSION, NO_TASKS_LEGACY_SAVE_VERSION, SAVE_V9_LEGACY_VERSION, SAVE_V10_LEGACY_VERSION, SAVE_V11_LEGACY_VERSION]
+const SAVE_V12_LEGACY_VERSION := 12
+const LEGACY_SAVE_VERSIONS := [LEGACY_SAVE_VERSION, WORKER_ROLES_LEGACY_SAVE_VERSION, NAMED_WORK_SETTINGS_LEGACY_SAVE_VERSION, PREVIOUS_STAIR_FLIGHT_SAVE_VERSION, NO_TASKS_LEGACY_SAVE_VERSION, SAVE_V9_LEGACY_VERSION, SAVE_V10_LEGACY_VERSION, SAVE_V11_LEGACY_VERSION, SAVE_V12_LEGACY_VERSION]
 const CHUNK_DIR_NAME := "chunks"
 # Optional since V9: camera view at save time. Missing means the default view.
 const VIEW_FILE_NAME := "view.dat"
@@ -148,6 +149,21 @@ func save_world(path: String) -> bool:
 
 #region Load
 func load_world(path: String) -> bool:
+	var old_chunks_x: int = World.WORLD_CHUNKS_X
+	var old_chunks_z: int = World.WORLD_CHUNKS_Z
+	var old_world_size_x: int = world.world_size_x
+	var old_world_size_y: int = world.world_size_y
+	var old_world_size_z: int = world.world_size_z
+	var ok := _load_world(path)
+	if not ok:
+		World.configure_dimensions(old_chunks_x, old_chunks_z)
+		world.world_size_x = old_world_size_x
+		world.world_size_y = old_world_size_y
+		world.world_size_z = old_world_size_z
+	return ok
+
+
+func _load_world(path: String) -> bool:
 	var load_start_usec: int = Time.get_ticks_usec()
 	pending_task_snapshot = {}
 	pending_explored_snapshot = {}
@@ -170,6 +186,11 @@ func load_world(path: String) -> bool:
 	)
 	if not bool(meta_snapshot.get("ok", false)):
 		return false
+	if not World.configure_dimensions(int(meta_snapshot["chunks_x"]), int(meta_snapshot["chunks_z"])):
+		return false
+	world.world_size_x = World.WORLD_CHUNKS_X * World.CHUNK_SIZE
+	world.world_size_z = World.WORLD_CHUNKS_Z * World.CHUNK_SIZE
+	world.world_size_y = World.WORLD_CHUNKS_Y * World.CHUNK_SIZE
 	if int(meta_snapshot["save_version"]) >= NAMED_WORK_SETTINGS_LEGACY_SAVE_VERSION \
 		and not FileAccess.file_exists(world_dir.path_join(WorldBulkChunkSaveLoadScript.BULK_CHUNKS_FILE_NAME)) \
 		and not _has_valid_chunk_save(world_dir):
@@ -189,13 +210,13 @@ func load_world(path: String) -> bool:
 	if not bool(task_snapshot.get("ok", false)):
 		return false
 	var save_version := int(meta_snapshot.get("save_version", SAVE_VERSION))
-	var explored_snapshot := explored_torch_save_load.read_explored_snapshot(world_dir, save_version >= SAVE_V10_LEGACY_VERSION)
+	var explored_snapshot := explored_torch_save_load.read_explored_snapshot(world_dir, save_version >= SAVE_V10_LEGACY_VERSION, world)
 	if not bool(explored_snapshot.get("ok", false)):
 		return false
 	var torch_snapshot := explored_torch_save_load.read_torch_snapshot(world, world_dir, save_version >= SAVE_V10_LEGACY_VERSION)
 	if not bool(torch_snapshot.get("ok", false)):
 		return false
-	var tree_snapshot := explored_torch_save_load.read_tree_snapshot(world, world_dir, save_version >= SAVE_VERSION)
+	var tree_snapshot := explored_torch_save_load.read_tree_snapshot(world, world_dir, save_version >= SAVE_V12_LEGACY_VERSION)
 	if not bool(tree_snapshot.get("ok", false)):
 		return false
 	var view_snapshot := _read_view(world_dir)

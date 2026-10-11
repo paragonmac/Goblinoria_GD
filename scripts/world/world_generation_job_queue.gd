@@ -3,8 +3,10 @@ class_name WorldGenerationJobQueue
 ## Thread-safe queue state for asynchronous chunk generation jobs.
 
 
+
 var jobs: Array = []
 var job_set: Dictionary = {}
+var job_epochs: Dictionary = {}
 var results: Array = []
 var mutex := Mutex.new()
 var semaphore := Semaphore.new()
@@ -55,6 +57,7 @@ func enqueue(coord: Vector3i, job: Dictionary, high_priority: bool, queue_mesh_o
 			semaphore.post()
 		return queued
 	job_set[coord] = 2 if high_priority else 1
+	job_epochs[coord] = int(job.get("epoch", epoch))
 	if high_priority:
 		jobs.insert(0, job)
 	else:
@@ -103,10 +106,14 @@ func pop_result() -> Dictionary:
 	return result
 
 
-func clear_job(coord: Vector3i) -> void:
+func clear_job(coord: Vector3i, job_epoch: int) -> bool:
 	mutex.lock()
-	job_set.erase(coord)
+	var had_job := job_set.has(coord) and int(job_epochs.get(coord, -1)) == job_epoch
+	if had_job:
+		job_set.erase(coord)
+		job_epochs.erase(coord)
 	mutex.unlock()
+	return had_job
 
 
 func get_stats() -> Dictionary:
@@ -120,10 +127,13 @@ func get_stats() -> Dictionary:
 	return stats
 
 
-func reset() -> void:
+func reset() -> int:
 	epoch += 1
 	mutex.lock()
+	var outstanding := job_set.size()
 	jobs.clear()
 	results.clear()
 	job_set.clear()
+	job_epochs.clear()
 	mutex.unlock()
+	return outstanding

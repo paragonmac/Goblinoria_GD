@@ -60,6 +60,7 @@ var diagnostic_path: String = ""
 var cook_world_seed: int = 0
 var cook_sea_level: int = 0
 var cook_world_size_y: int = 0
+var layered_generation_config: Dictionary = {}
 var generation_mode: String = ""
 var pipeline_metrics: Dictionary = {}
 var pipeline_progress: Dictionary = {}
@@ -78,6 +79,10 @@ func start_generation() -> void:
 	cook_world_seed = world.world_seed
 	cook_sea_level = world.sea_level
 	cook_world_size_y = world.world_size_y
+	var config_generator: WorldGenerator = WorldGeneratorScript.new(null)
+	layered_generation_config = config_generator.build_layered_world_config(
+		cook_world_seed, cook_sea_level, cook_world_size_y
+	)
 	cook_start_usec = Time.get_ticks_usec()
 	generation_start_usec = cook_start_usec
 	stage = Stage.GENERATING
@@ -466,7 +471,7 @@ func _run_layered_generation_worker(worker_index: int) -> void:
 	var start_usec: int = Time.get_ticks_usec()
 	_set_worker_total(worker_index, coords.size())
 	var generator: WorldGenerator = WorldGeneratorScript.new(null)
-	var config: Dictionary = generator.build_layered_world_config(cook_world_seed, cook_sea_level, cook_world_size_y)
+	var config: Dictionary = layered_generation_config.duplicate(true)
 	config["progress_callback"] = Callable(self, "_record_pipeline_progress")
 	var result: Dictionary = generator.generate_layered_world(config)
 	var blocks_by_coord: Dictionary = result.get("chunks", {})

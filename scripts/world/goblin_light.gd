@@ -134,6 +134,9 @@ func _recompute(world, worker_id: int, center: Vector3i) -> void:
 	grid.fill(0)
 	_worker_cells[worker_id] = center
 	var field = world.light_field
+	var field_nx: int = field.NX
+	var field_nz: int = field.NZ
+	var field_ny: int = field.NY
 	var opacity: PackedByteArray = field.opacity
 	var block_mirror: PackedByteArray = field.block_mirror
 	var mirror_size := block_mirror.size()
@@ -145,21 +148,21 @@ func _recompute(world, worker_id: int, center: Vector3i) -> void:
 	_opaque_grid.fill(1)
 	for dy in range(-RADIUS, RADIUS + 1):
 		var y := center.y + dy
-		if y < 0 or y >= 256:
+		if y < 0 or y >= field_ny:
 			continue
 		var dy_distance := absi(dy)
 		for dz in range(-RADIUS + dy_distance, RADIUS - dy_distance + 1):
 			var z := base_z + dz
-			if z < 0 or z >= 256:
+			if z < 0 or z >= field_nz:
 				continue
 			var remaining := RADIUS - dy_distance - absi(dz)
 			var pad_row := ((dy + PAD) * PAD_SIDE + dz + PAD) * PAD_SIDE + PAD
-			var mirror_row := (y * 256 + z) * 256
+			var mirror_row: int = (y * field_nz + z) * field_nx
 			for dx in range(-remaining, remaining + 1):
 				var x := base_x + dx
-				if x < 0 or x >= 256:
+				if x < 0 or x >= field_nx:
 					continue
-				var block_idx := mirror_row + x
+				var block_idx: int = mirror_row + x
 				if block_idx < mirror_size:
 					_opaque_grid[pad_row + dx] = opacity[block_mirror[block_idx]]
 	var center_p := (PAD * PAD_SIDE + PAD) * PAD_SIDE + PAD
@@ -214,26 +217,26 @@ func _recompute(world, worker_id: int, center: Vector3i) -> void:
 	var reach := RADIUS + 1
 	for dy in range(-reach, reach + 1):
 		var y := center.y + dy
-		if y < 0 or y >= 256:
+		if y < 0 or y >= field_ny:
 			continue
 		var dy_distance := absi(dy)
 		for dz in range(-reach + dy_distance, reach - dy_distance + 1):
 			var z := base_z + dz
-			if z < 0 or z >= 256:
+			if z < 0 or z >= field_nz:
 				continue
 			var remaining := reach - dy_distance - absi(dz)
 			var pad_row := ((dy + PAD) * PAD_SIDE + dz + PAD) * PAD_SIDE + PAD
 			var grid_row := ((dy + RADIUS) * GRID + dz + RADIUS) * GRID + RADIUS
-			var world_row := (y * 256 + z) * 256
+			var world_row: int = (y * field_nz + z) * field_nx
 			for dx in range(-remaining, remaining + 1):
 				var x := base_x + dx
-				if x < 0 or x >= 256:
+				if x < 0 or x >= field_nx:
 					continue
 				var p := pad_row + dx
 				var lit := _work[p]
 				if lit > 0:
 					grid[grid_row + dx] = lit
-				var idx := world_row + x
+				var idx: int = world_row + x
 				if idx >= volume or explored[idx] != 0:
 					continue
 				if lit > 0 or _work[p + 1] > 0 or _work[p - 1] > 0 						or _work[p + PAD_SIDE] > 0 or _work[p - PAD_SIDE] > 0 						or _work[p + PAD_AREA] > 0 or _work[p - PAD_AREA] > 0:

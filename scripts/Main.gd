@@ -874,7 +874,17 @@ func _start_new_world_with_loading() -> void:
 		performance_controller.begin_operation("loading")
 	_show_loading_screen("Starting new world...")
 	await get_tree().process_frame
-	world.start_new_world()
+	if not world.start_new_world():
+		_set_loading_status("Could not start a new world.")
+		await get_tree().process_frame
+		_hide_loading_screen()
+		_set_menu_status("New world failed to start.")
+		_refresh_menu_buttons()
+		if diagnostics_controller != null:
+			diagnostics_controller.finish_operation("loading", false)
+		if performance_controller != null:
+			performance_controller.finish_operation("loading", false)
+		return
 	if performance_controller != null:
 		performance_controller.world_replaced("new_world")
 	if render_level_controller != null:

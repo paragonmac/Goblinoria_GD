@@ -5,9 +5,13 @@ class_name LightField
 ## non-terrain solids as transparent. Other solid registry blocks occlude;
 ## ramps, terrain slopes and stair flights transmit like the terrain mesher.
 
-const N := 256
-const LAYER_SIZE := N * N
-const VOLUME := N * N * N
+var NX := 256
+var NZ := 256
+var NY := 256
+var LAYER_SIZE := NX * NZ
+var VOLUME := LAYER_SIZE * NY
+var _shift_x := 8
+var _shift_layer := 16
 const UNGENERATED := 255
 const RegistryScript = preload("res://scripts/block_registry.gd")
 
@@ -32,6 +36,13 @@ var _events: Array[Dictionary] = []
 
 func build(world) -> void:
 	_world = world
+	NX = World.WORLD_CHUNKS_X * World.CHUNK_SIZE
+	NZ = World.WORLD_CHUNKS_Z * World.CHUNK_SIZE
+	NY = World.WORLD_CHUNKS_Y * World.CHUNK_SIZE
+	LAYER_SIZE = NX * NZ
+	VOLUME = LAYER_SIZE * NY
+	_shift_x = int(round(log(float(NX)) / log(2.0)))
+	_shift_layer = int(round(log(float(LAYER_SIZE)) / log(2.0)))
 	var started := Time.get_ticks_usec()
 	block_mirror.resize(VOLUME)
 	light.resize(VOLUME)
@@ -44,7 +55,7 @@ func build(world) -> void:
 	_build_opacity()
 	dirty_light_layers.clear()
 	dirty_explored_layers.clear()
-	for y in N:
+	for y in range(NY):
 		dirty_light_layers[y] = true
 		dirty_explored_layers[y] = true
 	_bulk_build = true
@@ -72,7 +83,7 @@ func build(world) -> void:
 				for ly in range(chunk_size):
 					var y: int = base_y + ly
 					var src: int = (lz * chunk_size + ly) * chunk_size
-					var dst: int = (y * N + z) * N + base_x
+					var dst: int = (y * NZ + z) * NX + base_x
 					block_mirror.encode_u64(dst, full_chunk_blocks.decode_u64(src))
 			continue
 		if chunk == null or not chunk.generated:
@@ -80,20 +91,20 @@ func build(world) -> void:
 		var partial_chunk_blocks: PackedByteArray = chunk.blocks
 		for lz in range(chunk_size):
 			var z: int = base_z + lz
-			if z < 0 or z >= N:
+			if z < 0 or z >= NZ:
 				continue
 			for ly in range(chunk_size):
 				var y: int = base_y + ly
-				if y < 0 or y >= N:
+				if y < 0 or y >= NY:
 					continue
 				var src: int = (lz * chunk_size + ly) * chunk_size
-				var dst: int = (y * N + z) * N + base_x
-				if base_x >= 0 and base_x + chunk_size <= N:
+				var dst: int = (y * NZ + z) * NX + base_x
+				if base_x >= 0 and base_x + chunk_size <= NX:
 					block_mirror.encode_u64(dst, partial_chunk_blocks.decode_u64(src))
 				else:
 					for lx in range(chunk_size):
 						var x: int = base_x + lx
-						if x >= 0 and x < N:
+						if x >= 0 and x < NX:
 							block_mirror[dst + lx] = partial_chunk_blocks[src + lx]
 	_events.clear()
 	_build_sky(true)
@@ -127,12 +138,12 @@ func notify_chunk_loaded(coord: Vector3i) -> void:
 	for lz in range(World.CHUNK_SIZE):
 		for ly in range(World.CHUNK_SIZE):
 			var y := base_y + ly
-			if y < 0 or y >= N:
+			if y < 0 or y >= NY:
 				continue
 			for lx in range(World.CHUNK_SIZE):
 				var x := base_x + lx
 				var z := base_z + lz
-				if x >= 0 and x < N and z >= 0 and z < N:
+				if x >= 0 and x < NX and z >= 0 and z < NZ:
 					block_mirror[_index(x, y, z)] = chunk.blocks[(lz * 8 + ly) * 8 + lx]
 	_events.append({"kind": "chunk", "coord": coord})
 
@@ -219,7 +230,7 @@ func apply_explored(snapshot: PackedByteArray) -> void:
 		if snapshot[idx] != 0 and explored[idx] == 0:
 			explored[idx] = 255
 			explored_count += 1
-			dirty_explored_layers[idx >> 16] = true
+			dirty_explored_layers[idx >> _shift_layer] = true
 
 
 func pending_events() -> int:
@@ -245,7 +256,7 @@ func take_dirty_layers(max_layers: int, near_y: int) -> Array[int]:
 
 
 func layer_slice(channel: String, y: int) -> PackedByteArray:
-	if y < 0 or y >= N or light.size() != VOLUME:
+	if y < 0 or y >= NY or light.size() != VOLUME:
 		var output := PackedByteArray()
 		output.resize(LAYER_SIZE)
 		return output
@@ -270,19 +281,19 @@ func _build_opacity() -> void:
 func _build_sky(bulk_build: bool = false) -> void:
 	var heights := PackedInt32Array()
 	heights.resize(LAYER_SIZE)
-	for z in N:
-		for x in N:
-			var y := N - 1
+	for z in range(NZ):
+		for x in range(NX):
+			var y := NY - 1
 			var idx := _index(x, y, z)
 			while y >= 0 and opacity[block_mirror[idx]] == 0:
 				y -= 1
 				idx -= LAYER_SIZE
-			heights[z * N + x] = y + 1
-	for z in N:
-		for x in N:
-			var height: int = heights[z * N + x]
-			var idx := _index(x, N - 1, z)
-			for y in range(N - 1, height - 1, -1):
+			heights[z * NX + x] = y + 1
+	for z in range(NZ):
+		for x in range(NX):
+			var height: int = heights[z * NX + x]
+			var idx := _index(x, NY - 1, z)
+			for y in range(NY - 1, height - 1, -1):
 				if bulk_build:
 					light[idx] = 15
 					display[idx] = 255
@@ -292,32 +303,32 @@ func _build_sky(bulk_build: bool = false) -> void:
 				else:
 					_set_channel(idx, 0, 15)
 				idx -= LAYER_SIZE
-			if bulk_build and height > 0 and height < N and explored[idx] == 0:
+			if bulk_build and height > 0 and height < NY and explored[idx] == 0:
 				explored[idx] = 255
 				explored_count += 1
-			if bulk_build and x < N - 1:
-				var neighbor_height: int = heights[z * N + x + 1]
+			if bulk_build and x < NX - 1:
+				var neighbor_height: int = heights[z * NX + x + 1]
 				for y in range(height, neighbor_height):
 					var neighbor_idx := _index(x + 1, y, z)
 					if explored[neighbor_idx] == 0:
 						explored[neighbor_idx] = 255
 						explored_count += 1
 			if bulk_build and x > 0:
-				var neighbor_height: int = heights[z * N + x - 1]
+				var neighbor_height: int = heights[z * NX + x - 1]
 				for y in range(height, neighbor_height):
 					var neighbor_idx := _index(x - 1, y, z)
 					if explored[neighbor_idx] == 0:
 						explored[neighbor_idx] = 255
 						explored_count += 1
-			if bulk_build and z < N - 1:
-				var neighbor_height: int = heights[(z + 1) * N + x]
+			if bulk_build and z < NZ - 1:
+				var neighbor_height: int = heights[(z + 1) * NX + x]
 				for y in range(height, neighbor_height):
 					var neighbor_idx := _index(x, y, z + 1)
 					if explored[neighbor_idx] == 0:
 						explored[neighbor_idx] = 255
 						explored_count += 1
 			if bulk_build and z > 0:
-				var neighbor_height: int = heights[(z - 1) * N + x]
+				var neighbor_height: int = heights[(z - 1) * NX + x]
 				for y in range(height, neighbor_height):
 					var neighbor_idx := _index(x, y, z - 1)
 					if explored[neighbor_idx] == 0:
@@ -325,15 +336,15 @@ func _build_sky(bulk_build: bool = false) -> void:
 						explored_count += 1
 	var queue := PackedInt32Array()
 	var spill_directions := [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
-	for z in N:
-		for x in N:
-			var h: int = heights[z * N + x]
+	for z in range(NZ):
+		for x in range(NX):
+			var h: int = heights[z * NX + x]
 			for d: Vector2i in spill_directions:
 				var nx: int = x + d.x
 				var nz: int = z + d.y
-				if nx < 0 or nx >= N or nz < 0 or nz >= N:
+				if nx < 0 or nx >= NX or nz < 0 or nz >= NZ:
 					continue
-				var neighbor_height: int = heights[nz * N + nx]
+				var neighbor_height: int = heights[nz * NX + nx]
 				if h >= neighbor_height:
 					continue
 				for y in range(h, neighbor_height):
@@ -362,8 +373,8 @@ func _relight_changed_cell(idx: int) -> void:
 	if opacity[block_mirror[idx]] != 0 and (current >> 4) == 0 and (current & 15) == 15 and not _sources.has(idx):
 		_set_channel(idx, 0, 0)
 		return
-	var x := idx & 255
-	var z := (idx >> 8) & 255
+	var x := idx & (NX - 1)
+	var z := (idx >> _shift_x) & (NZ - 1)
 	_rebuild_light_region(x, z, x, z)
 
 
@@ -374,19 +385,19 @@ func _relight_chunk_region(coord: Vector3i) -> void:
 
 
 func _rebuild_light_region(x0: int, z0: int, x1: int, z1: int) -> void:
-	x0 = clampi(x0 - 15, 0, N - 1)
-	z0 = clampi(z0 - 15, 0, N - 1)
-	x1 = clampi(x1 + 15, 0, N - 1)
-	z1 = clampi(z1 + 15, 0, N - 1)
+	x0 = clampi(x0 - 15, 0, NX - 1)
+	z0 = clampi(z0 - 15, 0, NZ - 1)
+	x1 = clampi(x1 + 15, 0, NX - 1)
+	z1 = clampi(z1 + 15, 0, NZ - 1)
 	var sky_queue := PackedInt32Array()
 	var block_queue := PackedInt32Array()
 	for z in range(z0, z1 + 1):
 		for x in range(x0, x1 + 1):
 			var base := _index(x, 0, z)
-			for y in N:
+			for y in range(NY):
 				_set_channel(base + y * LAYER_SIZE, 0, 0)
 				_set_channel(base + y * LAYER_SIZE, 1, 0)
-			var y := N - 1
+			var y := NY - 1
 			var idx := base + y * LAYER_SIZE
 			while y >= 0 and opacity[block_mirror[idx]] == 0:
 				_set_channel(idx, 0, 15)
@@ -395,8 +406,8 @@ func _rebuild_light_region(x0: int, z0: int, x1: int, z1: int) -> void:
 				idx -= LAYER_SIZE
 	for source in _sources:
 		var source_idx: int = int(source)
-		var sx := source_idx & 255
-		var sz := (source_idx >> 8) & 255
+		var sx := source_idx & (NX - 1)
+		var sz := (source_idx >> _shift_x) & (NZ - 1)
 		if sx >= x0 and sx <= x1 and sz >= z0 and sz <= z1:
 			_set_channel(source_idx, 1, int(_sources[source]))
 			block_queue.append(source_idx)
@@ -406,11 +417,11 @@ func _rebuild_light_region(x0: int, z0: int, x1: int, z1: int) -> void:
 
 
 func _add_region_boundary_seeds(x0: int, z0: int, x1: int, z1: int, sky_queue: PackedInt32Array, block_queue: PackedInt32Array) -> void:
-	for z in range(maxi(0, z0 - 1), mini(N - 1, z1 + 1) + 1):
-		for x in range(maxi(0, x0 - 1), mini(N - 1, x1 + 1) + 1):
+	for z in range(maxi(0, z0 - 1), mini(NZ - 1, z1 + 1) + 1):
+		for x in range(maxi(0, x0 - 1), mini(NX - 1, x1 + 1) + 1):
 			if x >= x0 and x <= x1 and z >= z0 and z <= z1:
 				continue
-			for y in N:
+			for y in range(NY):
 				var idx := _index(x, y, z)
 				if (light[idx] & 15) > 1:
 					sky_queue.append(idx)
@@ -436,11 +447,11 @@ func _remove_block_source(idx: int) -> void:
 		var ci: int = remove_q[head]
 		var lv: int = remove_levels[head]
 		head += 1
-		var x: int = ci & 255
-		var z: int = (ci >> 8) & 255
-		var y: int = ci >> 16
+		var x: int = ci & (NX - 1)
+		var z: int = (ci >> _shift_x) & (NZ - 1)
+		var y: int = ci >> _shift_layer
 		var ni: int
-		if x < N - 1:
+		if x < NX - 1:
 			ni = ci + 1
 			var nl: int = light[ni] >> 4
 			if nl > 0 and nl < lv:
@@ -456,8 +467,8 @@ func _remove_block_source(idx: int) -> void:
 				remove_q.append(ni)
 				remove_levels.append(nl)
 			elif nl >= lv: relight.append(ni)
-		if z < N - 1:
-			ni = ci + N
+		if z < NZ - 1:
+			ni = ci + NX
 			var nl: int = light[ni] >> 4
 			if nl > 0 and nl < lv:
 				_set_channel(ni, 1, 0)
@@ -465,14 +476,14 @@ func _remove_block_source(idx: int) -> void:
 				remove_levels.append(nl)
 			elif nl >= lv: relight.append(ni)
 		if z > 0:
-			ni = ci - N
+			ni = ci - NX
 			var nl: int = light[ni] >> 4
 			if nl > 0 and nl < lv:
 				_set_channel(ni, 1, 0)
 				remove_q.append(ni)
 				remove_levels.append(nl)
 			elif nl >= lv: relight.append(ni)
-		if y < N - 1:
+		if y < NY - 1:
 			ni = ci + LAYER_SIZE
 			var nl: int = light[ni] >> 4
 			if nl > 0 and nl < lv:
@@ -503,17 +514,17 @@ func _run_add(queue: PackedInt32Array, channel: int) -> void:
 		var next_level := current - 1
 		if next_level <= 0:
 			continue
-		var x: int = idx & 255
-		var z: int = (idx >> 8) & 255
-		var y: int = idx >> 16
+		var x: int = idx & (NX - 1)
+		var z: int = (idx >> _shift_x) & (NZ - 1)
+		var y: int = idx >> _shift_layer
 		for direction in range(6):
 			var ni := -1
 			match direction:
-				0: if x < N - 1: ni = idx + 1
+				0: if x < NX - 1: ni = idx + 1
 				1: if x > 0: ni = idx - 1
-				2: if z < N - 1: ni = idx + N
-				3: if z > 0: ni = idx - N
-				4: if y < N - 1: ni = idx + LAYER_SIZE
+				2: if z < NZ - 1: ni = idx + NX
+				3: if z > 0: ni = idx - NX
+				4: if y < NY - 1: ni = idx + LAYER_SIZE
 				5: if y > 0: ni = idx - LAYER_SIZE
 			if ni < 0 or opacity[block_mirror[ni]] != 0:
 				continue
@@ -533,25 +544,25 @@ func _run_add(queue: PackedInt32Array, channel: int) -> void:
 
 
 func _mark_explored_neighborhood(idx: int) -> void:
-	var x: int = idx & 255
-	var z: int = (idx >> 8) & 255
-	var y: int = idx >> 16
+	var x: int = idx & (NX - 1)
+	var z: int = (idx >> _shift_x) & (NZ - 1)
+	var y: int = idx >> _shift_layer
 	if explored[idx] == 0:
 		explored[idx] = 255
 		explored_count += 1
-	if x < N - 1 and explored[idx + 1] == 0:
+	if x < NX - 1 and explored[idx + 1] == 0:
 		explored[idx + 1] = 255
 		explored_count += 1
 	if x > 0 and explored[idx - 1] == 0:
 		explored[idx - 1] = 255
 		explored_count += 1
-	if z < N - 1 and explored[idx + N] == 0:
-		explored[idx + N] = 255
+	if z < NZ - 1 and explored[idx + NX] == 0:
+		explored[idx + NX] = 255
 		explored_count += 1
-	if z > 0 and explored[idx - N] == 0:
-		explored[idx - N] = 255
+	if z > 0 and explored[idx - NX] == 0:
+		explored[idx - NX] = 255
 		explored_count += 1
-	if y < N - 1 and explored[idx + LAYER_SIZE] == 0:
+	if y < NY - 1 and explored[idx + LAYER_SIZE] == 0:
 		explored[idx + LAYER_SIZE] = 255
 		explored_count += 1
 	if y > 0 and explored[idx - LAYER_SIZE] == 0:
@@ -564,7 +575,7 @@ func _set_explored(idx: int) -> void:
 		return
 	explored[idx] = 255
 	explored_count += 1
-	var layer: int = idx >> 16
+	var layer: int = idx >> _shift_layer
 	if not dirty_explored_layers.has(layer):
 		dirty_explored_layers[layer] = true
 
@@ -582,7 +593,7 @@ func _set_channel(idx: int, channel: int, value: int) -> void:
 		if value > 0:
 			_mark_explored_neighborhood(idx)
 		return
-	var layer: int = idx >> 16
+	var layer: int = idx >> _shift_layer
 	if not dirty_light_layers.has(layer):
 		dirty_light_layers[layer] = true
 	if value > 0:
@@ -590,7 +601,7 @@ func _set_channel(idx: int, channel: int, value: int) -> void:
 
 
 func _index(x: int, y: int, z: int) -> int:
-	return (y * N + z) * N + x
+	return (y * NZ + z) * NX + x
 
 
 func _world_index(x: int, y: int, z: int) -> int:
@@ -598,4 +609,4 @@ func _world_index(x: int, y: int, z: int) -> int:
 
 
 func _valid(x: int, y: int, z: int) -> bool:
-	return x >= World.WORLD_MIN_BLOCK_X and x <= World.WORLD_MAX_BLOCK_X and z >= World.WORLD_MIN_BLOCK_Z and z <= World.WORLD_MAX_BLOCK_Z and y >= 0 and y < N
+	return x >= World.WORLD_MIN_BLOCK_X and x <= World.WORLD_MAX_BLOCK_X and z >= World.WORLD_MIN_BLOCK_Z and z <= World.WORLD_MAX_BLOCK_Z and y >= 0 and y < NY
