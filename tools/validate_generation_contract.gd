@@ -163,6 +163,7 @@ func _run_generation_benchmark() -> void:
 		serial_config["parallel_generation"] = false
 		var parallel_config: Dictionary = config.duplicate(true)
 		parallel_config["parallel_generation"] = true
+		parallel_config["generation_workers"] = 16
 		var serial_result: Dictionary = _generate_config(serial_config)
 		var parallel_result: Dictionary = _generate_config(parallel_config)
 		var serial_metrics: Dictionary = serial_result.get("metrics", {})
@@ -175,6 +176,7 @@ func _run_generation_benchmark() -> void:
 			parallel_passes[entry.name] = float(entry.ms)
 		for pass_name in EXPECTED_PASS_NAMES:
 			print("%d,%s,%.2f,%.2f" % [width, pass_name, float(serial_passes.get(pass_name, 0.0)), float(parallel_passes.get(pass_name, 0.0))])
+		print("%d total_ms,%.2f,%.2f" % [width, float(serial_metrics.get("total_ms", 0.0)), float(parallel_metrics.get("total_ms", 0.0))])
 		print("%d worker threads used: serial %d, parallel %d" % [width, int(serial_metrics.get("region_thread_count", 0)), int(parallel_metrics.get("region_thread_count", 0))])
 		if width == 512:
 			var errors: Array = []

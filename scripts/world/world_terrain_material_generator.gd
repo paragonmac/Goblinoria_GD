@@ -129,18 +129,38 @@ func fill_solid_terrain(volume: PackedByteArray) -> void:
 
 
 func fill_solid_terrain_region(x0: int, z0: int, x1: int, z1: int, _region_index: int, volume: PackedByteArray) -> void:
+	var local_elevation: PackedInt32Array = elevation
+	var local_biome: PackedByteArray = biome
+	var local_soil_region: PackedByteArray = soil_region
+	var local_volume: PackedByteArray = volume
+	var size_x: int = world_size_x
+	var size_y: int = world_size_y
 	for local_z in range(z0, z1):
 		for local_x in range(x0, x1):
-			var map_idx: int = _map_index(local_x, local_z)
-			var surface_y: int = elevation[map_idx]
+			var map_idx: int = local_z * size_x + local_x
+			var surface_y: int = local_elevation[map_idx]
 			var topsoil_depth: int = _topsoil_depth(local_x, local_z)
+			var biome_id: int = local_biome[map_idx]
+			var region_id: int = local_soil_region[map_idx]
+			var surface_block: int = _surface_block_for_biome(biome_id)
+			var subsurface_block: int = _subsurface_block_for_biome(biome_id)
 			for y in range(surface_y + 1):
-				var block_id: int = _stone_block_for(map_idx, y, surface_y)
+				var depth: int = surface_y - y
+				var block_id: int
+				if depth > 90:
+					block_id = World.BLOCK_ID_BASALT
+				elif depth > 55 and region_id != World.BLOCK_ID_SANDSTONE:
+					block_id = World.BLOCK_ID_SLATE
+				elif depth > 28:
+					block_id = region_id
+				else:
+					block_id = World.BLOCK_ID_GRANITE if region_id == World.BLOCK_ID_BASALT else region_id
 				if y == surface_y:
-					block_id = _surface_block_for_biome(biome[map_idx])
+					block_id = surface_block
 				elif y >= surface_y - topsoil_depth:
-					block_id = _subsurface_block_for_biome(biome[map_idx])
-				volume[_volume_index(local_x, y, local_z)] = block_id
+					block_id = subsurface_block
+				var volume_idx: int = (local_z * size_y + y) * size_x + local_x
+				local_volume[volume_idx] = block_id
 
 
 func add_static_water(volume: PackedByteArray) -> void:
@@ -195,34 +215,45 @@ func finish_add_ores_regions() -> void:
 
 
 func _add_ores_region(volume: PackedByteArray, x0: int, z0: int, x1: int, z1: int, region_index: int) -> void:
+	var local_elevation: PackedInt32Array = elevation
+	var local_volume: PackedByteArray = volume
+	var size_x: int = world_size_x
+	var size_y: int = world_size_y
+	var min_x: int = world_min_block_x
+	var min_z: int = world_min_block_z
 	var coal_count := 0
 	var iron_count := 0
 	var max_surface_y := 0
 	for local_z in range(z0, z1):
 		for local_x in range(x0, x1):
-			max_surface_y = maxi(max_surface_y, elevation[_map_index(local_x, local_z)])
+			max_surface_y = maxi(max_surface_y, local_elevation[local_z * size_x + local_x])
 	for y in range(2, max(2, max_surface_y - 3)):
 		for local_z in range(z0, z1):
-			var wz: int = _world_z(local_z)
+			var wz: int = min_z + local_z
 			for local_x in range(x0, x1):
-				var surface_y: int = elevation[_map_index(local_x, local_z)]
+				var surface_y: int = local_elevation[local_z * size_x + local_x]
 				if y >= surface_y - 3:
 					continue
-				var wx: int = _world_x(local_x)
-				var idx: int = _volume_index(local_x, y, local_z)
-				if not _is_ore_replaceable(volume[idx]):
+				var wx: int = min_x + local_x
+				var idx: int = (local_z * size_y + y) * size_x + local_x
+				var block_id: int = local_volume[idx]
+				if block_id != World.BLOCK_ID_GRANITE \
+					and block_id != World.BLOCK_ID_LIMESTONE \
+					and block_id != World.BLOCK_ID_BASALT \
+					and block_id != World.BLOCK_ID_SLATE \
+					and block_id != World.BLOCK_ID_SANDSTONE:
 					continue
 				var depth: int = surface_y - y
 				var depth_factor: float = clampf(float(depth) / 70.0, 0.0, 1.0)
 				var coal_threshold: float = (0.79 - depth_factor * 0.04) * 2.0 - 1.0
 				if coal_noise.get_noise_3d(float(wx), float(y), float(wz)) > coal_threshold:
-					volume[idx] = World.BLOCK_ID_COAL
+					local_volume[idx] = World.BLOCK_ID_COAL
 					coal_count += 1
 					continue
 				if y < sea_level - 10:
 					var iron_threshold: float = (0.82 - depth_factor * 0.06) * 2.0 - 1.0
 					if iron_noise.get_noise_3d(float(wx), float(y), float(wz)) > iron_threshold:
-						volume[idx] = World.BLOCK_ID_IRON_ORE
+						local_volume[idx] = World.BLOCK_ID_IRON_ORE
 						iron_count += 1
 	region_coal_counts[region_index] = coal_count
 	region_iron_counts[region_index] = iron_count

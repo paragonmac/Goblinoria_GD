@@ -67,10 +67,11 @@ var pipeline_metrics: Dictionary = {}
 var progress_callback := Callable()
 var biome_counts := PackedInt32Array()
 var cave_stats: Dictionary = {}
-# Region jobs are output-identical but currently slower than serial (512^2:
-# 104.7 s vs 88.5 s), so they stay opt-in until the scaling is fixed.
-var parallel_generation: bool = false
+# Region jobs are output-identical and cut 512^2 total generation from 62.0 s
+# to 23.5 s on the measured machine.
+var parallel_generation: bool = true
 var generation_workers: int = 0
+var generation_region_size: int = GENERATION_REGION_SIZE
 var report_region_progress: bool = false
 var region_mutex := Mutex.new()
 var active_regions: Array = []
@@ -186,8 +187,9 @@ func _apply_config(config: Dictionary) -> void:
 	world_min_block_x = world_min_chunk_x * chunk_size
 	world_min_block_z = world_min_chunk_z * chunk_size
 	sea_level = clampi(int(config.get("sea_level", world_size_y - World.SEA_LEVEL_DEPTH)), 0, world_size_y - 1)
-	parallel_generation = bool(config.get("parallel_generation", false))
+	parallel_generation = bool(config.get("parallel_generation", true))
 	generation_workers = int(config.get("generation_workers", 0))
+	generation_region_size = maxi(1, int(config.get("generation_region_size", GENERATION_REGION_SIZE)))
 	report_region_progress = bool(config.get("report_region_progress", false))
 
 
@@ -620,16 +622,16 @@ func _elapsed_ms(start_usec: int) -> float:
 
 
 func _region_count() -> int:
-	var count_x: int = int(ceil(float(world_size_x) / float(GENERATION_REGION_SIZE)))
-	var count_z: int = int(ceil(float(world_size_z) / float(GENERATION_REGION_SIZE)))
+	var count_x: int = int(ceil(float(world_size_x) / float(generation_region_size)))
+	var count_z: int = int(ceil(float(world_size_z) / float(generation_region_size)))
 	return count_x * count_z
 
 
 func _run_parallel_regions(region_callback: Callable) -> void:
 	active_regions.clear()
-	for z0 in range(0, world_size_z, GENERATION_REGION_SIZE):
-		for x0 in range(0, world_size_x, GENERATION_REGION_SIZE):
-			active_regions.append(Vector4i(x0, z0, mini(x0 + GENERATION_REGION_SIZE, world_size_x), mini(z0 + GENERATION_REGION_SIZE, world_size_z)))
+	for z0 in range(0, world_size_z, generation_region_size):
+		for x0 in range(0, world_size_x, generation_region_size):
+			active_regions.append(Vector4i(x0, z0, mini(x0 + generation_region_size, world_size_x), mini(z0 + generation_region_size, world_size_z)))
 	region_mutex.lock()
 	region_completed = 0
 	region_thread_ids.clear()
