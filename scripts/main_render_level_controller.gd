@@ -25,6 +25,7 @@ var loading_status_callback: Callable
 var show_loading_callback: Callable
 var hide_loading_callback: Callable
 var world_draw_callback: Callable
+var is_wide_world_callback: Callable
 var prepared_chunk_bands: Dictionary = {}
 var background_warmup_queue: Array[int] = []
 var background_warmup_generation_targets: Array[Vector3i] = []
@@ -32,6 +33,7 @@ var background_warmup_mesh_targets: Array[Vector3i] = []
 var background_warmup_mesh_index: int = 0
 var background_warmup_band: int = -1
 var background_warmup_meshes_queued := false
+var background_warmup_center := Vector2i(-1, -1)
 var y_prewarm_generation_targets: Array[Vector3i] = []
 var y_prewarm_mesh_targets: Array[Vector3i] = []
 var y_prewarm_mesh_index: int = 0
@@ -59,6 +61,7 @@ func initialize(
 	show_loading_callback = callbacks.get("show", Callable())
 	hide_loading_callback = callbacks.get("hide", Callable())
 	world_draw_callback = callbacks.get("set_world_draw_enabled", Callable())
+	is_wide_world_callback = callbacks.get("is_wide_world", Callable())
 	target_builder.initialize(world_ref, stream_view_rect_provider)
 	y_transition_profiler.initialize(world_ref)
 
@@ -231,8 +234,17 @@ func prepare_world_for_reveal(status_prefix: String) -> void:
 func _ensure_render_y_ready(render_y: int, status_prefix: String) -> Dictionary:
 	var startup_start_usec: int = Time.get_ticks_usec()
 	var mesh_targets: Array[Vector3i] = _build_reveal_chunk_targets(render_y)
+	var reveal_min_cy: int = 0
+	var lowest_surface_y: int = -1
+	if _is_wide_world():
+		lowest_surface_y = _find_lowest_surface_in_initial_view(render_y)
+		if lowest_surface_y >= 0:
+			reveal_min_cy = maxi(0, floori(float(maxi(lowest_surface_y - World.CHUNK_SIZE, 0)) / float(World.CHUNK_SIZE)))
+			mesh_targets = _filter_targets_from_min_chunk_y(mesh_targets, reveal_min_cy)
 	var profile := {
 		"target_chunk_y": _chunk_y_for_render_y(render_y),
+		"reveal_min_chunk_y": reveal_min_cy,
+		"lowest_surface_y": lowest_surface_y,
 		"mesh_total": mesh_targets.size(),
 		"mesh_ready_before": _count_ready_startup_chunks(mesh_targets),
 		"mesh_ready_after": 0,
@@ -257,6 +269,8 @@ func _ensure_render_y_ready(render_y: int, status_prefix: String) -> Dictionary:
 		return profile
 
 	var generation_targets: Array[Vector3i] = _build_reveal_generation_targets(render_y)
+	if _is_wide_world() and lowest_surface_y >= 0:
+		generation_targets = _build_mesh_generation_targets_for_targets(mesh_targets)
 	var generation_total: int = generation_targets.size()
 	var mesh_total: int = mesh_targets.size()
 	profile["generation_total"] = generation_total
@@ -307,6 +321,50 @@ func _ensure_render_y_ready(render_y: int, status_prefix: String) -> Dictionary:
 	}
 	last_render_y_ready_profile = profile
 	return profile
+
+
+func _filter_targets_from_min_chunk_y(targets: Array[Vector3i], min_cy: int) -> Array[Vector3i]:
+	var filtered: Array[Vector3i] = []
+	for coord: Vector3i in targets:
+		if coord.y >= min_cy:
+			filtered.append(coord)
+	return filtered
+
+
+func _build_mesh_generation_targets_for_targets(mesh_targets: Array[Vector3i]) -> Array[Vector3i]:
+	var targets: Array[Vector3i] = []
+	var seen: Dictionary = {}
+	for coord: Vector3i in mesh_targets:
+		for offset: Vector3i in [Vector3i.ZERO, Vector3i.LEFT, Vector3i.RIGHT, Vector3i.UP,
+			Vector3i.DOWN, Vector3i.FORWARD, Vector3i.BACK]:
+			var neighbor: Vector3i = coord + offset
+			if not seen.has(neighbor) and world.is_chunk_coord_valid(neighbor):
+				seen[neighbor] = true
+				targets.append(neighbor)
+	return targets
+
+
+func _find_lowest_surface_in_initial_view(render_y: int) -> int:
+	if world == null or world.generator == null:
+		return -1
+	var rect: Rect2 = target_builder.get_stream_volume_view_rect(render_y).abs()
+	if rect.size.x <= 0.0 or rect.size.y <= 0.0:
+		return -1
+	var min_x: int = clampi(floori(rect.position.x), World.WORLD_MIN_BLOCK_X, World.WORLD_MAX_BLOCK_X)
+	var max_x: int = clampi(ceili(rect.position.x + rect.size.x), World.WORLD_MIN_BLOCK_X, World.WORLD_MAX_BLOCK_X)
+	var min_z: int = clampi(floori(rect.position.y), World.WORLD_MIN_BLOCK_Z, World.WORLD_MAX_BLOCK_Z)
+	var max_z: int = clampi(ceili(rect.position.y + rect.size.y), World.WORLD_MIN_BLOCK_Z, World.WORLD_MAX_BLOCK_Z)
+	var sample_step: int = maxi(World.CHUNK_SIZE / 2, 1)
+	var lowest_surface_y: int = world.world_size_y
+	for x: int in range(min_x, max_x + 1, sample_step):
+		for z: int in range(min_z, max_z + 1, sample_step):
+			for y: int in range(mini(render_y, world.world_size_y - 1), -1, -1):
+				if world.is_block_solid_id(world.get_block_no_generate(x, y, z)):
+					lowest_surface_y = mini(lowest_surface_y, y + 1)
+					break
+	if lowest_surface_y >= world.world_size_y:
+		return -1
+	return lowest_surface_y
 
 
 func _build_reveal_chunk_targets(render_y: int) -> Array[Vector3i]:
@@ -516,6 +574,7 @@ func _clear_directional_y_prewarm() -> void:
 func _reset_level_loading_state() -> void:
 	prepared_chunk_bands.clear()
 	background_warmup_queue.clear()
+	background_warmup_center = Vector2i(-1, -1)
 	last_startup_load_metrics.clear()
 	last_render_y_ready_profile.clear()
 	_clear_directional_y_prewarm()
@@ -525,6 +584,11 @@ func _reset_level_loading_state() -> void:
 func _schedule_background_level_warmup(center_cy: int) -> void:
 	background_warmup_queue.clear()
 	_clear_background_warmup_active()
+	if _is_wide_world():
+		background_warmup_center = _warmup_center_chunk(center_cy)
+		prepared_chunk_bands.clear()
+	else:
+		background_warmup_center = Vector2i(-1, -1)
 	var seen: Dictionary = {}
 	for distance: int in range(0, World.WORLD_CHUNKS_Y):
 		var lower_cy: int = center_cy - distance
@@ -544,6 +608,11 @@ func _schedule_background_level_warmup(center_cy: int) -> void:
 func _pump_background_level_warmup(world_started: bool) -> void:
 	if world == null or not world_started:
 		return
+	if _is_wide_world() and background_warmup_center.x >= 0:
+		var current_center: Vector2i = _warmup_center_chunk(chunk_y_for_render_y(world.top_render_y))
+		if abs(current_center.x - background_warmup_center.x) >= 4 \
+			or abs(current_center.y - background_warmup_center.y) >= 4:
+			_schedule_background_level_warmup(chunk_y_for_render_y(world.top_render_y))
 	if background_warmup_queue.is_empty() and background_warmup_mesh_targets.is_empty():
 		return
 	if world.generator != null:
@@ -581,19 +650,62 @@ func _begin_next_background_warmup_band() -> void:
 		var cy: int = int(background_warmup_queue.pop_front())
 		if cy < 0 or cy >= World.WORLD_CHUNKS_Y:
 			continue
-		if _is_chunk_band_cached(cy):
+		if not _is_wide_world() and _is_chunk_band_cached(cy):
 			prepared_chunk_bands[cy] = true
 			continue
 		var mesh_bands: Array[int] = []
 		mesh_bands.append(cy)
 		var generation_bands: Array[int] = _build_generation_bands_for_mesh_bands(mesh_bands)
-		background_warmup_generation_targets = _build_chunk_targets_for_bands(generation_bands)
-		background_warmup_mesh_targets = _build_chunk_targets_for_bands(mesh_bands)
+		if _is_wide_world():
+			background_warmup_generation_targets = _build_bounded_warmup_targets(generation_bands, cy)
+			background_warmup_mesh_targets = _build_bounded_warmup_targets(mesh_bands, cy)
+		else:
+			background_warmup_generation_targets = _build_chunk_targets_for_bands(generation_bands)
+			background_warmup_mesh_targets = _build_chunk_targets_for_bands(mesh_bands)
 		background_warmup_mesh_index = 0
 		background_warmup_band = cy
 		background_warmup_meshes_queued = false
 		_request_startup_chunk_generation(background_warmup_generation_targets, false)
 		return
+
+
+func _build_bounded_warmup_targets(bands: Array[int], center_cy: int = -1) -> Array[Vector3i]:
+	var targets: Array[Vector3i] = []
+	if world == null:
+		return targets
+	var band_cy: int = center_cy if center_cy >= 0 else chunk_y_for_render_y(world.top_render_y)
+	var center: Vector2i = _warmup_center_chunk(band_cy)
+	var radius: int = 8
+	if world.streaming != null:
+		radius = maxi(world.streaming.stream_radius_base + 2, 2)
+	var min_x: int = maxi(center.x - radius, World.WORLD_MIN_CHUNK_X)
+	var max_x: int = mini(center.x + radius, World.WORLD_MAX_CHUNK_X)
+	var min_z: int = maxi(center.y - radius, World.WORLD_MIN_CHUNK_Z)
+	var max_z: int = mini(center.y + radius, World.WORLD_MAX_CHUNK_Z)
+	for cy: int in bands:
+		for cz: int in range(min_z, max_z + 1):
+			for cx: int in range(min_x, max_x + 1):
+				targets.append(Vector3i(cx, cy, cz))
+	return targets
+
+
+func _warmup_center_chunk(cy: int) -> Vector2i:
+	var render_y: int = clampi(cy * World.CHUNK_SIZE, 0, world.world_size_y - 1)
+	var view_rect: Rect2 = target_builder.get_stream_volume_view_rect(render_y)
+	if view_rect.size.x <= 0.0 or view_rect.size.y <= 0.0:
+		return Vector2i(
+			WorldChunkSpace.chunk_coord_from_world(world.spawn_coord.x),
+			WorldChunkSpace.chunk_coord_from_world(world.spawn_coord.z)
+		)
+	var center_x: float = view_rect.position.x + view_rect.size.x * 0.5
+	var center_z: float = view_rect.position.y + view_rect.size.y * 0.5
+	return Vector2i(WorldChunkSpace.chunk_coord_from_world(center_x), WorldChunkSpace.chunk_coord_from_world(center_z))
+
+
+func _is_wide_world() -> bool:
+	if is_wide_world_callback.is_valid():
+		return bool(is_wide_world_callback.call())
+	return false
 
 
 func _clear_background_warmup_active() -> void:

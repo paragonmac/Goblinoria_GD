@@ -29,6 +29,9 @@ const HUD_REFRESH_ALL := HUD_REFRESH_STATUS | HUD_REFRESH_INVENTORY | HUD_REFRES
 #region Constants - Save System
 const SAVE_DIR := "user://saves"
 const SAVE_PATH := "user://saves/world.save"
+## The slot Main saves to and loads from. Tests that drive the New Game / Load
+## flow must point this at their own slot so they never touch the player save.
+var save_path := SAVE_PATH
 const SAVE_META_FILE_NAME := "world_meta.dat"
 const ARENA_COOK_MERGE_BUDGET := 256
 #endregion
@@ -55,6 +58,10 @@ var loading_layer: CanvasLayer
 var loading_status_label: Label
 var loading_progress_bar: ProgressBar
 var full_map_generation_check_box: CheckBox
+var world_size_option_button: OptionButton
+var force_on_demand_meshing_for_tests: bool = false
+var last_light_ready_ms: float = 0.0
+var last_new_world_chunk_dimensions: Vector2i = Vector2i.ZERO
 #endregion
 
 #region Controllers
@@ -334,6 +341,7 @@ func _initialize_controllers() -> void:
 			"show": Callable(self, "_show_loading_screen"),
 			"hide": Callable(self, "_hide_loading_screen"),
 			"set_world_draw_enabled": Callable(self, "_set_world_draw_enabled"),
+			"is_wide_world": Callable(self, "is_wide_world"),
 		}
 	)
 #endregion
@@ -611,6 +619,7 @@ func update_info_hover() -> void:
 #region Menu System
 func _setup_menu() -> void:
 	_setup_full_map_generation_option()
+	_setup_world_size_option()
 	_setup_reset_layout_button()
 	if resume_button:
 		resume_button.icon = UiIconAtlas.texture("colony")
@@ -633,6 +642,38 @@ func _setup_menu() -> void:
 		quit_button.add_theme_constant_override("icon_max_width", 22)
 		quit_button.pressed.connect(_on_quit_pressed)
 	_refresh_menu_buttons()
+
+
+func _setup_world_size_option() -> void:
+	if menu_vbox == null or resume_button == null:
+		return
+	world_size_option_button = OptionButton.new()
+	world_size_option_button.name = "WorldSizeOptionButton"
+	world_size_option_button.add_item("256 x 256 (normal)", 32)
+	world_size_option_button.add_item("512 x 512 (large)", 64)
+	world_size_option_button.select(0)
+	world_size_option_button.item_selected.connect(_on_world_size_selected)
+	var row := HBoxContainer.new()
+	row.name = "NewGameRow"
+	var row_index: int = resume_button.get_index()
+	menu_vbox.remove_child(resume_button)
+	menu_vbox.add_child(row)
+	menu_vbox.move_child(row, row_index)
+	row.add_child(resume_button)
+	row.add_child(world_size_option_button)
+	world_size_option_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_on_world_size_selected(0)
+
+
+func _on_world_size_selected(_index: int) -> void:
+	if world_size_option_button == null or full_map_generation_check_box == null:
+		return
+	var large_selected: bool = world_size_option_button.get_selected_id() > 32
+	full_map_generation_check_box.disabled = large_selected or loading_active
+	if large_selected:
+		full_map_generation_check_box.tooltip_text = "Large worlds always generate all blocks; meshes build on demand."
+	else:
+		full_map_generation_check_box.tooltip_text = "Off uses limited streaming. On generates and stores every finite chunk and full-chunk mesh before reveal."
 
 
 func _setup_reset_layout_button() -> void:
@@ -674,6 +715,21 @@ func _setup_full_map_generation_option() -> void:
 func _on_full_map_generation_toggled(enabled: bool) -> void:
 	generate_full_map_on_startup = enabled
 	_set_menu_status("Full map generation: %s" % ("On" if enabled else "Off"))
+
+
+func _selected_world_chunk_dimensions() -> Vector2i:
+	var chunk_count: int = 32
+	if world_size_option_button != null and world_size_option_button.get_selected_id() > 0:
+		chunk_count = world_size_option_button.get_selected_id()
+	return Vector2i(chunk_count, chunk_count)
+
+
+func is_wide_world() -> bool:
+	return force_on_demand_meshing_for_tests or (world != null and (world.world_size_x > 256 or world.world_size_z > 256))
+
+
+func _uses_on_demand_meshing() -> bool:
+	return is_wide_world()
 
 
 func toggle_menu() -> void:
@@ -754,7 +810,7 @@ func _on_save_pressed() -> void:
 	if diagnostics_controller != null:
 		diagnostics_controller.set_operation("saving")
 	world.saved_view_state = camera_controller.get_view_state() if camera_controller != null else {}
-	var ok := world.save_world(SAVE_PATH)
+	var ok := world.save_world(save_path)
 	save_active = false
 	if diagnostics_controller != null:
 		diagnostics_controller.set_operation("")
@@ -847,7 +903,9 @@ func _set_world_draw_enabled(enabled: bool) -> void:
 
 
 func _ensure_light_field_ready() -> bool:
+	var light_start_usec: int = Time.get_ticks_usec()
 	if world == null:
+		last_light_ready_ms = maxf(last_light_ready_ms, float(Time.get_ticks_usec() - light_start_usec) / 1000.0)
 		return false
 	var target_world = world
 	var expected_nx: int = target_world.world_size_x
@@ -857,16 +915,21 @@ func _ensure_light_field_ready() -> bool:
 	var field_current: bool = target_world.light_field_built and field != null \
 			and field.NX == expected_nx and field.NZ == expected_nz and field.NY == expected_ny
 	if field_current:
+		last_light_ready_ms = maxf(last_light_ready_ms, float(Time.get_ticks_usec() - light_start_usec) / 1000.0)
 		return true
 	if await target_world.rebuild_light_field_async():
+		last_light_ready_ms = maxf(last_light_ready_ms, float(Time.get_ticks_usec() - light_start_usec) / 1000.0)
 		return true
 	if world != target_world or target_world.is_queued_for_deletion():
+		last_light_ready_ms = maxf(last_light_ready_ms, float(Time.get_ticks_usec() - light_start_usec) / 1000.0)
 		return false
 	# The main-thread implementation is the recovery path for a failed worker build.
 	target_world.rebuild_light_field()
 	field = target_world.light_field
-	return target_world.light_field_built and field.NX == expected_nx \
+	var ready: bool = target_world.light_field_built and field.NX == expected_nx \
 		and field.NZ == expected_nz and field.NY == expected_ny
+	last_light_ready_ms = maxf(last_light_ready_ms, float(Time.get_ticks_usec() - light_start_usec) / 1000.0)
+	return ready
 
 
 func _finish_world_start_or_load(status_prefix: String, schedule_full_map_warmup: bool) -> void:
@@ -904,6 +967,7 @@ func _finish_world_start_or_load(status_prefix: String, schedule_full_map_warmup
 
 func _start_new_world_with_loading() -> void:
 	var load_start_usec: int = Time.get_ticks_usec()
+	last_light_ready_ms = 0.0
 	if diagnostics_controller != null:
 		diagnostics_controller.begin_operation("loading")
 	if performance_controller != null:
@@ -911,7 +975,9 @@ func _start_new_world_with_loading() -> void:
 	_show_loading_screen("Starting new world...")
 	await get_tree().process_frame
 	world.defer_light_build_on_start = true
-	if not world.start_new_world():
+	var selected_chunks: Vector2i = _selected_world_chunk_dimensions()
+	last_new_world_chunk_dimensions = selected_chunks
+	if not world.start_new_world(-1, selected_chunks.x, selected_chunks.y):
 		_set_loading_status("Could not start a new world.")
 		await get_tree().process_frame
 		_hide_loading_screen()
@@ -926,8 +992,10 @@ func _start_new_world_with_loading() -> void:
 		performance_controller.world_replaced("new_world")
 	if render_level_controller != null:
 		render_level_controller.reset_loading_state()
-	if generate_full_map_on_startup:
-		await _prepare_full_map_arena_cook("Generating and caching full finite map")
+	var large_world: bool = _uses_on_demand_meshing()
+	var cook_full_blocks: bool = generate_full_map_on_startup or large_world
+	if cook_full_blocks:
+		await _prepare_full_map_arena_cook("Generating full finite map", large_world)
 	if not await _ensure_light_field_ready():
 		_set_loading_status("Light build failed. New world could not be started.")
 		_hide_loading_screen()
@@ -938,7 +1006,7 @@ func _start_new_world_with_loading() -> void:
 		if performance_controller != null:
 			performance_controller.finish_operation("loading", false)
 		return
-	if generate_full_map_on_startup:
+	if cook_full_blocks:
 		var save_ms: float = await _save_generated_world_after_create()
 		if world != null and world.arena_cooker != null:
 			world.arena_cooker.set_save_ms(save_ms)
@@ -949,7 +1017,7 @@ func _start_new_world_with_loading() -> void:
 	_set_loading_status("Preparing view...")
 	await get_tree().process_frame
 	world_start_or_load_succeeded = true
-	await _finish_world_start_or_load("Generating startup view", generate_full_map_on_startup)
+	await _finish_world_start_or_load("Generating startup view", generate_full_map_on_startup or large_world)
 	if not world_start_or_load_succeeded:
 		_hide_loading_screen()
 		_set_menu_status("New world failed to start.")
@@ -970,13 +1038,14 @@ func _start_new_world_with_loading() -> void:
 
 func _load_world_with_loading() -> void:
 	var load_start_usec: int = Time.get_ticks_usec()
+	last_light_ready_ms = 0.0
 	if performance_controller != null:
 		performance_controller.begin_operation("loading")
 	var reveal_previous_world := world_started
 	_show_loading_screen("Loading world...")
 	await get_tree().process_frame
 	world.defer_light_build_on_load = true
-	var ok := world.load_world(SAVE_PATH)
+	var ok := world.load_world(save_path)
 	world.defer_light_build_on_load = false
 	if not ok:
 		_hide_loading_screen()
@@ -990,12 +1059,26 @@ func _load_world_with_loading() -> void:
 		performance_controller.world_replaced("load")
 	if render_level_controller != null:
 		render_level_controller.reset_loading_state()
-	if generate_full_map_on_startup:
+	if is_wide_world():
+		var populated_chunks: int = world.save_load.populate_world_chunks_from_bulk_cache()
+		var expected_chunks: int = World.WORLD_CHUNKS_X * World.WORLD_CHUNKS_Y * World.WORLD_CHUNKS_Z
+		if populated_chunks != expected_chunks:
+			push_error("Wide-world load prepared %d of %d bulk chunks before light build" % [
+				populated_chunks, expected_chunks,
+			])
+			_hide_loading_screen()
+			_set_world_draw_enabled(reveal_previous_world)
+			_set_menu_status("Load failed: terrain chunks could not be prepared.")
+			_refresh_menu_buttons()
+			if performance_controller != null:
+				performance_controller.finish_operation("loading", false)
+			return
+	if generate_full_map_on_startup and not _uses_on_demand_meshing():
 		await _prepare_full_map_block_data("Loading full finite map")
 	_set_loading_status("Preparing view...")
 	await get_tree().process_frame
 	world_start_or_load_succeeded = true
-	await _finish_world_start_or_load("Loading startup view", generate_full_map_on_startup)
+	await _finish_world_start_or_load("Loading startup view", generate_full_map_on_startup or is_wide_world())
 	if not world_start_or_load_succeeded:
 		_hide_loading_screen()
 		_set_world_draw_enabled(reveal_previous_world)
@@ -1011,7 +1094,7 @@ func _load_world_with_loading() -> void:
 		performance_controller.finish_operation("loading", true)
 
 
-func _prepare_full_map_arena_cook(status_prefix: String) -> void:
+func _prepare_full_map_arena_cook(status_prefix: String, blocks_only: bool = false) -> void:
 	if world == null or world.arena_cooker == null:
 		return
 	var cooker: WorldArenaCooker = world.arena_cooker
@@ -1033,6 +1116,12 @@ func _prepare_full_map_arena_cook(status_prefix: String) -> void:
 		_set_loading_progress(int(progress.get("chunks_generated", 0)), total)
 		_set_loading_status(_format_arena_cook_status(status_prefix, "Merging block arena", progress))
 		await get_tree().process_frame
+	if blocks_only:
+		cooker.finish_after_block_merge()
+		_set_loading_progress(1, 1)
+		_set_loading_status(_format_arena_cook_status(status_prefix, "Block arena ready (on-demand meshing)", cooker.get_progress()))
+		await get_tree().process_frame
+		return
 	cooker.start_mesh()
 	progress = cooker.get_progress()
 	_set_loading_progress(0, int(progress.get("total", total)))
@@ -1081,7 +1170,7 @@ func _save_generated_world_after_create() -> float:
 	_set_loading_status("Saving generated world and mesh cache...")
 	await get_tree().process_frame
 	var save_start_usec: int = Time.get_ticks_usec()
-	var ok := world.save_world(SAVE_PATH)
+	var ok := world.save_world(save_path)
 	var elapsed_ms := float(Time.get_ticks_usec() - save_start_usec) / 1000.0
 	if not ok:
 		push_warning("Generated world save failed.")
@@ -1239,6 +1328,31 @@ func _report_load_metrics(label: String, start_usec: int) -> void:
 		float(renderer_metrics.get("mesh_upload_ms", 0.0)),
 	]
 	print(message)
+	if _uses_on_demand_meshing():
+		var reveal_profile: Dictionary = render_level_controller.last_render_y_ready_profile if render_level_controller != null else {}
+		var mesh_total: int = int(reveal_profile.get("mesh_total", 0))
+		var mesh_ready: int = int(reveal_profile.get("mesh_ready_after", 0))
+		var memory_mb: float = float(Performance.get_monitor(Performance.MEMORY_STATIC)) / (1024.0 * 1024.0)
+		print("Large world reveal: operation=%s total=%.2fs memory_static=%.1fMiB view_meshes=%d/%d initial_view_mesh_ms=%.1f" % [
+			label,
+			total_ms / 1000.0,
+			memory_mb,
+			mesh_ready,
+			mesh_total,
+			float(reveal_profile.get("total_blocked_ms", 0.0)),
+		])
+		print("Large world stages: light_ready=%.1fms initial_view=%.1fms" % [
+			last_light_ready_ms,
+			float(reveal_profile.get("total_blocked_ms", 0.0)),
+		])
+		if label == "New world" and world != null and world.arena_cooker != null:
+			var cook_metrics: Dictionary = world.arena_cooker.get_diagnostics()
+			print("Large world cook stages: generation=%.1fms block_merge_and_trees=%.1fms full_mesh=%.1fms save=%.1fms" % [
+				float(cook_metrics.get("generation_wall_ms", 0.0)),
+				float(cook_metrics.get("merge_blocks_ms", 0.0)),
+				float(cook_metrics.get("mesh_wall_ms", 0.0)),
+				float(cook_metrics.get("save_ms", 0.0)),
+			])
 	_set_menu_status(message)
 
 
@@ -1254,6 +1368,9 @@ func _refresh_menu_buttons() -> void:
 			quit_button.disabled = true
 		if full_map_generation_check_box != null:
 			full_map_generation_check_box.disabled = true
+		if world_size_option_button != null:
+			world_size_option_button.visible = false
+			world_size_option_button.disabled = true
 		return
 	var has_save := _has_save_game()
 	if resume_button != null:
@@ -1266,8 +1383,12 @@ func _refresh_menu_buttons() -> void:
 	if quit_button != null:
 		quit_button.disabled = false
 	if full_map_generation_check_box != null:
-		full_map_generation_check_box.disabled = false
+		full_map_generation_check_box.disabled = world_size_option_button != null \
+			and world_size_option_button.get_selected_id() > 32
 		full_map_generation_check_box.set_pressed_no_signal(generate_full_map_on_startup)
+	if world_size_option_button != null:
+		world_size_option_button.visible = not world_started
+		world_size_option_button.disabled = world_started
 
 
 func _has_save_game() -> bool:
@@ -1279,8 +1400,8 @@ func _save_meta_path() -> String:
 
 
 func _save_world_dir() -> String:
-	var base := SAVE_PATH.get_basename()
-	return SAVE_PATH if base.is_empty() else base
+	var base := save_path.get_basename()
+	return save_path if base.is_empty() else base
 #endregion
 
 

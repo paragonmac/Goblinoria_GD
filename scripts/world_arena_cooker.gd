@@ -167,6 +167,12 @@ func is_generation_merge_done() -> bool:
 	return done
 
 
+func finish_after_block_merge() -> void:
+	if stage != Stage.MERGING_BLOCKS or not is_generation_merge_done():
+		return
+	stage = Stage.DONE
+
+
 func start_mesh() -> void:
 	if stage != Stage.MERGING_BLOCKS:
 		return

@@ -308,6 +308,20 @@ func load_chunk_into(coord: Vector3i, chunk: ChunkData) -> bool:
 	return true
 
 
+func populate_world_chunks_from_bulk_cache() -> int:
+	if bulk_chunk_save_load == null:
+		return 0
+	var populated: int = bulk_chunk_save_load.populate_world_chunks(world)
+	if mesh_cache_save_load != null:
+		for coord_value: Variant in bulk_chunk_save_load.get_cache():
+			var coord: Vector3i = coord_value
+			var chunk: ChunkData = world.get_chunk(coord)
+			if chunk != null and chunk.generated:
+				mesh_cache_save_load.try_import_for_loaded_chunk(
+					world, bulk_chunk_save_load.get_cache(), coord, chunk)
+	return populated
+
+
 func save_chunk_current(coord: Vector3i, chunk: ChunkData) -> bool:
 	if not world.is_chunk_coord_valid(coord):
 		return false

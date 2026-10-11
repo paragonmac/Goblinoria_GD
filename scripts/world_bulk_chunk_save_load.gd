@@ -51,6 +51,33 @@ func get_cache() -> Dictionary:
 	return bulk_chunk_blocks
 
 
+## Installs already-loaded bulk blocks directly into runtime chunks. This is
+## used before a full-map light build so attachment snapshots can validate
+## against saved terrain without generating or pumping chunks.
+func populate_world_chunks(world: World) -> int:
+	if world == null or not bulk_chunks_loaded:
+		return 0
+	var populated: int = 0
+	for coord_value: Variant in bulk_chunk_blocks:
+		var coord: Vector3i = coord_value
+		if not world.is_chunk_coord_valid(coord):
+			continue
+		var blocks_value: Variant = bulk_chunk_blocks[coord]
+		if typeof(blocks_value) != TYPE_PACKED_BYTE_ARRAY or blocks_value.size() != World.CHUNK_VOLUME:
+			continue
+		var chunk: ChunkData = world.chunks.get(coord)
+		if chunk == null:
+			# The bulk array replaces the blocks immediately; avoid allocating and
+			# filling a throwaway full-size AIR buffer for every saved chunk.
+			chunk = ChunkData.new(0, World.BLOCK_ID_AIR)
+			world.chunks[coord] = chunk
+		chunk.blocks = blocks_value
+		chunk.generated = true
+		chunk.dirty = false
+		populated += 1
+	return populated
+
+
 func replace_chunk_blocks(coord: Vector3i, blocks: PackedByteArray) -> void:
 	if blocks.size() != World.CHUNK_VOLUME:
 		return
