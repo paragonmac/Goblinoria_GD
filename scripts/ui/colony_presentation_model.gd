@@ -28,6 +28,11 @@ static func cell_details(world, pos: Vector3i, level_base_y: int) -> Dictionary:
 	var block_light: int = world.light_field.get_block_light(pos.x, pos.y, pos.z) if world.light_field != null else 0
 	var goblin_light: int = world.goblin_light.get_level(pos.x, pos.y, pos.z) if world.goblin_light != null else 0
 	var explored: bool = world.light_field.is_explored(pos.x, pos.y, pos.z) if world.light_field != null else false
+	var torch_pos: Vector3i = pos if world.torch_store.has_torch(pos) else occupant_cell
+	var has_torch: bool = world.torch_store.has_torch(torch_pos)
+	var torch_text := ""
+	if has_torch:
+		torch_text = "Torch (wall)" if world.torch_store.facing(torch_pos) != Vector3i.ZERO else "Torch"
 	var result := {
 		"kind": "cell",
 		"id": block_id,
@@ -41,7 +46,8 @@ static func cell_details(world, pos: Vector3i, level_base_y: int) -> Dictionary:
 		"protection_reason": protection_reason,
 		"sky_light": sky_light,
 		"block_light": block_light,
-		"torch": world.torch_store.has_torch(pos) or world.torch_store.has_torch(occupant_cell),
+		"torch": has_torch,
+		"torch_text": torch_text,
 		"goblin_light": goblin_light,
 		"explored": explored,
 		"occupant_cell": occupant_cell,

@@ -1,5 +1,5 @@
 extends SceneTree
-## V10 explored fog, torch and legacy migration contract.
+## V11 torch facing and V10 migration contract.
 
 const WorldSaveLoadScript = preload("res://scripts/world_save_load.gd")
 const TransactionScript = preload("res://scripts/world_save_transaction.gd")
@@ -31,19 +31,39 @@ func _run() -> void:
 	var source_slot := root_dir.path_join("v10.save")
 	var source_explored: PackedByteArray = source.light_field.explored.duplicate()
 	var source_torches := source.torch_store.torch_positions()
-	_check(source.save_world(source_slot), "write V10 fixture")
+	_check(source.save_world(source_slot), "write V11 fixture")
 	var reader := _make_world()
-	_check(reader.load_world(source_slot), "load V10 fixture")
+	_check(reader.load_world(source_slot), "load V11 fixture")
 	_load_fixture_chunks(reader)
 	reader.rebuild_light_field()
-	_check(reader.light_field.explored == source_explored, "V10 round trip preserves explored bytes")
-	_check(reader.torch_store.torch_positions().size() == source_torches.size() and reader.torch_store.has_torch(Vector3i(4, 20, 1)), "V10 restores torch positions")
+	_check(reader.light_field.explored == source_explored, "V11 round trip preserves explored bytes")
+	_check(reader.torch_store.torch_positions().size() == source_torches.size() and reader.torch_store.has_torch(Vector3i(4, 20, 1)), "V11 restores torch positions")
+	_check(reader.torch_store.facing(Vector3i(4, 20, 1)) == Vector3i.LEFT, "V11 round trip preserves wall torch facing")
 	_check(reader.light_field.get_block_light(4, 20, 1) == 15 and reader.light_field.pending_events() == 0, "restored torch light is ready at level 15")
-	_check(reader.task_queue.has_active_task_at(Vector3i(6, 20, 1), TaskQueue.TaskType.TORCH), "V10 restores pending TORCH task")
+	_check(reader.task_queue.has_active_task_at(Vector3i(6, 20, 1), TaskQueue.TaskType.TORCH), "V11 restores pending TORCH task")
+	var support_changed_reader := _make_world()
+	_check(support_changed_reader.load_world(source_slot), "load V11 for stale torch support recovery")
+	_load_fixture_chunks(support_changed_reader)
+	support_changed_reader.set_block_raw(3, 20, 1, World.BLOCK_ID_AIR, false)
+	support_changed_reader.set_block_raw(5, 20, 1, World.BLOCK_ID_GRANITE, false)
+	support_changed_reader.rebuild_light_field()
+	_check(support_changed_reader.torch_store.facing(Vector3i(4, 20, 1)) == Vector3i.RIGHT,
+		"V11 restored torch remounts when its saved wall support is gone")
 	var second_slot := root_dir.path_join("v10_second.save")
-	_check(reader.save_world(second_slot), "write second V10 fixture")
+	_check(reader.save_world(second_slot), "write second V11 fixture")
 	_check(FileAccess.get_file_as_bytes(source_slot.path_join("explored.dat")) == FileAccess.get_file_as_bytes(second_slot.path_join("explored.dat")), "explored.dat content is byte-identical after round trip")
 	_check(FileAccess.get_file_as_bytes(source_slot.path_join("torches.dat")) == FileAccess.get_file_as_bytes(second_slot.path_join("torches.dat")), "torches.dat content is byte-identical after round trip")
+	var legacy_torch_slot := root_dir.path_join("v10_torch_format.save")
+	_check(_copy_slot(source_slot.get_basename(), legacy_torch_slot.get_basename()), "copy V10 torch-format fixture")
+	_check(_write_v1_torches(legacy_torch_slot.get_basename().path_join("torches.dat"), Vector3i(4, 20, 1)), "write V10 torches.dat format 1")
+	_check(source.save_load.metadata_save_load.write_world_meta(source, legacy_torch_slot.get_basename(), 10, source.save_load._get_block_table_hash()), "write V10 metadata")
+	var legacy_torch_reader := _make_world()
+	_check(legacy_torch_reader.load_world(legacy_torch_slot), "V10 format 1 torch fixture loads")
+	_load_fixture_chunks(legacy_torch_reader)
+	legacy_torch_reader.rebuild_light_field()
+	_check(legacy_torch_reader.torch_store.has_torch(Vector3i(4, 20, 1)) \
+		and legacy_torch_reader.torch_store.facing(Vector3i(4, 20, 1)) == Vector3i.LEFT,
+		"V10 format 1 torch facing derives from loaded wall support")
 
 	var legacy_slot := root_dir.path_join("v9.save")
 	_check(_copy_slot(source_slot.get_basename(), legacy_slot.get_basename()), "copy V9 fixture")
@@ -69,17 +89,17 @@ func _run() -> void:
 	_check(not reader.load_world(corrupt_slot), "corrupt explored file rejects load")
 	_check(reader.world_seed == live_seed and reader.light_field.explored == live_explored and reader.torch_store.torch_positions() == live_torches, "corrupt explored file leaves live world intact")
 
-	var future_slot := root_dir.path_join("v11.save")
+	var future_slot := root_dir.path_join("v12.save")
 	_check(_copy_slot(source_slot.get_basename(), future_slot.get_basename()), "copy future-version fixture")
-	_check(source.save_load.metadata_save_load.write_world_meta(source, future_slot.get_basename(), 11, source.save_load._get_block_table_hash()), "write V11 metadata")
+	_check(source.save_load.metadata_save_load.write_world_meta(source, future_slot.get_basename(), 12, source.save_load._get_block_table_hash()), "write V12 metadata")
 	var future_reader := _make_world()
-	_check(not future_reader.load_world(future_slot), "V11 rejected")
+	_check(not future_reader.load_world(future_slot), "V12 rejected")
 
-	for world in [source, reader, legacy_reader, future_reader]:
+	for world in [source, reader, support_changed_reader, legacy_reader, legacy_torch_reader, future_reader]:
 		if world.task_manager != null: world.task_manager.shutdown()
 		world.free()
 	_check(_remove_tree(root_dir), "remove isolated save fixtures")
-	print("Save V10: %d checks, %d failures" % [checks, failures])
+	print("Save V11: %d checks, %d failures" % [checks, failures])
 	quit(1 if failures else 0)
 
 
@@ -96,6 +116,7 @@ func _make_world() -> TestWorld:
 			world.set_block_raw(x, 19, z, World.BLOCK_ID_GRANITE, false)
 			for y in range(20, 24):
 				world.set_block_raw(x, y, z, World.BLOCK_ID_AIR, false)
+	world.set_block_raw(3, 20, 1, World.BLOCK_ID_GRANITE, false)
 	for x in range(10, 13):
 		for z in range(1, 4):
 			for y in range(20, 23):
@@ -111,7 +132,7 @@ func _make_world() -> TestWorld:
 	world.light_field.build(world)
 	world.light_field_built = true
 	world.torch_store.bind_world(world)
-	world.torch_store.add_torch(Vector3i(4, 20, 1))
+	world.torch_store.add_torch(Vector3i(4, 20, 1), world.torch_mount_facing(Vector3i(4, 20, 1)))
 	world.light_field.process_events(1000000)
 	world.task_queue.add_task(Vector3i(6, 20, 1), TaskQueue.TaskType.TORCH, 0, {}, [])
 	world.light_field.mark_explored(11, 21, 2)
@@ -145,6 +166,15 @@ func _copy_slot(source: String, destination: String) -> bool:
 func _write_bytes(path: String, bytes: PackedByteArray) -> bool:
 	var file := FileAccess.open(path, FileAccess.WRITE)
 	return file != null and file.store_buffer(bytes) and TransactionScript.finish_write(file)
+
+
+func _write_v1_torches(path: String, pos: Vector3i) -> bool:
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if file == null:
+		return false
+	var ok := file.store_32(0x544F5243) and file.store_16(1) and file.store_32(1) \
+		and file.store_32(pos.x) and file.store_32(pos.y) and file.store_32(pos.z)
+	return TransactionScript.finish_write(file) and ok
 
 
 func _remove_tree(path: String) -> bool:

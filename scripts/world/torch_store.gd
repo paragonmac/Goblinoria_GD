@@ -4,7 +4,7 @@ class_name TorchStore
 
 signal visual_state_changed
 
-var torches: Dictionary = {} # Vector3i -> true
+var torches: Dictionary = {} # Vector3i -> Vector3i facing
 var revision := 0
 var _world
 
@@ -22,10 +22,10 @@ func clear() -> void:
 	visual_state_changed.emit()
 
 
-func add_torch(pos: Vector3i) -> bool:
+func add_torch(pos: Vector3i, facing: Vector3i = Vector3i.ZERO) -> bool:
 	if torches.has(pos):
 		return false
-	torches[pos] = true
+	torches[pos] = facing
 	if _world != null and _world.light_field_built:
 		_world.light_field.add_light_source(pos, 15)
 	revision += 1
@@ -45,6 +45,18 @@ func remove_torch(pos: Vector3i) -> bool:
 
 func has_torch(pos: Vector3i) -> bool:
 	return torches.has(pos)
+
+
+func facing(pos: Vector3i) -> Vector3i:
+	return torches.get(pos, Vector3i.ZERO)
+
+
+func set_facing(pos: Vector3i, facing: Vector3i) -> void:
+	if not torches.has(pos) or torches[pos] == facing:
+		return
+	torches[pos] = facing
+	revision += 1
+	visual_state_changed.emit()
 
 
 func torch_positions() -> Array[Vector3i]:

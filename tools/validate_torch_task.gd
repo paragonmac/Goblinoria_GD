@@ -97,6 +97,7 @@ func _run() -> void:
 	world.workers.append(worker)
 	var placed_end_to_end := await _advance_until(world, func(): return world.torch_store.has_torch(target))
 	_check(placed_end_to_end and world.task_queue.get_task(task.id) == null, "real assignment and world updates complete the torch job")
+	_check(world.torch_store.facing(target) == Vector3i.ZERO, "torch placed on open floor stands upright")
 	world.light_field.process_events(100000)
 	_check(world.light_field.get_block_light(target.x, target.y, target.z) == 15, "torch cell receives block light 15")
 	for distance in range(1, 5):
@@ -128,6 +129,52 @@ func _run() -> void:
 	_check(not world.torch_store.has_torch(target), "removing support removes torch attachment")
 	_check(world.light_field.get_block_light(target.x, target.y, target.z) == 0, "support loss removes torch light")
 
+	var priority_pos := Vector3i(4, 20, 1)
+	world.set_block_raw(priority_pos.x - 1, priority_pos.y, priority_pos.z, World.BLOCK_ID_GRANITE, false)
+	world.set_block_raw(priority_pos.x + 1, priority_pos.y, priority_pos.z, World.BLOCK_ID_GRANITE, false)
+	world.set_block_raw(priority_pos.x, priority_pos.y, priority_pos.z - 1, World.BLOCK_ID_GRANITE, false)
+	world.set_block_raw(priority_pos.x, priority_pos.y, priority_pos.z + 1, World.BLOCK_ID_GRANITE, false)
+	_check(world.torch_mount_facing(priority_pos) == Vector3i.LEFT, "wall mount priority chooses -X before other solid neighbours")
+	world.set_block_raw(priority_pos.x - 1, priority_pos.y, priority_pos.z, World.BLOCK_ID_AIR, false)
+	_check(world.torch_mount_facing(priority_pos) == Vector3i.RIGHT, "wall mount priority chooses +X before -Z and +Z")
+	world.set_block_raw(priority_pos.x + 1, priority_pos.y, priority_pos.z, World.BLOCK_ID_AIR, false)
+	_check(world.torch_mount_facing(priority_pos) == Vector3i.FORWARD, "wall mount priority chooses -Z before +Z")
+	world.set_block_raw(priority_pos.x, priority_pos.y, priority_pos.z - 1, World.BLOCK_ID_AIR, false)
+	_check(world.torch_mount_facing(priority_pos) == Vector3i.BACK, "last wall mount candidate is +Z")
+	world.set_block_raw(priority_pos.x, priority_pos.y, priority_pos.z + 1, World.BLOCK_ID_AIR, false)
+	_check(world.torch_mount_facing(priority_pos) == Vector3i.ZERO, "open floor has no wall facing")
+
+	var mount_pos := Vector3i(5, 20, 1)
+	var revision_before_remount: int = world.torch_store.revision
+	world.torch_store.add_torch(mount_pos)
+	world.set_block_raw(mount_pos.x + 1, mount_pos.y, mount_pos.z, World.BLOCK_ID_GRANITE, false)
+	_check(world.torch_store.facing(mount_pos) == Vector3i.ZERO, "building next to a standing torch leaves its mount unchanged")
+	world.set_block_raw(mount_pos.x, mount_pos.y - 1, mount_pos.z, World.BLOCK_ID_AIR, false)
+	_check(world.torch_store.has_torch(mount_pos) and world.torch_store.facing(mount_pos) == Vector3i.RIGHT,
+		"losing floor support remounts on the first available wall")
+	_check(world.torch_store.revision > revision_before_remount, "remount increments torch visual revision")
+	world.set_block_raw(mount_pos.x, mount_pos.y, mount_pos.z + 1, World.BLOCK_ID_GRANITE, false)
+	world.set_block_raw(mount_pos.x + 1, mount_pos.y, mount_pos.z, World.BLOCK_ID_AIR, false)
+	_check(world.torch_store.facing(mount_pos) == Vector3i.BACK, "digging a wall remounts on another wall")
+	world.set_block_raw(mount_pos.x, mount_pos.y - 1, mount_pos.z, World.BLOCK_ID_GRANITE, false)
+	world.set_block_raw(mount_pos.x, mount_pos.y, mount_pos.z + 1, World.BLOCK_ID_AIR, false)
+	_check(world.torch_store.has_torch(mount_pos) and world.torch_store.facing(mount_pos) == Vector3i.ZERO,
+		"wall support loss falls back to a solid floor")
+	world.set_block_raw(mount_pos.x, mount_pos.y - 1, mount_pos.z, World.BLOCK_ID_AIR, false)
+	_check(not world.torch_store.has_torch(mount_pos), "torch is removed when wall and floor support are gone")
+	world.set_block_raw(mount_pos.x, mount_pos.y - 1, mount_pos.z, World.BLOCK_ID_GRANITE, false)
+
+	var wall_floor_pos := Vector3i(6, 20, 1)
+	world.set_block_raw(wall_floor_pos.x + 1, wall_floor_pos.y, wall_floor_pos.z, World.BLOCK_ID_GRANITE, false)
+	world.torch_store.add_torch(wall_floor_pos, Vector3i.RIGHT)
+	world.set_block_raw(wall_floor_pos.x, wall_floor_pos.y - 1, wall_floor_pos.z, World.BLOCK_ID_AIR, false)
+	_check(world.torch_store.has_torch(wall_floor_pos) and world.torch_store.facing(wall_floor_pos) == Vector3i.RIGHT,
+		"digging the floor under a wall torch keeps its wall support")
+	world.torch_store.remove_torch(wall_floor_pos)
+	world.set_block_raw(wall_floor_pos.x + 1, wall_floor_pos.y, wall_floor_pos.z, World.BLOCK_ID_AIR, false)
+	world.set_block_raw(wall_floor_pos.x, wall_floor_pos.y - 1, wall_floor_pos.z, World.BLOCK_ID_GRANITE, false)
+	world.light_field.process_events(100000)
+
 	world.torch_store.add_torch(target)
 	var high_torch := Vector3i(3, 41, 1)
 	world.torch_store.add_torch(high_torch)
@@ -136,9 +183,8 @@ func _run() -> void:
 	overlay.initialize(world)
 	overlay._sync_torch_multimesh()
 	_check(overlay.torch_multimesh_instance.multimesh.instance_count == 1, "MultiMesh only includes torches at or below top_render_y")
-	var torch_mesh: BoxMesh = overlay.torch_multimesh_instance.multimesh.mesh
-	var torch_buffer: PackedFloat32Array = overlay.torch_multimesh_instance.multimesh.buffer
-	_check(is_equal_approx(torch_buffer[10] - torch_mesh.size.y * 0.5, float(target.y) - 0.5), "torch MultiMesh transform bottom rests on floor height")
+	var torch_mesh: Mesh = overlay.torch_multimesh_instance.multimesh.mesh
+	_check(is_equal_approx(torch_mesh.get_aabb().position.y, -0.5), "torch mesh rests on the floor of its cell")
 	world.top_render_y = 41
 	overlay._sync_torch_multimesh()
 	_check(overlay.torch_multimesh_instance.multimesh.instance_count == 2, "MultiMesh includes torches when render level rises")

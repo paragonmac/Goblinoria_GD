@@ -50,8 +50,9 @@ Technical design:
   nearby goblins); the shader takes the max with static light.
 - Torches: an attachment store (like ItemStackStore), not a block type; new
   TaskType.TORCH appended to the enum; MultiMesh rendering.
-- Save V10: explored.dat and torches.dat. V9 saves default explored to sky-lit
-  cells, air connected to workers, and pending task cells.
+- Save V10 introduced explored.dat and torches.dat; V11 stores torch mount
+  facing. V9 saves default explored to sky-lit cells, air connected to workers,
+  and pending task cells.
 
 Rejected: per-vertex light bake (splits greedy quads, remeshes, breaks the
 mesh cache, cannot carry goblin light); one ImageTexture3D (Godot 4.7 updates

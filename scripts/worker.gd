@@ -914,7 +914,8 @@ func update_working(dt: float, world, task_queue, pathfinder) -> void:
 						idle_timer = IDLE_PAUSE
 						set_state(WorkerState.IDLE, world)
 						return
-					if not world.torch_store.add_torch(task.pos):
+					var torch_facing: Vector3i = world.torch_mount_facing(task.pos)
+					if not world.torch_store.add_torch(task.pos, torch_facing):
 						task_queue.remove_task(task)
 						_trace(world, "task_cancelled", task, "reason=torch_already_exists")
 						current_task_id = -1

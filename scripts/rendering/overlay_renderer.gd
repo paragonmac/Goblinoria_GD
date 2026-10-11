@@ -3,6 +3,7 @@ class_name OverlayRenderer
 ## Renders task overlays and drag preview boxes for block operations.
 
 const ChunkMesherScript = preload("res://scripts/rendering/chunk_mesher.gd")
+const TorchMeshBuilder = preload("res://scripts/rendering/torch_mesh_builder.gd")
 const StairFlightScript = preload("res://scripts/stair_flight.gd")
 
 signal excavation_preview_changed(cells: Array[Vector3i])
@@ -147,6 +148,7 @@ var stair_preview_mesher = ChunkMesherScript.new()
 var stair_preview_mesh_cache: Dictionary = {}
 var excavation_preview_cells: Array[Vector3i] = []
 var torch_multimesh_instance: MultiMeshInstance3D
+var wall_torch_multimesh_instance: MultiMeshInstance3D
 var _torch_revision := -1
 var _torch_render_level := -1
 var _torch_min_render_level := -1
@@ -168,52 +170,51 @@ func _process(_delta: float) -> void:
 
 
 func _create_torch_multimesh() -> void:
-	torch_multimesh_instance = MultiMeshInstance3D.new()
-	torch_multimesh_instance.name = "Torches"
-	var mesh := BoxMesh.new()
-	mesh.size = Vector3(0.12, 0.72, 0.12)
+	# Standing and wall torches (SEE-ADR-021): blocky meshes with a flickering
+	# flame and glow halo; wall torches rotate to their mount facing.
+	torch_multimesh_instance = _new_torch_multimesh("Torches", TorchMeshBuilder.standing_mesh())
+	wall_torch_multimesh_instance = _new_torch_multimesh("WallTorches", TorchMeshBuilder.wall_mesh())
+	_sync_torch_multimesh()
+
+
+func _new_torch_multimesh(node_name: String, mesh: Mesh) -> MultiMeshInstance3D:
+	var instance := MultiMeshInstance3D.new()
+	instance.name = node_name
 	var multimesh := MultiMesh.new()
 	multimesh.transform_format = MultiMesh.TRANSFORM_3D
 	multimesh.mesh = mesh
-	torch_multimesh_instance.multimesh = multimesh
-	var material := StandardMaterial3D.new()
-	material.albedo_color = Color(1.0, 0.55, 0.12)
-	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	material.emission_enabled = true
-	material.emission = Color(1.0, 0.35, 0.06)
-	torch_multimesh_instance.material_override = material
-	add_child(torch_multimesh_instance)
-	_sync_torch_multimesh()
+	instance.multimesh = multimesh
+	add_child(instance)
+	return instance
 
 
 func _sync_torch_multimesh() -> void:
 	if world == null or torch_multimesh_instance == null or world.torch_store == null:
 		return
-	if _torch_revision == world.torch_store.revision and _torch_render_level == world.top_render_y \
-			and _torch_min_render_level == world.get_min_render_y():
+	if _torch_revision == world.torch_store.revision and _torch_render_level == world.top_render_y 			and _torch_min_render_level == world.get_min_render_y():
 		return
 	_torch_revision = world.torch_store.revision
 	_torch_render_level = world.top_render_y
 	_torch_min_render_level = world.get_min_render_y()
-	var visible: Array[Vector3i] = []
+	var standing: Array[Transform3D] = []
+	var mounted: Array[Transform3D] = []
 	for pos: Vector3i in world.torch_store.torches.keys():
-		if pos.y <= world.top_render_y and pos.y >= world.get_min_render_y():
-			visible.append(pos)
-	var multimesh: MultiMesh = torch_multimesh_instance.multimesh
-	multimesh.instance_count = visible.size()
-	multimesh.visible_instance_count = visible.size()
-	var instance_buffer := PackedFloat32Array()
-	instance_buffer.resize(visible.size() * 12)
-	for index in range(visible.size()):
-		var pos: Vector3i = visible[index]
-		var offset := index * 12
-		instance_buffer[offset] = 1.0
-		instance_buffer[offset + 4] = 1.0
-		instance_buffer[offset + 8] = 1.0
-		instance_buffer[offset + 9] = float(pos.x)
-		instance_buffer[offset + 10] = float(pos.y) - 0.14
-		instance_buffer[offset + 11] = float(pos.z)
-	multimesh.buffer = instance_buffer
+		if pos.y > world.top_render_y or pos.y < world.get_min_render_y():
+			continue
+		var facing: Vector3i = world.torch_store.facing(pos)
+		if facing == Vector3i.ZERO:
+			standing.append(Transform3D(Basis(), Vector3(pos)))
+		else:
+			mounted.append(Transform3D(TorchMeshBuilder.facing_basis(facing), Vector3(pos)))
+	_fill_torch_multimesh(torch_multimesh_instance.multimesh, standing)
+	_fill_torch_multimesh(wall_torch_multimesh_instance.multimesh, mounted)
+
+
+func _fill_torch_multimesh(multimesh: MultiMesh, transforms: Array[Transform3D]) -> void:
+	multimesh.instance_count = transforms.size()
+	multimesh.visible_instance_count = transforms.size()
+	for index in range(transforms.size()):
+		multimesh.set_instance_transform(index, transforms[index])
 
 
 func _ensure_shader() -> void:

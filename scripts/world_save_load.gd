@@ -19,7 +19,7 @@ const WorldRampRulesScript = preload("res://scripts/world/world_ramp_rules.gd")
 
 #region Constants
 const CHUNK_MAGIC := 0x43484B53
-const SAVE_VERSION := 10
+const SAVE_VERSION := 11
 const LEGACY_SAVE_VERSION := 4
 const WORKER_ROLES_LEGACY_SAVE_VERSION := 5
 const NAMED_WORK_SETTINGS_LEGACY_SAVE_VERSION := 6
@@ -27,7 +27,8 @@ const PREVIOUS_STAIR_FLIGHT_SAVE_VERSION := 7
 # V8 has no worker positions or saved designations; both default on load.
 const NO_TASKS_LEGACY_SAVE_VERSION := 8
 const SAVE_V9_LEGACY_VERSION := 9
-const LEGACY_SAVE_VERSIONS := [LEGACY_SAVE_VERSION, WORKER_ROLES_LEGACY_SAVE_VERSION, NAMED_WORK_SETTINGS_LEGACY_SAVE_VERSION, PREVIOUS_STAIR_FLIGHT_SAVE_VERSION, NO_TASKS_LEGACY_SAVE_VERSION, SAVE_V9_LEGACY_VERSION]
+const SAVE_V10_LEGACY_VERSION := 10
+const LEGACY_SAVE_VERSIONS := [LEGACY_SAVE_VERSION, WORKER_ROLES_LEGACY_SAVE_VERSION, NAMED_WORK_SETTINGS_LEGACY_SAVE_VERSION, PREVIOUS_STAIR_FLIGHT_SAVE_VERSION, NO_TASKS_LEGACY_SAVE_VERSION, SAVE_V9_LEGACY_VERSION, SAVE_V10_LEGACY_VERSION]
 const CHUNK_DIR_NAME := "chunks"
 # Optional since V9: camera view at save time. Missing means the default view.
 const VIEW_FILE_NAME := "view.dat"
@@ -182,10 +183,10 @@ func load_world(path: String) -> bool:
 	if not bool(task_snapshot.get("ok", false)):
 		return false
 	var save_version := int(meta_snapshot.get("save_version", SAVE_VERSION))
-	var explored_snapshot := explored_torch_save_load.read_explored_snapshot(world_dir, save_version >= SAVE_VERSION)
+	var explored_snapshot := explored_torch_save_load.read_explored_snapshot(world_dir, save_version >= SAVE_V10_LEGACY_VERSION)
 	if not bool(explored_snapshot.get("ok", false)):
 		return false
-	var torch_snapshot := explored_torch_save_load.read_torch_snapshot(world, world_dir, save_version >= SAVE_VERSION)
+	var torch_snapshot := explored_torch_save_load.read_torch_snapshot(world, world_dir, save_version >= SAVE_V10_LEGACY_VERSION)
 	if not bool(torch_snapshot.get("ok", false)):
 		return false
 	var view_snapshot := _read_view(world_dir)
@@ -652,11 +653,22 @@ func apply_final_light_snapshots() -> void:
 		return
 	if bool(pending_torch_snapshot.get("present", false)):
 		for pos: Vector3i in pending_torch_snapshot.get("positions", []):
-			var reason: String = world.torch_site_reject_reason(pos)
-			if not reason.is_empty():
-				push_warning("Skipping restored torch at %s: %s" % [pos, reason])
+			if not world.is_block_coord_valid(pos.x, pos.y, pos.z) \
+					or world.get_block_no_generate(pos.x, pos.y, pos.z) != world.BLOCK_ID_AIR:
+				push_warning("Skipping restored torch at %s: torch cell is not empty" % pos)
 				continue
-			world.torch_store.add_torch(pos)
+			var facing: Vector3i = world.torch_mount_facing(pos)
+			if int(pending_torch_snapshot.get("format_version", 1)) >= 2:
+				facing = pending_torch_snapshot.get("facings", {}).get(pos, Vector3i.ZERO)
+			var support_pos := pos + facing if facing != Vector3i.ZERO else pos + Vector3i.DOWN
+			if not world.is_block_solid_id(world.get_block_no_generate(support_pos.x, support_pos.y, support_pos.z)):
+				facing = world.torch_mount_facing(pos)
+				if facing == Vector3i.ZERO and (pos.y <= 0 or not world.is_block_solid_id(
+					world.get_block_no_generate(pos.x, pos.y - 1, pos.z))):
+					push_warning("Skipping restored torch at %s: no valid support" % pos)
+					continue
+			if not world.torch_store.add_torch(pos, facing):
+				push_warning("Skipping restored torch at %s: duplicate attachment" % pos)
 	world.torch_store.register_light_sources()
 	# Drain restored sources synchronously so the first rendered frame has correct light.
 	while world.light_field.pending_events() > 0:

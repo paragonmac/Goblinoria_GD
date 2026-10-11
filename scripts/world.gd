@@ -186,6 +186,7 @@ const WORKER_SPAWN_OFFSETS := [
 #endregion
 
 #region Constants - Misc
+const TORCH_HORIZONTAL_DIRECTIONS := [Vector3i.LEFT, Vector3i.RIGHT, Vector3i.FORWARD, Vector3i.BACK]
 const VISIBILITY_Y_OFFSET := 1.0
 const RENDER_HEIGHT_CHUNKS_PER_FRAME := 16
 const GENERATION_APPLY_BUDGET := 8
@@ -556,15 +557,20 @@ func set_block_raw(x: int, y: int, z: int, value: int, mark_dirty: bool) -> void
 		light_field.notify_block_changed(x, y, z, prev, value)
 	if goblin_light != null and light_field_built:
 		goblin_light.notify_block_changed(x, y, z)
-	# Attachments are indexed by the changed cell and the air cell above it.
-	# Support loss and solid occupancy therefore stay O(1) per terrain edit.
+	# Torch support checks use the changed cell, cell above, and four neighbours.
+	# Each candidate uses a direct store lookup, keeping terrain edits cheap.
 	if torch_store != null:
 		var changed_pos := Vector3i(x, y, z)
 		if torch_store.has_torch(changed_pos) and is_block_solid_id(value):
 			torch_store.remove_torch(changed_pos)
-		var supported_pos := changed_pos + Vector3i.UP
-		if torch_store.has_torch(supported_pos) and not is_block_solid_id(value):
-			torch_store.remove_torch(supported_pos)
+		if is_block_solid_id(prev) and not is_block_solid_id(value):
+			var supported_pos := changed_pos + Vector3i.UP
+			if torch_store.has_torch(supported_pos) and torch_store.facing(supported_pos) == Vector3i.ZERO:
+				_reassess_torch_support(supported_pos)
+			for direction: Vector3i in TORCH_HORIZONTAL_DIRECTIONS:
+				var wall_torch_pos := changed_pos + direction
+				if torch_store.has_torch(wall_torch_pos) and torch_store.facing(wall_torch_pos) == -direction:
+					_reassess_torch_support(wall_torch_pos)
 	# Path snapshots key on block content, not on render state.
 	chunk.block_revision += 1
 	if mark_dirty:
@@ -632,6 +638,28 @@ func is_solid_no_generate(x: int, y: int, z: int) -> bool:
 
 func is_block_solid_id(block_id: int) -> bool:
 	return block_registry.is_solid(block_id)
+
+
+func torch_mount_facing(pos: Vector3i) -> Vector3i:
+	for direction: Vector3i in TORCH_HORIZONTAL_DIRECTIONS:
+		var wall_pos := pos + direction
+		if is_block_solid_id(get_block_no_generate(wall_pos.x, wall_pos.y, wall_pos.z)):
+			return direction
+	return Vector3i.ZERO
+
+
+func _reassess_torch_support(pos: Vector3i) -> void:
+	var facing: Vector3i = torch_store.facing(pos)
+	var support_pos := pos + facing if facing != Vector3i.ZERO else pos + Vector3i.DOWN
+	if is_block_solid_id(get_block_no_generate(support_pos.x, support_pos.y, support_pos.z)):
+		return
+	var wall_facing := torch_mount_facing(pos)
+	if wall_facing != Vector3i.ZERO:
+		torch_store.set_facing(pos, wall_facing)
+	elif pos.y > 0 and is_block_solid_id(get_block_no_generate(pos.x, pos.y - 1, pos.z)):
+		torch_store.set_facing(pos, Vector3i.ZERO)
+	else:
+		torch_store.remove_torch(pos)
 
 
 func is_block_empty_id(block_id: int) -> bool:

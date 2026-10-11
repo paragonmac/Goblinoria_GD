@@ -8,6 +8,7 @@ const TORCH_FILE_NAME := "torches.dat"
 const EXPLORED_MAGIC := 0x4558504C
 const TORCH_MAGIC := 0x544F5243
 const FORMAT_VERSION := 1
+const TORCH_FORMAT_VERSION := 2
 const COMPRESSION_MODE := FileAccess.COMPRESSION_DEFLATE
 const MAX_TORCHES := 65536
 
@@ -74,9 +75,15 @@ func save_torches(world, world_dir: String) -> bool:
 	if file == null:
 		push_warning("Torch save failed")
 		return false
-	var ok := file.store_32(TORCH_MAGIC) and file.store_16(FORMAT_VERSION) and file.store_32(positions.size())
+	var ok := file.store_32(TORCH_MAGIC) and file.store_16(TORCH_FORMAT_VERSION) and file.store_32(positions.size())
 	for pos in positions:
-		ok = ok and file.store_32(pos.x) and file.store_32(pos.y) and file.store_32(pos.z)
+		var facing: Vector3i = world.torch_store.facing(pos)
+		var facing_code := _facing_to_code(facing)
+		if facing_code < 0:
+			push_warning("Torch save failed: invalid facing at %s" % pos)
+			file.close()
+			return false
+		ok = ok and file.store_32(pos.x) and file.store_32(pos.y) and file.store_32(pos.z) and file.store_8(facing_code)
 	return WorldSaveTransactionScript.finish_write(file) and ok
 
 
@@ -90,20 +97,48 @@ func read_torch_snapshot(world, world_dir: String, required: bool) -> Dictionary
 		return {"ok": false}
 	var version := file.get_16()
 	var count := file.get_32()
-	if version != FORMAT_VERSION or count < 0 or count > MAX_TORCHES \
-			or file.get_length() - file.get_position() != count * 12:
+	if (version != FORMAT_VERSION and version != TORCH_FORMAT_VERSION) or count < 0 or count > MAX_TORCHES \
+			or file.get_length() - file.get_position() != count * (13 if version == TORCH_FORMAT_VERSION else 12):
 		push_warning("Torch load failed: invalid format or length")
 		return {"ok": false}
 	var positions: Array[Vector3i] = []
+	var facings := {}
 	var seen := {}
 	for _i in count:
 		var pos := Vector3i(file.get_32(), file.get_32(), file.get_32())
 		if not world.is_block_coord_valid(pos.x, pos.y, pos.z) or seen.has(pos):
 			push_warning("Torch load failed: invalid position")
 			return {"ok": false}
+		if version == TORCH_FORMAT_VERSION:
+			var facing_code := file.get_8()
+			var facing := _code_to_facing(facing_code)
+			if facing_code < 0 or facing == Vector3i(999, 999, 999):
+				push_warning("Torch load failed: invalid facing")
+				return {"ok": false}
+			facings[pos] = facing
 		seen[pos] = true
 		positions.append(pos)
-	return {"ok": true, "present": true, "positions": positions}
+	return {"ok": true, "present": true, "format_version": version, "positions": positions, "facings": facings}
+
+
+func _facing_to_code(facing: Vector3i) -> int:
+	match facing:
+		Vector3i.ZERO: return 0
+		Vector3i.LEFT: return 1
+		Vector3i.RIGHT: return 2
+		Vector3i.FORWARD: return 3
+		Vector3i.BACK: return 4
+		_: return -1
+
+
+func _code_to_facing(code: int) -> Vector3i:
+	match code:
+		0: return Vector3i.ZERO
+		1: return Vector3i.LEFT
+		2: return Vector3i.RIGHT
+		3: return Vector3i.FORWARD
+		4: return Vector3i.BACK
+		_: return Vector3i(999, 999, 999)
 
 
 ## Legacy exploration reveals worker-connected air and pending designations.
