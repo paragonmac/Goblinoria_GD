@@ -58,6 +58,14 @@ func _run() -> void:
 	_check(str(result.get("reason", "")) != "unexplored" and world.has_pending_task_request_at(known),
 		"Dig on an explored cell is queued (%s)" % str(result))
 	_check(not controller._dig_preview_is_currently_workable(dark), "Dig preview marks unexplored cells invalid")
+	# Hidden air reads as accepted (no task) so a cave is a surprise; known air is rejected.
+	var hidden_air := Vector3i(5, 1, 5)
+	result = controller._enqueue_task_at(hidden_air.x, hidden_air.y, hidden_air.z)
+	_check(bool(result.get("queued", false)) and str(result.get("reason", "")) == "hidden"
+		and not world.has_pending_task_request_at(hidden_air), "Dig on unexplored air is silently accepted (%s)" % str(result))
+	result = controller._enqueue_task_at(known.x, known.y + 1, known.z)
+	_check(not bool(result.get("queued", false)) and str(result.get("reason", "")) == "not_diggable",
+		"Dig on explored air is rejected (%s)" % str(result))
 
 	world.player_mode = World.PlayerMode.ERASE
 	_check(controller._can_erase_at(known), "Erase works on an explored designation")

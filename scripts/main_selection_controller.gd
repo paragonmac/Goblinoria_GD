@@ -402,7 +402,12 @@ func _enqueue_task_at(x: int, y: int, z: int) -> Dictionary:
 				result["reason"] = _torch_reject_reason(pos)
 		World.PlayerMode.DIG:
 			var reject_reason := _dig_selection_reject_reason(pos)
-			if reject_reason.is_empty():
+			if reject_reason == "not_diggable" and not _is_explored(pos):
+				# Hidden air reads as accepted (no task: nothing to dig) so the
+				# designation does not give away a cave before it is found.
+				result["queued"] = true
+				result["reason"] = "hidden"
+			elif reject_reason.is_empty():
 				result["queued"] = world.queue_task_request(TaskQueue.TaskType.DIG, pos, 0)
 				result["reason"] = "queued" if result["queued"] else "duplicate"
 			else:
