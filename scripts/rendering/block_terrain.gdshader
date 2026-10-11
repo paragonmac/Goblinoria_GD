@@ -20,8 +20,12 @@ uniform int light_layers = 256;
 uniform sampler2D goblin_atlas : filter_nearest;
 uniform vec4 goblin_cells[64];
 uniform int goblin_count = 0;
-const float UNLIT_DIM = 0.28;
-const float LEVEL_FALLOFF = 0.8;
+// Darkness brightness: explored-but-unlit memory sits below every lit level,
+// and lit cells rise from LIT_MIN (level 1) to full colour (level 15), so any
+// light, even a goblin's weak level 6, reads brighter than remembered dark.
+const float UNLIT_DIM = 0.10;
+const float LIT_MIN = 0.18;
+const float LIT_GAMMA = 1.3;
 const float HEIGHT_SHADE_FACTOR = 0.15;
 const float HEIGHT_SHADE_MIN = 0.3;
 const float ATLAS_COLUMNS = 4.0;
@@ -103,7 +107,7 @@ void fragment() {
 			float grey = dot(ALBEDO, vec3(0.299, 0.587, 0.114));
 			ALBEDO = mix(vec3(grey), ALBEDO, 0.25) * UNLIT_DIM;
 		} else {
-			ALBEDO *= pow(LEVEL_FALLOFF, 15.0 - level);
+			ALBEDO *= mix(LIT_MIN, 1.0, pow(clamp((level - 1.0) / 14.0, 0.0, 1.0), LIT_GAMMA));
 		}
 	}
 	// A surviving top face with top_flag set is a synthetic cut through solid ground.
