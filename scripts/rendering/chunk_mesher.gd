@@ -342,7 +342,6 @@ func build_cap_arrays_tabled(blocks: PackedByteArray, above_blocks: PackedByteAr
 	if not any:
 		return result
 	var tile_count := ATLAS_COLUMNS * ATLAS_ROWS
-	var tile_scale := _atlas_tile_scale(ATLAS_COLUMNS, ATLAS_ROWS)
 	for z in range(chunk_size):
 		for x in range(chunk_size):
 			var value: int = cells[z * chunk_size + x]
@@ -363,9 +362,8 @@ func build_cap_arrays_tabled(blocks: PackedByteArray, above_blocks: PackedByteAr
 			for dz in range(depth):
 				for dx in range(width):
 					cells[(z + dz) * chunk_size + x + dx] = 0
-			var cell := {"block_id": value - 1, "sample_x": cx * chunk_size + x, "sample_y": cy * chunk_size + ly,
-				"sample_z": cz * chunk_size + z, "top_flag": 1.0, "covered_from_above": true}
-			_emit_greedy_xz_face(vertices, normals, colors, uvs, uv2s, x, z, width, depth, ly, true, cell, color_table, tile_count, tile_scale)
+			_emit_greedy_xz_face(vertices, normals, colors, uvs, uv2s, x, z, width, depth, ly, true,
+				value - 1, cx * chunk_size + x, cy * chunk_size + ly, cz * chunk_size + z, 1.0, true, color_table, tile_count)
 	return result
 
 
@@ -615,25 +613,13 @@ func add_greedy_cube_faces(
 	var counts := PackedInt32Array([0, 0, 0])
 	if padded_size == chunk_size + 2 and padded_blocks.size() == padded_size * padded_size * padded_size:
 		_ensure_face_tables(solid_table, ramp_table, air_id)
-		_add_greedy_top_bottom_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, color_table, tile_count, tile_scale, true, counts)
-		_add_greedy_top_bottom_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, color_table, tile_count, tile_scale, false, counts)
-		_add_greedy_z_side_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, color_table, tile_count, tile_scale, true, counts)
-		_add_greedy_z_side_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, color_table, tile_count, tile_scale, false, counts)
-		_add_greedy_x_side_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, color_table, tile_count, tile_scale, true, counts)
-		_add_greedy_x_side_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, color_table, tile_count, tile_scale, false, counts)
+		_add_greedy_top_bottom_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, color_table, tile_count, true, counts)
+		_add_greedy_top_bottom_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, color_table, tile_count, false, counts)
+		_add_greedy_z_side_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, color_table, tile_count, true, counts)
+		_add_greedy_z_side_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, color_table, tile_count, false, counts)
+		_add_greedy_x_side_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, color_table, tile_count, true, counts)
+		_add_greedy_x_side_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, color_table, tile_count, false, counts)
 	return {"visible": counts[0], "occluded": counts[1], "source_visible": counts[2]}
-
-
-## The cell record the face emitters read, for the first cell of a merged face.
-func _greedy_cell(code: int, wx: int, wy: int, wz: int) -> Dictionary:
-	return {
-		"block_id": (code - 1) >> 1,
-		"sample_x": wx,
-		"sample_y": wy,
-		"sample_z": wz,
-		"top_flag": 0.0,
-		"covered_from_above": ((code - 1) & 1) == 1,
-	}
 
 
 func _add_greedy_top_bottom_faces(
@@ -650,7 +636,6 @@ func _add_greedy_top_bottom_faces(
 	cz: int,
 	color_table: PackedColorArray,
 	tile_count: int,
-	tile_scale: Vector2,
 	is_top: bool,
 	counts: PackedInt32Array
 ) -> void:
@@ -704,7 +689,7 @@ func _add_greedy_top_bottom_faces(
 					for dx in range(width):
 						mask[(z + dz) * n + x + dx] = 0
 				_emit_greedy_xz_face(vertices, normals, colors, uvs, uv2s, x, z, width, depth, ly, is_top,
-					_greedy_cell(code, cx * n + x, cy * n + ly, cz * n + z), color_table, tile_count, tile_scale)
+					(code - 1) >> 1, cx * n + x, cy * n + ly, cz * n + z, 0.0, ((code - 1) & 1) == 1, color_table, tile_count)
 				visible += 1
 				source_visible += width * depth
 	counts[0] += visible
@@ -726,7 +711,6 @@ func _add_greedy_z_side_faces(
 	cz: int,
 	color_table: PackedColorArray,
 	tile_count: int,
-	tile_scale: Vector2,
 	is_forward: bool,
 	counts: PackedInt32Array
 ) -> void:
@@ -755,7 +739,7 @@ func _add_greedy_z_side_faces(
 							code = ((block_id << 1) | solid[padded_blocks[idx + ps]]) + 1
 				if run_start >= 0 and code != run_code:
 					_emit_greedy_z_face(vertices, normals, colors, uvs, uv2s, run_start, lx - run_start, ly, lz, is_forward,
-						_greedy_cell(run_code, cx * n + run_start, cy * n + ly, cz * n + lz), color_table, tile_count, tile_scale)
+						(run_code - 1) >> 1, cx * n + run_start, cy * n + ly, cz * n + lz, 0.0, ((run_code - 1) & 1) == 1, color_table, tile_count)
 					visible += 1
 					source_visible += lx - run_start
 					run_start = -1
@@ -782,7 +766,6 @@ func _add_greedy_x_side_faces(
 	cz: int,
 	color_table: PackedColorArray,
 	tile_count: int,
-	tile_scale: Vector2,
 	is_right: bool,
 	counts: PackedInt32Array
 ) -> void:
@@ -811,7 +794,7 @@ func _add_greedy_x_side_faces(
 							code = ((block_id << 1) | solid[padded_blocks[idx + ps]]) + 1
 				if run_start >= 0 and code != run_code:
 					_emit_greedy_x_face(vertices, normals, colors, uvs, uv2s, lx, ly, run_start, lz - run_start, is_right,
-						_greedy_cell(run_code, cx * n + lx, cy * n + ly, cz * n + run_start), color_table, tile_count, tile_scale)
+						(run_code - 1) >> 1, cx * n + lx, cy * n + ly, cz * n + run_start, 0.0, ((run_code - 1) & 1) == 1, color_table, tile_count)
 					visible += 1
 					source_visible += lz - run_start
 					run_start = -1
@@ -837,6 +820,10 @@ func _with_debug_alpha(color: Color, face_start_vertex: int) -> Color:
 	return Color(color.r, color.g, color.b, _debug_face_alpha(face_start_vertex))
 
 
+## The three face emitters below place the corners already grown by the seam
+## overlap. For an axis-aligned quad _grow_quad moves each in-plane axis outward
+## by SEAM_OVERLAP and leaves the normal axis alone, so the offsets are written
+## out per corner instead of being derived from the quad centre each time.
 func _emit_greedy_xz_face(
 	vertices: PackedVector3Array,
 	normals: PackedVector3Array,
@@ -849,37 +836,41 @@ func _emit_greedy_xz_face(
 	depth: int,
 	ly: int,
 	is_top: bool,
-	cell: Dictionary,
+	block_id: int,
+	wx: int,
+	wy: int,
+	wz: int,
+	top_flag: float,
+	covered_from_above: bool,
 	color_table: PackedColorArray,
-	tile_count: int,
-	tile_scale: Vector2
+	tile_count: int
 ) -> void:
 	var h := FACE_HALF_SIZE
+	var o := SEAM_OVERLAP
 	var y := float(ly) + (h if is_top else -h)
 	var x_min := float(x) - h
 	var x_max := float(x + width) - h
 	var z_min := float(z) - h
 	var z_max := float(z + depth) - h
-	var normal := Vector3.UP if is_top else Vector3.DOWN
-	var v1: Vector3
-	var v2: Vector3
-	var v3: Vector3
-	var v4: Vector3
-	if is_top:
-		v1 = Vector3(x_min, y, z_min)
-		v2 = Vector3(x_min, y, z_max)
-		v3 = Vector3(x_max, y, z_max)
-		v4 = Vector3(x_max, y, z_min)
-	else:
-		v1 = Vector3(x_min, y, z_min)
-		v2 = Vector3(x_max, y, z_min)
-		v3 = Vector3(x_max, y, z_max)
-		v4 = Vector3(x_min, y, z_max)
-	var uv1 := Vector2(0.0, 0.0)
 	var uv2_local := Vector2(0.0, float(depth))
 	var uv3 := Vector2(float(width), float(depth))
 	var uv4 := Vector2(float(width), 0.0)
-	_emit_greedy_quad(vertices, normals, colors, uvs, uv2s, v1, v2, v3, v4, normal, uv1, uv2_local, uv3, uv4, cell, color_table, tile_count)
+	if is_top:
+		_emit_greedy_quad(vertices, normals, colors, uvs, uv2s,
+			Vector3(x_min, y, z_min) + Vector3(-o, 0.0, -o),
+			Vector3(x_min, y, z_max) + Vector3(-o, 0.0, o),
+			Vector3(x_max, y, z_max) + Vector3(o, 0.0, o),
+			Vector3(x_max, y, z_min) + Vector3(o, 0.0, -o),
+			Vector3.UP, ChunkMesherVisualsScript.SHADE_TOP, uv2_local, uv3, uv4,
+			block_id, wx, wy, wz, top_flag, covered_from_above, color_table, tile_count)
+	else:
+		_emit_greedy_quad(vertices, normals, colors, uvs, uv2s,
+			Vector3(x_min, y, z_min) + Vector3(-o, 0.0, -o),
+			Vector3(x_max, y, z_min) + Vector3(o, 0.0, -o),
+			Vector3(x_max, y, z_max) + Vector3(o, 0.0, o),
+			Vector3(x_min, y, z_max) + Vector3(-o, 0.0, o),
+			Vector3.DOWN, ChunkMesherVisualsScript.SHADE_BOTTOM, uv2_local, uv3, uv4,
+			block_id, wx, wy, wz, top_flag, covered_from_above, color_table, tile_count)
 
 
 func _emit_greedy_z_face(
@@ -893,37 +884,41 @@ func _emit_greedy_z_face(
 	ly: int,
 	lz: int,
 	is_forward: bool,
-	cell: Dictionary,
+	block_id: int,
+	wx: int,
+	wy: int,
+	wz: int,
+	top_flag: float,
+	covered_from_above: bool,
 	color_table: PackedColorArray,
-	tile_count: int,
-	tile_scale: Vector2
+	tile_count: int
 ) -> void:
 	var h := FACE_HALF_SIZE
+	var o := SEAM_OVERLAP
 	var x_min := float(x) - h
 	var x_max := float(x + width) - h
 	var y_min := float(ly) - h
 	var y_max := float(ly) + h
 	var z := float(lz) + (h if is_forward else -h)
-	var normal := Vector3.FORWARD if is_forward else Vector3.BACK
-	var v1: Vector3
-	var v2: Vector3
-	var v3: Vector3
-	var v4: Vector3
-	if is_forward:
-		v1 = Vector3(x_min, y_min, z)
-		v2 = Vector3(x_max, y_min, z)
-		v3 = Vector3(x_max, y_max, z)
-		v4 = Vector3(x_min, y_max, z)
-	else:
-		v1 = Vector3(x_min, y_min, z)
-		v2 = Vector3(x_min, y_max, z)
-		v3 = Vector3(x_max, y_max, z)
-		v4 = Vector3(x_max, y_min, z)
-	var uv1 := Vector2(0.0, 0.0)
 	var uv2_local := Vector2(float(width), 0.0)
 	var uv3 := Vector2(float(width), 1.0)
 	var uv4 := Vector2(0.0, 1.0)
-	_emit_greedy_quad(vertices, normals, colors, uvs, uv2s, v1, v2, v3, v4, normal, uv1, uv2_local, uv3, uv4, cell, color_table, tile_count)
+	if is_forward:
+		_emit_greedy_quad(vertices, normals, colors, uvs, uv2s,
+			Vector3(x_min, y_min, z) + Vector3(-o, -o, 0.0),
+			Vector3(x_max, y_min, z) + Vector3(o, -o, 0.0),
+			Vector3(x_max, y_max, z) + Vector3(o, o, 0.0),
+			Vector3(x_min, y_max, z) + Vector3(-o, o, 0.0),
+			Vector3.FORWARD, ChunkMesherVisualsScript.SHADE_FRONT_BACK, uv2_local, uv3, uv4,
+			block_id, wx, wy, wz, top_flag, covered_from_above, color_table, tile_count)
+	else:
+		_emit_greedy_quad(vertices, normals, colors, uvs, uv2s,
+			Vector3(x_min, y_min, z) + Vector3(-o, -o, 0.0),
+			Vector3(x_min, y_max, z) + Vector3(-o, o, 0.0),
+			Vector3(x_max, y_max, z) + Vector3(o, o, 0.0),
+			Vector3(x_max, y_min, z) + Vector3(o, -o, 0.0),
+			Vector3.BACK, ChunkMesherVisualsScript.SHADE_FRONT_BACK, uv2_local, uv3, uv4,
+			block_id, wx, wy, wz, top_flag, covered_from_above, color_table, tile_count)
 
 
 func _emit_greedy_x_face(
@@ -937,84 +932,102 @@ func _emit_greedy_x_face(
 	z: int,
 	depth: int,
 	is_right: bool,
-	cell: Dictionary,
+	block_id: int,
+	wx: int,
+	wy: int,
+	wz: int,
+	top_flag: float,
+	covered_from_above: bool,
 	color_table: PackedColorArray,
-	tile_count: int,
-	tile_scale: Vector2
+	tile_count: int
 ) -> void:
 	var h := FACE_HALF_SIZE
+	var o := SEAM_OVERLAP
 	var x := float(lx) + (h if is_right else -h)
 	var y_min := float(ly) - h
 	var y_max := float(ly) + h
 	var z_min := float(z) - h
 	var z_max := float(z + depth) - h
-	var normal := Vector3.RIGHT if is_right else Vector3.LEFT
-	var v1: Vector3
-	var v2: Vector3
-	var v3: Vector3
-	var v4: Vector3
 	if is_right:
-		v1 = Vector3(x, y_min, z_min)
-		v2 = Vector3(x, y_max, z_min)
-		v3 = Vector3(x, y_max, z_max)
-		v4 = Vector3(x, y_min, z_max)
+		_emit_greedy_quad(vertices, normals, colors, uvs, uv2s,
+			Vector3(x, y_min, z_min) + Vector3(0.0, -o, -o),
+			Vector3(x, y_max, z_min) + Vector3(0.0, o, -o),
+			Vector3(x, y_max, z_max) + Vector3(0.0, o, o),
+			Vector3(x, y_min, z_max) + Vector3(0.0, -o, o),
+			Vector3.RIGHT, ChunkMesherVisualsScript.SHADE_SIDE,
+			Vector2(0.0, 1.0), Vector2(float(depth), 1.0), Vector2(float(depth), 0.0),
+			block_id, wx, wy, wz, top_flag, covered_from_above, color_table, tile_count)
 	else:
-		v1 = Vector3(x, y_min, z_min)
-		v2 = Vector3(x, y_min, z_max)
-		v3 = Vector3(x, y_max, z_max)
-		v4 = Vector3(x, y_max, z_min)
-	var uv1 := Vector2(0.0, 0.0)
-	var uv2_local: Vector2
-	var uv3: Vector2
-	var uv4: Vector2
-	if is_right:
-		uv2_local = Vector2(0.0, 1.0)
-		uv3 = Vector2(float(depth), 1.0)
-		uv4 = Vector2(float(depth), 0.0)
-	else:
-		uv2_local = Vector2(float(depth), 0.0)
-		uv3 = Vector2(float(depth), 1.0)
-		uv4 = Vector2(0.0, 1.0)
-	_emit_greedy_quad(vertices, normals, colors, uvs, uv2s, v1, v2, v3, v4, normal, uv1, uv2_local, uv3, uv4, cell, color_table, tile_count)
+		_emit_greedy_quad(vertices, normals, colors, uvs, uv2s,
+			Vector3(x, y_min, z_min) + Vector3(0.0, -o, -o),
+			Vector3(x, y_min, z_max) + Vector3(0.0, -o, o),
+			Vector3(x, y_max, z_max) + Vector3(0.0, o, o),
+			Vector3(x, y_max, z_min) + Vector3(0.0, o, -o),
+			Vector3.LEFT, ChunkMesherVisualsScript.SHADE_SIDE,
+			Vector2(float(depth), 0.0), Vector2(float(depth), 1.0), Vector2(0.0, 1.0),
+			block_id, wx, wy, wz, top_flag, covered_from_above, color_table, tile_count)
 
 
+## Appends one merged face as two triangles. g1..g4 are the grown corners. This
+## runs once per quad for chunk meshes and slice caps, so it writes straight
+## into the arrays instead of building temporary ones.
 func _emit_greedy_quad(
 	vertices: PackedVector3Array,
 	normals: PackedVector3Array,
 	colors: PackedColorArray,
 	uvs: PackedVector2Array,
 	uv2s: PackedVector2Array,
-	v1: Vector3,
-	v2: Vector3,
-	v3: Vector3,
-	v4: Vector3,
+	g1: Vector3,
+	g2: Vector3,
+	g3: Vector3,
+	g4: Vector3,
 	normal: Vector3,
-	uv1: Vector2,
+	shade: float,
 	uv2_local: Vector2,
 	uv3: Vector2,
 	uv4: Vector2,
-	cell: Dictionary,
+	block_id: int,
+	wx: int,
+	wy: int,
+	wz: int,
+	top_flag: float,
+	covered_from_above: bool,
 	color_table: PackedColorArray,
 	tile_count: int
 ) -> void:
-	var block_id: int = int(cell.get("block_id", 0))
-	var wx: int = int(cell.get("sample_x", 0))
-	var wy: int = int(cell.get("sample_y", 0))
-	var wz: int = int(cell.get("sample_z", 0))
-	var color := block_color_from_table(color_table, block_id, wx, wy, wz)
-	var tile_index := _tile_index_for_id(block_id, tile_count)
-	var shade := face_shade(normal)
-	var shaded := _with_debug_alpha(Color(color.r * shade, color.g * shade, color.b * shade, COLOR_MAX), vertices.size())
-	var encoded_top_flag: float = GREEDY_UV2_FLAG + float(tile_index) * 2.0 + float(cell.get("top_flag", 0.0))
-	if bool(cell.get("covered_from_above", false)):
+	var color: Color = visuals.block_color_from_table(color_table, block_id, wx, wy, wz)
+	var first := vertices.size()
+	var bucket: int = int(first / 3) % DEBUG_FACE_BUCKET_COUNT
+	var shaded := Color(color.r * shade, color.g * shade, color.b * shade,
+		(float(bucket) + 0.5) / float(DEBUG_FACE_BUCKET_COUNT))
+	var tile_index: int = uv_helper.tile_index_for_id(block_id, tile_count)
+	var encoded_top_flag: float = GREEDY_UV2_FLAG + float(tile_index) * 2.0 + top_flag
+	if covered_from_above:
 		encoded_top_flag += COVERED_FROM_ABOVE_FLAG
 	var uv2 := Vector2(float(wy), encoded_top_flag)
-	var grown := _grow_quad(v1, v2, v3, v4)
-	vertices.append_array([grown[0], grown[2], grown[1], grown[0], grown[3], grown[2]])
-	normals.append_array([normal, normal, normal, normal, normal, normal])
-	colors.append_array([shaded, shaded, shaded, shaded, shaded, shaded])
-	uvs.append_array([uv1, uv3, uv2_local, uv1, uv4, uv3])
-	uv2s.append_array([uv2, uv2, uv2, uv2, uv2, uv2])
+	var uv1 := Vector2(0.0, 0.0)
+	var count := first + 6
+	vertices.resize(count)
+	vertices[first] = g1
+	vertices[first + 1] = g3
+	vertices[first + 2] = g2
+	vertices[first + 3] = g1
+	vertices[first + 4] = g4
+	vertices[first + 5] = g3
+	normals.resize(count)
+	colors.resize(count)
+	uv2s.resize(count)
+	for index in range(first, count):
+		normals[index] = normal
+		colors[index] = shaded
+		uv2s[index] = uv2
+	uvs.resize(count)
+	uvs[first] = uv1
+	uvs[first + 1] = uv3
+	uvs[first + 2] = uv2_local
+	uvs[first + 3] = uv1
+	uvs[first + 4] = uv4
+	uvs[first + 5] = uv3
 #endregion
 
 

@@ -42,6 +42,7 @@ var background_warmup_center := Vector2i(-1, -1)
 var y_prewarm_generation_targets: Array[Vector3i] = []
 var y_prewarm_mesh_targets: Array[Vector3i] = []
 var y_prewarm_mesh_index: int = 0
+var y_prewarm_request_cursor: int = 0
 var y_prewarm_generation_cursor: int = 0
 var y_prewarm_settle_cursor: int = 0
 var y_prewarm_render_y: int = -1
@@ -211,7 +212,9 @@ func _log_render_height_change(delta: int) -> void:
 
 
 func _record_instant_y_transition(from_y: int, target_y: int, delta: int, snapshot_before: Dictionary, mesh_targets: Array[Vector3i], mesh_ready_before: int) -> void:
-	var generation_targets: Array[Vector3i] = _build_reveal_generation_targets(target_y)
+	# Neighbour halo of the targets this step actually used, as the loading path
+	# reports. Rebuilding the unfiltered list here cost about 27 ms per step.
+	var generation_targets: Array[Vector3i] = _build_mesh_generation_targets_for_targets(mesh_targets)
 	var generated: int = _count_generated_startup_chunks(generation_targets)
 	var profile := {
 		"target_chunk_y": _chunk_y_for_render_y(target_y),
@@ -332,24 +335,20 @@ func _ensure_render_y_ready(render_y: int, status_prefix: String) -> Dictionary:
 ## Reveal targets a level needs before it can be shown. Wide worlds mesh on
 ## demand and skip chunk layers below the lowest surface in view (ADR-022 phase
 ## 3b). Returns {targets, min_chunk_y, lowest_surface_y}.
-func _meshable_reveal_targets(render_y: int) -> Dictionary:
-	var targets: Array[Vector3i] = _build_reveal_chunk_targets(render_y)
+## with_render_buffer adds the render margin the directional prewarm uses.
+func _meshable_reveal_targets(render_y: int, with_render_buffer: bool = false) -> Dictionary:
 	var min_chunk_y: int = 0
 	var lowest_surface_y: int = -1
 	if _is_wide_world():
 		lowest_surface_y = _find_lowest_surface_in_initial_view(render_y)
 		if lowest_surface_y >= 0:
 			min_chunk_y = maxi(0, floori(float(maxi(lowest_surface_y - World.CHUNK_SIZE, 0)) / float(World.CHUNK_SIZE)))
-			targets = _filter_targets_from_min_chunk_y(targets, min_chunk_y)
+	var targets: Array[Vector3i]
+	if with_render_buffer:
+		targets = target_builder.build_directional_y_prewarm_mesh_targets(render_y, min_chunk_y)
+	else:
+		targets = target_builder.build_reveal_chunk_targets(render_y, min_chunk_y)
 	return {"targets": targets, "min_chunk_y": min_chunk_y, "lowest_surface_y": lowest_surface_y}
-
-
-func _filter_targets_from_min_chunk_y(targets: Array[Vector3i], min_cy: int) -> Array[Vector3i]:
-	var filtered: Array[Vector3i] = []
-	for coord: Vector3i in targets:
-		if coord.y >= min_cy:
-			filtered.append(coord)
-	return filtered
 
 
 func _build_mesh_generation_targets_for_targets(mesh_targets: Array[Vector3i]) -> Array[Vector3i]:
@@ -377,12 +376,38 @@ func _find_lowest_surface_in_initial_view(render_y: int) -> int:
 	var max_z: int = clampi(ceili(rect.position.y + rect.size.y), World.WORLD_MIN_BLOCK_Z, World.WORLD_MAX_BLOCK_Z)
 	var sample_step: int = maxi(World.CHUNK_SIZE / 2, 1)
 	var lowest_surface_y: int = world.world_size_y
+	# Runs on every level step. Reads chunk arrays directly, one chunk lookup per
+	# eight blocks of depth; the per-block world queries it replaced took about
+	# 20 ms for a surface view. Missing chunks read as air, as before.
+	var n: int = World.CHUNK_SIZE
+	var cells: int = n * n * n
+	var solid := PackedByteArray()
+	solid.resize(BlockRegistry.TABLE_SIZE)
+	for block_id in range(solid.size()):
+		solid[block_id] = 1 if world.is_block_solid_id(block_id) else 0
+	var start_y: int = mini(render_y, world.world_size_y - 1)
 	for x: int in range(min_x, max_x + 1, sample_step):
+		var cx: int = floori(float(x) / float(n))
+		var lx: int = x - cx * n
 		for z: int in range(min_z, max_z + 1, sample_step):
-			for y: int in range(mini(render_y, world.world_size_y - 1), -1, -1):
-				if world.is_block_solid_id(world.get_block_no_generate(x, y, z)):
-					lowest_surface_y = mini(lowest_surface_y, y + 1)
-					break
+			var cz: int = floori(float(z) / float(n))
+			var column: int = (z - cz * n) * n * n + lx
+			var y: int = start_y
+			while y >= 0:
+				var cy: int = floori(float(y) / float(n))
+				var base_y: int = cy * n
+				var chunk: ChunkData = world.get_chunk(Vector3i(cx, cy, cz))
+				if chunk != null and chunk.blocks.size() == cells:
+					var blocks: PackedByteArray = chunk.blocks
+					var found: int = -1
+					for ly: int in range(y - base_y, -1, -1):
+						if solid[blocks[column + ly * n]] != 0:
+							found = base_y + ly
+							break
+					if found >= 0:
+						lowest_surface_y = mini(lowest_surface_y, found + 1)
+						break
+				y = base_y - 1
 	if lowest_surface_y >= world.world_size_y:
 		return -1
 	return lowest_surface_y
@@ -394,14 +419,6 @@ func _build_reveal_chunk_targets(render_y: int) -> Array[Vector3i]:
 
 func _build_reveal_generation_targets(render_y: int) -> Array[Vector3i]:
 	return target_builder.build_reveal_generation_targets(render_y)
-
-
-func _build_directional_y_prewarm_mesh_targets(render_y: int) -> Array[Vector3i]:
-	return target_builder.build_directional_y_prewarm_mesh_targets(render_y)
-
-
-func _build_directional_y_prewarm_generation_targets(render_y: int) -> Array[Vector3i]:
-	return target_builder.build_directional_y_prewarm_generation_targets(render_y)
 
 
 func _build_generation_bands_for_mesh_bands(mesh_bands: Array[int]) -> Array[int]:
@@ -506,6 +523,19 @@ func _count_generated_startup_chunks(targets: Array[Vector3i]) -> int:
 ## Warmup progress cursors. Each call checks at most WARMUP_POLL_BUDGET targets
 ## and stops at the first one that is not done, so a pump costs the same whether
 ## it has 600 targets or 17,000.
+## Asks for generation of the next batch of targets that are not generated yet.
+## Issuing every request on the level-step frame cost about 13 ms even when the
+## whole world was already generated.
+func _advance_generation_requests(targets: Array[Vector3i], cursor: int) -> int:
+	var limit: int = mini(targets.size(), cursor + WARMUP_POLL_BUDGET)
+	while cursor < limit:
+		var chunk: ChunkData = world.ensure_chunk(targets[cursor])
+		if chunk != null and not chunk.generated:
+			world.request_chunk_generation_async(targets[cursor], false, false)
+		cursor += 1
+	return cursor
+
+
 func _advance_generated_cursor(targets: Array[Vector3i], cursor: int) -> int:
 	var limit: int = mini(targets.size(), cursor + WARMUP_POLL_BUDGET)
 	while cursor < limit:
@@ -583,16 +613,18 @@ func _schedule_directional_y_prewarm(delta: int, current_y: int) -> void:
 		return
 	y_prewarm_render_y = prewarm_y
 	y_prewarm_direction = direction
-	y_prewarm_generation_targets = _build_directional_y_prewarm_generation_targets(prewarm_y)
-	y_prewarm_mesh_targets = _build_directional_y_prewarm_mesh_targets(prewarm_y)
+	# Same layers the reveal will need. Wide worlds mesh on demand (ADR-022), so
+	# layers under the lowest visible surface are left to streaming.
+	y_prewarm_mesh_targets = _meshable_reveal_targets(prewarm_y, true).targets
+	y_prewarm_generation_targets = _build_mesh_generation_targets_for_targets(y_prewarm_mesh_targets)
 	y_prewarm_mesh_index = 0
+	y_prewarm_request_cursor = 0
 	y_prewarm_generation_cursor = 0
 	y_prewarm_settle_cursor = 0
 	y_prewarm_meshes_queued = false
 	if y_prewarm_mesh_targets.is_empty():
 		_clear_directional_y_prewarm()
-		return
-	_request_startup_chunk_generation(y_prewarm_generation_targets, false, false)
+	# Generation requests are issued by the pump, a budget per frame.
 
 
 func _pump_directional_y_prewarm(world_started: bool) -> void:
@@ -604,6 +636,7 @@ func _pump_directional_y_prewarm(world_started: bool) -> void:
 		world.generator.process_generation_results(Y_DIRECTIONAL_PREWARM_GENERATION_RESULT_BUDGET)
 	if world.renderer != null:
 		world.renderer.process_mesh_results(Y_DIRECTIONAL_PREWARM_MESH_RESULT_BUDGET)
+	y_prewarm_request_cursor = _advance_generation_requests(y_prewarm_generation_targets, y_prewarm_request_cursor)
 	y_prewarm_generation_cursor = _advance_generated_cursor(y_prewarm_generation_targets, y_prewarm_generation_cursor)
 	if y_prewarm_generation_cursor < y_prewarm_generation_targets.size():
 		return
@@ -626,6 +659,7 @@ func _clear_directional_y_prewarm() -> void:
 	y_prewarm_generation_targets.clear()
 	y_prewarm_mesh_targets.clear()
 	y_prewarm_mesh_index = 0
+	y_prewarm_request_cursor = 0
 	y_prewarm_generation_cursor = 0
 	y_prewarm_settle_cursor = 0
 	y_prewarm_render_y = -1

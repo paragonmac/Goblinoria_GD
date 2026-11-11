@@ -25,20 +25,18 @@ func update_world(world_ref: World) -> void:
 	cached_band_rects.clear()
 
 
-func build_reveal_chunk_targets(render_y: int) -> Array[Vector3i]:
-	return _build_visible_chunk_targets(render_y, false)
+## min_chunk_y skips chunk layers below it (wide worlds mesh on demand and leave
+## layers under the lowest visible surface alone).
+func build_reveal_chunk_targets(render_y: int, min_chunk_y: int = 0) -> Array[Vector3i]:
+	return _build_visible_chunk_targets(render_y, false, min_chunk_y)
 
 
 func build_reveal_generation_targets(render_y: int) -> Array[Vector3i]:
 	return _build_mesh_generation_targets(build_reveal_chunk_targets(render_y))
 
 
-func build_directional_y_prewarm_mesh_targets(render_y: int) -> Array[Vector3i]:
-	return _build_visible_chunk_targets(render_y, true)
-
-
-func build_directional_y_prewarm_generation_targets(render_y: int) -> Array[Vector3i]:
-	return _build_mesh_generation_targets(build_directional_y_prewarm_mesh_targets(render_y))
+func build_directional_y_prewarm_mesh_targets(render_y: int, min_chunk_y: int = 0) -> Array[Vector3i]:
+	return _build_visible_chunk_targets(render_y, true, min_chunk_y)
 
 
 func _build_mesh_generation_targets(mesh_targets: Array[Vector3i]) -> Array[Vector3i]:
@@ -156,12 +154,14 @@ func _visible_block_y_bounds(render_y: int) -> Vector2i:
 	return Vector2i(world.get_min_render_y(), mini(render_y + upper_margin + 1, world.world_size_y))
 
 
-func _build_visible_chunk_targets(render_y: int, include_render_buffer: bool) -> Array[Vector3i]:
+func _build_visible_chunk_targets(render_y: int, include_render_buffer: bool, min_chunk_y: int = 0) -> Array[Vector3i]:
 	var targets: Array[Vector3i] = []
 	if world == null:
 		return targets
 	var rects := get_render_band_view_rects(render_y)
 	for cy: int in rects:
+		if cy < min_chunk_y:
+			continue
 		var rect: Rect2 = rects[cy]
 		var bands: Array[int] = [cy]
 		targets.append_array(_build_chunk_targets_for_bands_in_bounds(

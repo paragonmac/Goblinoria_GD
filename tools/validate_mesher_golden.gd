@@ -2,7 +2,8 @@ extends SceneTree
 ## Chunk mesher output must stay byte-identical unless a change is meant to alter
 ## geometry. Builds a fixed set of deterministic chunks (cubes of every solid
 ## block, every ramp, slope and stair-flight id, with present and missing
-## neighbours) and compares a hash of each result with a recorded fixture.
+## neighbours) and compares a hash of each result with a recorded fixture. Slice
+## cap geometry for three layers of each chunk is pinned the same way.
 ##
 ## After an intentional geometry change, regenerate the fixture:
 ##   godot --headless --path <repo> --script res://tools/validate_mesher_golden.gd -- --update
@@ -12,6 +13,7 @@ const FIXTURE_PATH := "res://tools/fixtures/mesher_golden.json"
 const CASES_PER_PATTERN := 40
 const PATTERNS := ["noise", "terrain", "solid", "empty", "checker", "layers", "shapes"]
 const NEIGHBOR_SIDES := ["x_neg", "x_pos", "y_neg", "y_pos", "z_neg", "z_pos"]
+const CAP_LAYERS := [0, 3, 7]
 
 var mesher := ChunkMesher.new()
 var cube_ids: Array[int] = []
@@ -32,6 +34,9 @@ func _init() -> void:
 	world.free()
 
 	var hashes: Array[String] = []
+	var cap_hashes: Array[String] = []
+	var cap_usec := 0
+	var cap_quads := 0
 	var build_usec := 0
 	var vertex_total := 0
 	for pattern: String in PATTERNS:
@@ -42,14 +47,26 @@ func _init() -> void:
 			build_usec += Time.get_ticks_usec() - started
 			vertex_total += int(result.get("vertex_count", 0))
 			hashes.append(_hash(result))
+			# The top layer is covered by the chunk above; use this chunk's own
+			# blocks as that neighbour so the case needs no extra data.
+			var blocks: PackedByteArray = job["blocks"]
+			for ly: int in CAP_LAYERS:
+				started = Time.get_ticks_usec()
+				var cap: Dictionary = mesher.build_cap_arrays(blocks, blocks, World.CHUNK_SIZE, int(job["cx"]), int(job["cy"]), int(job["cz"]), ly,
+					World.BLOCK_ID_AIR, mesher.block_solid_table, mesher.block_ramp_table, mesher.block_color_table)
+				cap_usec += Time.get_ticks_usec() - started
+				cap_quads += cap["vertices"].size() / 6
+				cap_hashes.append(var_to_bytes([cap["vertices"], cap["normals"], cap["colors"], cap["uv"], cap["uv2"]]).hex_encode().sha256_text())
 	var case_count := hashes.size()
 	print("Mesher golden: %d cases, %d vertices, %.1f ms total, %.3f ms per chunk" % [
 		case_count, vertex_total, build_usec / 1000.0, build_usec / 1000.0 / case_count])
+	print("Mesher golden: %d caps, %d quads, %.1f ms total, %.2f us per quad" % [
+		cap_hashes.size(), cap_quads, cap_usec / 1000.0, float(cap_usec) / maxf(1.0, cap_quads)])
 
 	if update:
 		var file := FileAccess.open(FIXTURE_PATH, FileAccess.WRITE)
 		file.store_string(JSON.stringify({"format_version": 1, "cases_per_pattern": CASES_PER_PATTERN,
-			"patterns": PATTERNS, "hashes": hashes}, "\t") + "\n")
+			"patterns": PATTERNS, "hashes": hashes, "cap_layers": CAP_LAYERS, "cap_hashes": cap_hashes}, "\t") + "\n")
 		file.close()
 		print("Mesher golden: fixture written with %d hashes" % case_count)
 		quit(0)
@@ -68,7 +85,24 @@ func _init() -> void:
 			if mismatches <= 5:
 				push_error("Mesher golden: case %d (%s #%d) differs from the fixture" % [
 					index, PATTERNS[index / CASES_PER_PATTERN], index % CASES_PER_PATTERN])
-	print("Mesher golden: %d checks, %d failures" % [case_count, mismatches])
+	var expected_caps: Array = fixture.get("cap_hashes", [])
+	var fixture_layers: Array = fixture.get("cap_layers", [])
+	var layers_match := fixture_layers.size() == CAP_LAYERS.size()
+	for index in mini(fixture_layers.size(), CAP_LAYERS.size()):
+		# JSON numbers come back as floats.
+		layers_match = layers_match and int(fixture_layers[index]) == CAP_LAYERS[index]
+	if not layers_match or expected_caps.size() != cap_hashes.size():
+		push_error("Mesher golden: fixture has no cap hashes for these layers")
+		mismatches += 1
+	else:
+		var cap_mismatches := 0
+		for index in cap_hashes.size():
+			if str(expected_caps[index]) != cap_hashes[index]:
+				cap_mismatches += 1
+		if cap_mismatches > 0:
+			push_error("Mesher golden: %d slice caps differ from the fixture" % cap_mismatches)
+		mismatches += cap_mismatches
+	print("Mesher golden: %d checks, %d failures" % [case_count + cap_hashes.size(), mismatches])
 	quit(1 if mismatches > 0 else 0)
 
 
