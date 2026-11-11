@@ -2,6 +2,7 @@ extends RefCounted
 ## Queries use existing records only, never ensure/get-or-create/cache application.
 const Data = preload("res://scripts/diagnostics/live_diagnostics_service.gd")
 const Decisions = preload("res://scripts/diagnostics/live_decision_snapshot.gd")
+const EngineMetrics = preload("res://scripts/diagnostics/engine_metrics.gd")
 var main
 var service
 
@@ -70,6 +71,7 @@ func metadata() -> Dictionary:
 		"performance": Data.plain(world.get_performance_snapshot()) if not main.loading_active else {"unavailable": "loading"},
 		"visibility": Data.plain(world.renderer.get_visibility_snapshot()) if world.renderer != null else {"unavailable": "renderer_missing"},
 		"diagnostics": main.performance_controller._diagnostics() if main.performance_controller != null else {},
+		"engine_frame": Data.plain(EngineMetrics.snapshot(main.get_viewport().get_viewport_rid())),
 		"performance_recording": main.performance_controller.recorder.output_path if main.performance_controller != null and main.performance_controller.recorder.enabled else null,
 		"live_diagnostics_overhead": {"capture_collection_usec_total": main.diagnostics_controller.collection_usec,
 			"service_usec_total": main.diagnostics_controller.service_usec, "capture_write_usec": main.diagnostics_controller.writer.status.get("write_usec")}}

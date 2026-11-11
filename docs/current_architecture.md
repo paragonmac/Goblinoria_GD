@@ -92,7 +92,7 @@ Initial requests overlap existing terrain/mesh loading. Cached level changes acc
 It currently owns:
 
 - Chunk `MeshInstance3D` pooling through `ChunkCache`.
-- Runtime mesh scheduling through `WorldRendererMeshScheduler`, which owns the job queue, result queue, prefetch records, and one dedicated mesh thread.
+- Runtime mesh scheduling through `WorldRendererMeshScheduler`, which owns the job queue, result queue, prefetch records, and up to three mesh worker threads (`WorldRenderer.MESH_WORKER_THREADS_MAX`), each with its own mesher.
 - Mesh job input snapshots through `ChunkMeshJobBuilder`.
 - Raw mesh-cache storage and cache metrics through `WorldRendererMeshCacheStore`, keyed by chunk coord and local top.
 - Lazy `ArrayMesh` creation when a cached chunk becomes visible.

@@ -1,9 +1,12 @@
 extends RefCounted
 class_name WorldRendererMeshScheduler
-## Owns async mesh job queues, result queues, and the worker thread.
+## Owns async mesh job queues, result queues, and the worker threads.
 
 #region State
-var mesh_thread: Thread
+var mesh_threads: Array[Thread] = []
+## Threads started by start(). Every queue and counter the workers share is
+## guarded by the mutexes below, so the loop is the same for one or many.
+var worker_count: int = 1
 var mesh_thread_running: bool = false
 var mesh_job_queue: Array = []
 var mesh_job_set: Dictionary = {}
@@ -37,10 +40,11 @@ var _capture_totals := {
 
 
 #region Lifecycle
-func configure(callback: Callable, backlog_max: int, backlog_sleep_usec: int) -> void:
+func configure(callback: Callable, backlog_max: int, backlog_sleep_usec: int, workers: int = 1) -> void:
 	build_callback = callback
 	result_backlog_max = backlog_max
 	result_backlog_sleep_usec = backlog_sleep_usec
+	worker_count = maxi(1, workers)
 
 
 func is_running() -> bool:
@@ -51,18 +55,21 @@ func start(enabled: bool) -> void:
 	if not enabled or mesh_thread_running:
 		return
 	mesh_thread_running = true
-	mesh_thread = Thread.new()
-	mesh_thread.start(Callable(self, "_mesh_worker_loop"))
+	for index in worker_count:
+		var thread := Thread.new()
+		thread.start(_mesh_worker_loop.bind(index))
+		mesh_threads.append(thread)
 
 
 func stop() -> void:
 	if not mesh_thread_running:
 		return
 	mesh_thread_running = false
-	mesh_job_semaphore.post()
-	if mesh_thread != null:
-		mesh_thread.wait_to_finish()
-	mesh_thread = null
+	for _index in mesh_threads.size():
+		mesh_job_semaphore.post()
+	for thread: Thread in mesh_threads:
+		thread.wait_to_finish()
+	mesh_threads.clear()
 
 
 func clear() -> void:
@@ -387,7 +394,7 @@ func get_performance_snapshot() -> Dictionary:
 
 
 #region Worker
-func _mesh_worker_loop() -> void:
+func _mesh_worker_loop(worker_index: int = 0) -> void:
 	while mesh_thread_running:
 		mesh_job_semaphore.wait()
 		if not mesh_thread_running:
@@ -405,11 +412,20 @@ func _mesh_worker_loop() -> void:
 			continue
 		_wait_for_result_backlog()
 		if not mesh_thread_running:
+			# Hand the unbuilt job back so a restart with a new thread count keeps it.
+			mesh_job_mutex.lock()
+			mesh_job_queue.push_front(job)
+			in_flight_jobs -= 1
+			mesh_job_mutex.unlock()
+			mesh_job_semaphore.post()
 			break
 		if not build_callback.is_valid():
 			_finish_in_flight_job()
 			continue
 		var build_started_usec := Time.get_ticks_usec() if job_capture_epoch >= 0 else 0
+		# The job belongs to this worker now; the callback uses the index to pick
+		# per-thread state.
+		job["worker_index"] = worker_index
 		var result_value: Variant = build_callback.call(job)
 		var elapsed_ms := float(Time.get_ticks_usec() - build_started_usec) / 1000.0 if job_capture_epoch >= 0 else 0.0
 		if typeof(result_value) != TYPE_DICTIONARY:
@@ -440,9 +456,6 @@ func _mesh_worker_loop() -> void:
 			_capture_totals["lost_before_publication_count"] += 1
 			_capture_totals["lost_before_publication_ms"] += build_ms
 		mesh_job_mutex.unlock()
-	mesh_job_mutex.lock()
-	in_flight_jobs = 0
-	mesh_job_mutex.unlock()
 
 
 func _finish_in_flight_job() -> void:

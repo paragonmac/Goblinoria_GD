@@ -21,6 +21,8 @@ read-only view snapshots untouched; prior view evidence is not cleared by a togg
 
 Status and chunk inspection expose asynchronous `visibility` / `visibility_state`: renderer-owned epoch, requested/accepted/fully-applied sequences, pending/running/result slots, application backlog, fallback mode, mixed-view flag, and ages measured from the originating requests. Ages continue increasing for an unchanged view; they are not proof of a backlog. These epochs are independent of live-diagnostics epochs. While application is partial or invalidated, `last_frustum_accepted` is unavailable; `effective_eligible` and node visibility describe current state. A last completed view is historical evidence, not proof that the current camera view has caught up. Inspection never drains results or changes the queue.
 
+Status also returns `engine_frame`: draw calls, primitives and objects for the last rendered frame (total, visible pass, shadow pass), video/texture/buffer memory and object counts. Render CPU and GPU times appear in it only while a performance recording is measuring them; `render_time_measured` says which.
+
 ## Anomaly Watchdog
 
 Debug builds (normal play and playtest runs) always run `AnomalyWatchdog` (`scripts/diagnostics/anomaly_watchdog.gd`), independent of the live-diagnostics toggle. It is log-only: it never pauses, repairs or changes decisions. Release builds skip it.

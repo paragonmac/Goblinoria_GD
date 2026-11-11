@@ -11,7 +11,7 @@ const MAX_METRICS := 128
 const MAX_WORKLOAD := 64
 const MAX_WORLDS := 128
 const SAMPLE_HEADER := "segment_id,world_id,start_usec,end_usec,segment,kind,metric,count,sum,mean,max,value\n"
-const SPIKE_HEADER := "window_id,segment_id,world_id,timestamp_usec,frame_interval_ms,simulation_delta_ms,main_update_ms,timings_json\n"
+const SPIKE_HEADER := "window_id,segment_id,world_id,timestamp_usec,frame_interval_ms,simulation_delta_ms,main_update_ms,timings_json,gauges_json\n"
 
 var enabled: bool = false
 var segment: String = "gameplay"
@@ -43,13 +43,16 @@ var _durations: Dictionary = {}
 var _bucket_started := 0
 var _bucket_timings: Dictionary = {}
 var _bucket_counters: Dictionary = {}
+var _bucket_gauges: Dictionary = {}
 var _workload: Dictionary = {}
 var _last_workload := -1
 var _timing_labels: Dictionary = {}
 var _counter_labels: Dictionary = {}
+var _gauge_labels: Dictionary = {}
 var _workload_labels: Dictionary = {}
 var _session_timings: Dictionary = {}
 var _session_counters: Dictionary = {}
+var _session_gauges: Dictionary = {}
 var _unknown_metrics := 0
 var _frame_started := -1
 var _previous_frame := -1
@@ -58,6 +61,7 @@ var _frame_world := -1
 var _frame_interval := -1.0
 var _frame_dt := 0.0
 var _frame_timings: Dictionary = {}
+var _frame_gauges: Dictionary = {}
 var _histogram := PackedInt64Array()
 var _frame_count := 0
 var _frame_sum := 0.0
@@ -206,6 +210,7 @@ func begin_frame(dt: float, now_usec: int = -1) -> void:
 	_frame_world = _world_id
 	_frame_dt = maxf(0.0, dt * 1000.0) if is_finite(dt) else 0.0
 	_frame_timings.clear()
+	_frame_gauges.clear()
 	_collection_usec += Time.get_ticks_usec() - overhead
 	_check_writer(now)
 
@@ -226,6 +231,7 @@ func end_frame(main_update_ms: float, now_usec: int = -1) -> void:
 			"simulation_delta_ms": _frame_dt,
 			"main_update_ms": maxf(0.0, main_update_ms) if is_finite(main_update_ms) else 0.0,
 			"timings": _frame_timings.duplicate(),
+			"gauges": _frame_gauges.duplicate(),
 		}
 		if _window_open and _frame_started > _window_until:
 			_close_window(_frame_started)
@@ -256,6 +262,20 @@ func _record_timing(label: String, ms: float) -> void:
 	_add_stat(_session_timings, segment + "/" + label, ms)
 	if _frame_started >= 0:
 		_frame_timings[label] = float(_frame_timings.get(label, 0.0)) + ms
+
+
+## Unitless per-frame observations such as draw calls. Aggregated like timings
+## (count, sum, mean, max) but never mixed into millisecond tables.
+func add_gauge(label: String, value: float) -> void:
+	if not enabled or not is_finite(value) or value < 0.0:
+		return
+	var overhead := Time.get_ticks_usec()
+	if _register(_gauge_labels, label):
+		_add_stat(_bucket_gauges, label, value)
+		_add_stat(_session_gauges, segment + "/" + label, value)
+		if _frame_started >= 0:
+			_frame_gauges[label] = value
+	_collection_usec += Time.get_ticks_usec() - overhead
 
 
 func add_counter(label: String, amount: int = 1) -> void:
@@ -374,19 +394,23 @@ func _reset() -> void:
 	_durations.clear()
 	_bucket_timings.clear()
 	_bucket_counters.clear()
+	_bucket_gauges.clear()
 	_workload.clear()
 	_last_workload = -1
 	_timing_labels.clear()
 	_counter_labels.clear()
+	_gauge_labels.clear()
 	_workload_labels.clear()
 	_session_timings.clear()
 	_session_counters.clear()
+	_session_gauges.clear()
 	_unknown_metrics = 0
 	_frame_started = -1
 	_previous_frame = -1
 	_frame_segment = -1
 	_frame_world = -1
 	_frame_timings.clear()
+	_frame_gauges.clear()
 	_histogram.resize(1002)
 	_histogram.fill(0)
 	_frame_count = 0
@@ -481,14 +505,18 @@ func _flush_bucket(now: int) -> void:
 	for label in _bucket_timings:
 		var stat: Dictionary = _bucket_timings[label]
 		_sample_row(now, "timing_ms", label, stat.count, stat.sum, float(stat.sum) / int(stat.count), stat.max, null)
+	for label in _bucket_gauges:
+		var gauge: Dictionary = _bucket_gauges[label]
+		_sample_row(now, "gauge", label, gauge.count, gauge.sum, float(gauge.sum) / int(gauge.count), gauge.max, null)
 	for label in _bucket_counters:
 		_sample_row(now, "counter", label, 1, _bucket_counters[label], null, null, _bucket_counters[label])
 	for label in _workload:
 		_sample_row(now, "workload", label, 1, null, null, null, _workload[label])
-	if _bucket_timings.is_empty() and _bucket_counters.is_empty() and _workload.is_empty():
+	if _bucket_timings.is_empty() and _bucket_counters.is_empty() and _bucket_gauges.is_empty() and _workload.is_empty():
 		_sample_row(now, "period", "elapsed_ms", 1, null, null, null, float(maxi(0, now - _bucket_started)) / 1000.0)
 	_bucket_timings.clear()
 	_bucket_counters.clear()
+	_bucket_gauges.clear()
 	_bucket_started = now
 
 
@@ -556,7 +584,7 @@ func _write_detail(row: Dictionary) -> void:
 	_enqueue("spike_frames.csv", _csv([
 		_window_id, row.segment_id, row.world_id, row.timestamp_usec,
 		null if float(row.frame_interval_ms) < 0.0 else row.frame_interval_ms,
-		row.simulation_delta_ms, row.main_update_ms, JSON.stringify(row.timings),
+		row.simulation_delta_ms, row.main_update_ms, JSON.stringify(row.timings), JSON.stringify(row.get("gauges", {})),
 	]), true)
 
 
@@ -599,13 +627,13 @@ func _make_summary(completed: bool, reason: String, now: int) -> Dictionary:
 		"segment_durations_usec": durations,
 		"settings": {"aggregate_period_usec": 1000000, "pre_trigger_usec": 5000000, "post_trigger_usec": 2000000, "window_cap_usec": 10000000, "automatic_cooldown_usec": 10000000, "spike_threshold_ms": 50, "ring_frames": _ring_limit, "pending_bytes": _writer.pending_limit, "pump_bytes": _writer.pump_limit, "capture_bytes": _writer.capture_limit, "summary_reserve_bytes": _writer.summary_reserve},
 		"gameplay_frames": {"count": _frame_count, "mean_ms": null if _frame_count == 0 else _frame_sum / _frame_count, "max_ms": _frame_max, "median_ms": _percentile(0.5), "p95_ms": _percentile(0.95), "p99_ms": _percentile(0.99), "histogram_1ms_upper_bounds": Array(_histogram), "histogram_overflow_count": _histogram[1001], "percentile_precision": "1 ms upper bounds; null when unavailable or above 1000 ms (see count and overflow)", "slow_frames": _slow},
-		"timings_ms_by_segment": _session_timings, "counters_by_segment": _session_counters,
+		"timings_ms_by_segment": _session_timings, "counters_by_segment": _session_counters, "gauges_by_segment": _session_gauges,
 		"detail_windows": _window_id, "history_shortened_frames": _history_shortened,
 		"dropped_detail_records": _writer.dropped_detail_records, "rejected_metric_samples": _unknown_metrics,
 		"output_data_bytes": _writer.bytes_written, "pending_output_bytes": _writer.pending_bytes,
 		"overhead": {"collection_usec": _collection_usec, "write_usec": _write_usec, "pump_count": _pump_count},
 		"last_error": last_error,
-		"measurement_notes": "Frame intervals are monotonic callback intervals, not GPU time. Only same-segment gameplay intervals enter the histogram. Asynchronous timings are completed-job wall measurements, not additive main-thread costs. No missing metric is substituted with zero.",
+		"measurement_notes": "Frame intervals are monotonic callback intervals, not GPU time. Only same-segment gameplay intervals enter the histogram. Asynchronous timings are completed-job wall measurements, not additive main-thread costs. Engine.* timings and gauges come from the engine and describe the previously rendered frame; they overlap Main spans and are absent without a renderer. No missing metric is substituted with zero.",
 	}
 
 
@@ -619,7 +647,7 @@ func _markdown(completed: bool, reason: String) -> String:
 		"Median / p95 / p99: %s / %s / %s ms." % [str(_percentile(0.5)), str(_percentile(0.95)), str(_percentile(0.99))], "",
 		"Percentiles use 1 ms upper-bound bins. Null means no samples or a percentile above 1000 ms. Overflow intervals: %d." % _histogram[1001], "",
 		"Slow intervals: >33.3 ms: %d; >50 ms: %d; >100 ms: %d." % [_slow.over_33_3_ms, _slow.over_50_ms, _slow.over_100_ms], "",
-		"Only same-segment gameplay intervals count here. Callback intervals, simulation delta, and measured Main work are distinct; this is not GPU timing.", "",
+		"Only same-segment gameplay intervals count here. Callback intervals, simulation delta, and measured Main work are distinct; this is not GPU timing (see Engine frame measurements).", "",
 		"## Segment durations", "",
 		"| Segment | Seconds |", "| --- | ---: |",
 	])
@@ -629,6 +657,8 @@ func _markdown(completed: bool, reason: String) -> String:
 	lines.append_array(_timing_table(false))
 	lines.append_array(["", "### Completed asynchronous jobs", ""])
 	lines.append_array(_timing_table(true))
+	lines.append_array(["", "## Engine frame measurements", "", "Reported by the engine for the previously rendered frame. Render CPU and GPU times cover the main viewport; frame setup is engine-wide. They overlap the spans above and are not additive with them. Gauges are per-frame counts.", ""])
+	lines.append_array(_engine_table())
 	lines.append_array(["", "## Activity counters", "", "Explicit increments, grouped by segment (not cumulative workload snapshots).", ""])
 	if _session_counters.is_empty():
 		lines.append("No activity counters recorded.")
@@ -664,7 +694,7 @@ func _markdown(completed: bool, reason: String) -> String:
 		lines.append("- World %d at %.3f s, duration %.3f s: `%s`" % [world.world_id, float(int(world.timestamp_usec) - _started) / 1000000.0, float(_world_durations.get(str(world.world_id), 0)) / 1000000.0, JSON.stringify(world.metadata).replace("`", "'")])
 	if _worlds.size() > 8 or _worlds_omitted > 0:
 		lines.append("Further worlds are recorded in summary.json/events.jsonl; %d world metadata entries exceeded the summary bound." % _worlds_omitted)
-	lines.append_array(["", "## Detailed reports", "", "samples.csv contains one-second aggregates, with actual shorter segment/delayed-frame durations. Workload rows are snapshots; unavailable values are explicit. events.jsonl contains lifecycle/manual markers. spike_frames.csv contains bounded detail windows. summary.json retains the complete bounded metric registry and histogram.", "", "No controlled benchmark comparison, performance pass/fail result, GPU measurement, or per-worker trace is implied.", ""])
+	lines.append_array(["", "## Detailed reports", "", "samples.csv contains one-second aggregates, with actual shorter segment/delayed-frame durations. Workload rows are snapshots; unavailable values are explicit. events.jsonl contains lifecycle/manual markers. spike_frames.csv contains bounded detail windows. summary.json retains the complete bounded metric registry and histogram.", "", "No controlled benchmark comparison, performance pass/fail result, or per-worker trace is implied.", ""])
 	return "\n".join(lines)
 
 
@@ -676,6 +706,8 @@ func _timing_table(async_only: bool) -> PackedStringArray:
 		var is_async := "/Path.completed." in str(key) or "/Mesh.completed." in str(key) or "/Mesh.scheduler." in str(key) or "/RenderZone.completed." in str(key)
 		if str(key).ends_with("/frame_interval_ms") or str(key).ends_with("/simulation_delta_ms") or str(key).ends_with("/RenderZone.result_age_ms"):
 			continue
+		if "/Engine." in str(key):
+			continue
 		if is_async == async_only:
 			keys.append(key)
 	keys.sort_custom(func(a: Variant, b: Variant) -> bool: return float(_session_timings[a].sum) > float(_session_timings[b].sum))
@@ -685,6 +717,23 @@ func _timing_table(async_only: bool) -> PackedStringArray:
 	for i in range(mini(keys.size(), 10)):
 		var stat: Dictionary = _session_timings[keys[i]]
 		lines.append("| %s | %d | %.3f | %.3f | %.3f |" % [str(keys[i]).replace("|", "/"), stat.count, stat.sum, float(stat.sum) / int(stat.count), stat.max])
+	return lines
+
+
+func _engine_table() -> PackedStringArray:
+	var rows: Array = []
+	for key in _session_timings:
+		if "/Engine." in str(key):
+			rows.append([str(key), "ms", _session_timings[key]])
+	for key in _session_gauges:
+		rows.append([str(key), "count", _session_gauges[key]])
+	if rows.is_empty():
+		return PackedStringArray(["No engine measurements recorded."])
+	rows.sort_custom(func(a: Array, b: Array) -> bool: return str(a[0]) < str(b[0]))
+	var lines := PackedStringArray(["| Segment / metric | Unit | Samples | Mean | Max |", "| --- | --- | ---: | ---: | ---: |"])
+	for row: Array in rows:
+		var stat: Dictionary = row[2]
+		lines.append("| %s | %s | %d | %.3f | %.3f |" % [str(row[0]).replace("|", "/"), row[1], stat.count, float(stat.sum) / int(stat.count), stat.max])
 	return lines
 
 

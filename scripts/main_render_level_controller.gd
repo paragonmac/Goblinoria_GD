@@ -15,6 +15,9 @@ const BACKGROUND_WARMUP_GENERATION_RESULT_BUDGET := 2
 const BACKGROUND_WARMUP_MESH_RESULT_BUDGET := 2
 const BACKGROUND_WARMUP_MESH_RESULT_TIME_BUDGET_MS := 2.0
 const BACKGROUND_WARMUP_MESH_QUEUE_BUDGET := 4
+## Target checks per frame for each warmup pump. The pumps used to recount every
+## target on every frame; on a 512 world that was 6-20 ms per frame for minutes.
+const WARMUP_POLL_BUDGET := 256
 
 var world: World
 var scene_tree: SceneTree
@@ -31,12 +34,16 @@ var background_warmup_queue: Array[int] = []
 var background_warmup_generation_targets: Array[Vector3i] = []
 var background_warmup_mesh_targets: Array[Vector3i] = []
 var background_warmup_mesh_index: int = 0
+var background_warmup_generation_cursor: int = 0
+var background_warmup_settle_cursor: int = 0
 var background_warmup_band: int = -1
 var background_warmup_meshes_queued := false
 var background_warmup_center := Vector2i(-1, -1)
 var y_prewarm_generation_targets: Array[Vector3i] = []
 var y_prewarm_mesh_targets: Array[Vector3i] = []
 var y_prewarm_mesh_index: int = 0
+var y_prewarm_generation_cursor: int = 0
+var y_prewarm_settle_cursor: int = 0
 var y_prewarm_render_y: int = -1
 var y_prewarm_direction: int = 0
 var y_prewarm_meshes_queued := false
@@ -482,6 +489,43 @@ func _count_generated_startup_chunks(targets: Array[Vector3i]) -> int:
 	return count
 
 
+## Warmup progress cursors. Each call checks at most WARMUP_POLL_BUDGET targets
+## and stops at the first one that is not done, so a pump costs the same whether
+## it has 600 targets or 17,000.
+func _advance_generated_cursor(targets: Array[Vector3i], cursor: int) -> int:
+	var limit: int = mini(targets.size(), cursor + WARMUP_POLL_BUDGET)
+	while cursor < limit:
+		var chunk: ChunkData = world.get_chunk(targets[cursor])
+		if chunk == null or not chunk.generated:
+			break
+		cursor += 1
+	return cursor
+
+
+## A queued target is settled once its build is no longer pending. Waiting for
+## every target to be READY at the same moment never ended when a finished chunk
+## was invalidated or released again.
+func _advance_mesh_settled_cursor(targets: Array[Vector3i], cursor: int) -> int:
+	var limit: int = mini(targets.size(), cursor + WARMUP_POLL_BUDGET)
+	while cursor < limit:
+		var chunk: ChunkData = world.get_chunk(targets[cursor])
+		if chunk != null and chunk.mesh_state == ChunkData.MESH_STATE_PENDING:
+			break
+		cursor += 1
+	return cursor
+
+
+func _advance_cache_settled_cursor(targets: Array[Vector3i], cursor: int) -> int:
+	if world.renderer == null:
+		return targets.size()
+	var limit: int = mini(targets.size(), cursor + WARMUP_POLL_BUDGET)
+	while cursor < limit:
+		if world.renderer.is_chunk_mesh_cache_build_pending(targets[cursor], World.CHUNK_SIZE - 1):
+			break
+		cursor += 1
+	return cursor
+
+
 func _is_render_y_ready(render_y: int) -> bool:
 	var targets: Array[Vector3i] = _build_reveal_chunk_targets(render_y)
 	return not targets.is_empty() and _count_ready_startup_chunks(targets) >= targets.size()
@@ -528,6 +572,8 @@ func _schedule_directional_y_prewarm(delta: int, current_y: int) -> void:
 	y_prewarm_generation_targets = _build_directional_y_prewarm_generation_targets(prewarm_y)
 	y_prewarm_mesh_targets = _build_directional_y_prewarm_mesh_targets(prewarm_y)
 	y_prewarm_mesh_index = 0
+	y_prewarm_generation_cursor = 0
+	y_prewarm_settle_cursor = 0
 	y_prewarm_meshes_queued = false
 	if y_prewarm_mesh_targets.is_empty():
 		_clear_directional_y_prewarm()
@@ -544,8 +590,8 @@ func _pump_directional_y_prewarm(world_started: bool) -> void:
 		world.generator.process_generation_results(Y_DIRECTIONAL_PREWARM_GENERATION_RESULT_BUDGET)
 	if world.renderer != null:
 		world.renderer.process_mesh_results(Y_DIRECTIONAL_PREWARM_MESH_RESULT_BUDGET)
-	var generated: int = _count_generated_startup_chunks(y_prewarm_generation_targets)
-	if generated < y_prewarm_generation_targets.size():
+	y_prewarm_generation_cursor = _advance_generated_cursor(y_prewarm_generation_targets, y_prewarm_generation_cursor)
+	if y_prewarm_generation_cursor < y_prewarm_generation_targets.size():
 		return
 	if not y_prewarm_meshes_queued:
 		var processed: int = 0
@@ -557,8 +603,8 @@ func _pump_directional_y_prewarm(world_started: bool) -> void:
 		if y_prewarm_mesh_index >= y_prewarm_mesh_targets.size():
 			y_prewarm_meshes_queued = true
 	if y_prewarm_meshes_queued:
-		var ready: int = _count_ready_startup_chunks(y_prewarm_mesh_targets)
-		if ready >= y_prewarm_mesh_targets.size():
+		y_prewarm_settle_cursor = _advance_mesh_settled_cursor(y_prewarm_mesh_targets, y_prewarm_settle_cursor)
+		if y_prewarm_settle_cursor >= y_prewarm_mesh_targets.size():
 			_clear_directional_y_prewarm()
 
 
@@ -566,6 +612,8 @@ func _clear_directional_y_prewarm() -> void:
 	y_prewarm_generation_targets.clear()
 	y_prewarm_mesh_targets.clear()
 	y_prewarm_mesh_index = 0
+	y_prewarm_generation_cursor = 0
+	y_prewarm_settle_cursor = 0
 	y_prewarm_render_y = -1
 	y_prewarm_direction = 0
 	y_prewarm_meshes_queued = false
@@ -626,8 +674,8 @@ func _pump_background_level_warmup(world_started: bool) -> void:
 		_begin_next_background_warmup_band()
 		if background_warmup_mesh_targets.is_empty():
 			return
-	var generated: int = _count_generated_startup_chunks(background_warmup_generation_targets)
-	if generated < background_warmup_generation_targets.size():
+	background_warmup_generation_cursor = _advance_generated_cursor(background_warmup_generation_targets, background_warmup_generation_cursor)
+	if background_warmup_generation_cursor < background_warmup_generation_targets.size():
 		return
 	if not background_warmup_meshes_queued:
 		var processed: int = 0
@@ -639,8 +687,8 @@ func _pump_background_level_warmup(world_started: bool) -> void:
 		if background_warmup_mesh_index >= background_warmup_mesh_targets.size():
 			background_warmup_meshes_queued = true
 	if background_warmup_meshes_queued:
-		var ready: int = _count_cached_full_mesh_chunks(background_warmup_mesh_targets)
-		if ready >= background_warmup_mesh_targets.size():
+		background_warmup_settle_cursor = _advance_cache_settled_cursor(background_warmup_mesh_targets, background_warmup_settle_cursor)
+		if background_warmup_settle_cursor >= background_warmup_mesh_targets.size():
 			prepared_chunk_bands[background_warmup_band] = true
 			_clear_background_warmup_active()
 
@@ -663,6 +711,8 @@ func _begin_next_background_warmup_band() -> void:
 			background_warmup_generation_targets = _build_chunk_targets_for_bands(generation_bands)
 			background_warmup_mesh_targets = _build_chunk_targets_for_bands(mesh_bands)
 		background_warmup_mesh_index = 0
+		background_warmup_generation_cursor = 0
+		background_warmup_settle_cursor = 0
 		background_warmup_band = cy
 		background_warmup_meshes_queued = false
 		_request_startup_chunk_generation(background_warmup_generation_targets, false)
@@ -712,6 +762,8 @@ func _clear_background_warmup_active() -> void:
 	background_warmup_generation_targets.clear()
 	background_warmup_mesh_targets.clear()
 	background_warmup_mesh_index = 0
+	background_warmup_generation_cursor = 0
+	background_warmup_settle_cursor = 0
 	background_warmup_band = -1
 	background_warmup_meshes_queued = false
 

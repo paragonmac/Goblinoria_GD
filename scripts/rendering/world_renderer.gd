@@ -25,6 +25,10 @@ const MESH_BUILD_LOG_THRESHOLD_MS := 5.0
 const MESH_APPLY_BUDGET := 8
 const MESH_WORK_BUDGET_MS := 40.0
 const MESH_RESULT_BACKLOG_MAX := 32
+## Upper bound on mesh worker threads. GDScript meshing threads contend with each
+## other: measured on a 24-thread CPU, 1/2/3/4/6/8 workers built 84/122/166/173/
+## 143/67 chunks a second, so more than three buys almost nothing.
+const MESH_WORKER_THREADS_MAX := 3
 const MESH_RESULT_BACKLOG_SLEEP_USEC := 500
 const MESH_CACHE_RADIUS := 0
 const MESH_PREFETCH_BELOW_ONLY := true
@@ -75,7 +79,8 @@ var _stats_prev := {}
 var _stats_rates := {"delta_per_sec": 0.0, "full_per_sec": 0.0, "cull_job_ms": 0.0}
 var world: World
 var mesher = ChunkMesherScript.new()
-var mesher_thread = ChunkMesherScript.new()
+## One mesher per worker thread, indexed by the job's worker_index.
+var mesher_threads: Array = [ChunkMesherScript.new()]
 var chunk_cache = ChunkCacheScript.new()
 var mesh_scheduler = WorldRendererMeshSchedulerScript.new()
 var render_level_helper = WorldRendererRenderLevelScript.new()
@@ -121,7 +126,7 @@ func initialize(world_ref: World) -> void:
 		overlay_renderer.excavation_preview_changed.connect(_set_excavation_preview)
 	_ensure_block_tables()
 	mesh_job_builder.configure(world_ref, mesher)
-	mesh_scheduler.configure(Callable(self, "_build_mesh_result_on_worker"), MESH_RESULT_BACKLOG_MAX, MESH_RESULT_BACKLOG_SLEEP_USEC)
+	_configure_mesh_workers(default_mesh_worker_count())
 	render_level_helper.configure(self, chunk_cache, mesh_scheduler)
 	_start_mesh_worker()
 #endregion
@@ -584,7 +589,8 @@ func _apply_mesh_result(result: Dictionary) -> bool:
 	var has_geometry: bool = bool(result["has_geometry"])
 	var missing_neighbors: Array = _missing_neighbors_from_value(result.get("missing_neighbors", []))
 	var mesh_metrics := _mesh_metrics_from_result(result, null)
-
+	if recording:
+		world.performance_recorder.add_timing("Mesh.apply.prepare_ms", float(Time.get_ticks_usec() - apply_start_usec) / 1000.0)
 
 	var chunk_size: int = World.CHUNK_SIZE
 	var current_local_top := world.top_render_y - coord.y * chunk_size
@@ -616,15 +622,29 @@ func _apply_mesh_result(result: Dictionary) -> bool:
 			mesh_instance.material_override = get_block_material()
 		chunk.mesh_state = ChunkData.MESH_STATE_READY
 		chunk.dirty = false
+	# Sub-spans of Mesh.apply_ms, recorded only while capturing.
+	var span_usec := Time.get_ticks_usec() if recording else 0
+	if recording and should_apply:
+		world.performance_recorder.add_timing("Mesh.apply.scene_ms", float(span_usec - apply_start_usec) / 1000.0)
 	_store_mesh_cache_from_arrays(coord, local_top, vertices, normals, colors, uvs, uv2s, visible_faces, occluded_faces, has_geometry, revision, mesh_metrics, missing_neighbors)
+	if recording:
+		var now_usec := Time.get_ticks_usec()
+		world.performance_recorder.add_timing("Mesh.apply.cache_store_ms", float(now_usec - span_usec) / 1000.0)
+		span_usec = now_usec
 	_update_neighbor_remesh_dependencies(coord, missing_neighbors)
+	if recording:
+		var now_usec := Time.get_ticks_usec()
+		world.performance_recorder.add_timing("Mesh.apply.neighbor_deps_ms", float(now_usec - span_usec) / 1000.0)
+		span_usec = now_usec
 	if should_apply:
 		_queue_prefetch_layers(coord, local_top)
 	_diagnostics_mesh(result, "applied" if should_apply else "cached_only")
 
 	var build_ms := float(result.get("build_ms", 0.0))
 	mesh_cache_store.record_build_ms(build_ms)
-	if build_ms > 0.0 and world.debug_profiler != null:
+	# Logging follows the synchronous path: only while the timing profiler is on.
+	# An unconditional print here cost about 2 ms of main thread per slow build.
+	if build_ms > 0.0 and world.debug_profiler != null and world.debug_profiler.enabled:
 		world.debug_profiler.add_sample("Renderer.build_chunk_mesh", build_ms)
 		if build_ms >= MESH_BUILD_LOG_THRESHOLD_MS:
 			print("Chunk mesh build %d,%d,%d: %.2f ms" % [coord.x, coord.y, coord.z, build_ms])
@@ -730,7 +750,7 @@ func _build_mesh_job(coord: Vector3i, revision: int, top_render_y: int, prefetch
 
 func _build_mesh_result_on_worker(job: Dictionary) -> Dictionary:
 	var build_start := Time.get_ticks_usec()
-	var result: Dictionary = mesher_thread.build_chunk_arrays_from_data(job)
+	var result: Dictionary = mesher_threads[int(job.get("worker_index", 0))].build_chunk_arrays_from_data(job)
 	result["coord"] = job["coord"]
 	result["mesh_epoch"] = job.get("mesh_epoch", -1)
 	result["coord_epoch"] = job.get("coord_epoch", -1)
@@ -742,6 +762,27 @@ func _build_mesh_result_on_worker(job: Dictionary) -> Dictionary:
 	result["missing_neighbors"] = job.get("missing_neighbors", [])
 	result["build_ms"] = float(Time.get_ticks_usec() - build_start) / 1000.0
 	return result
+
+
+## Leaves cores for the main thread, generation, culling and path searches.
+static func default_mesh_worker_count() -> int:
+	return clampi(OS.get_processor_count() / 2 - 2, 1, MESH_WORKER_THREADS_MAX)
+
+
+func _configure_mesh_workers(count: int) -> void:
+	count = clampi(count, 1, MESH_WORKER_THREADS_MAX)
+	while mesher_threads.size() < count:
+		mesher_threads.append(ChunkMesherScript.new())
+	mesh_scheduler.configure(Callable(self, "_build_mesh_result_on_worker"), MESH_RESULT_BACKLOG_MAX, MESH_RESULT_BACKLOG_SLEEP_USEC, count)
+
+
+## Restarts the workers with a new thread count. Queued jobs are kept.
+func set_mesh_worker_count(count: int) -> void:
+	var was_running: bool = mesh_scheduler.is_running()
+	mesh_scheduler.stop()
+	_configure_mesh_workers(count)
+	if was_running:
+		_start_mesh_worker()
 
 
 func _start_mesh_worker() -> void:
@@ -890,6 +931,11 @@ func _array_mesh_from_entry(entry: Dictionary) -> ArrayMesh:
 
 func has_cached_chunk_mesh(coord: Vector3i, local_top: int) -> bool:
 	return _has_cached_mesh(coord, local_top)
+
+
+## True while a cache-only build for this chunk is still queued or in flight.
+func is_chunk_mesh_cache_build_pending(coord: Vector3i, local_top: int) -> bool:
+	return mesh_scheduler.get_prefetch_revision(_prefetch_key(coord, local_top)) >= 0
 
 
 func _has_cached_mesh(coord: Vector3i, local_top: int) -> bool:

@@ -29,6 +29,33 @@ Reports identify the engine/build, available hardware/renderer, viewport/FPS set
 
 The initial summary is marked incomplete. Normal stop or quit finalizes it. A crash or I/O failure can leave incomplete files; do not treat an incomplete capture as a complete session. The status indicator reports recording failures without stopping gameplay.
 
+## Engine Measurements
+
+While a recording is active the recorder also samples the engine each frame. These describe the previously rendered frame, so they trail the script frame by one. They are omitted, never zero, when there is no renderer (headless).
+
+| Metric | Kind | Meaning |
+|---|---|---|
+| `Engine.render_cpu_ms`, `Engine.render_gpu_ms` | timing | CPU and GPU time the engine spent rendering the main viewport. Measured only while recording. |
+| `Engine.frame_setup_cpu_ms` | timing | Engine-wide CPU time to set up the frame. |
+| `Engine.draw_calls`, `Engine.primitives`, `Engine.objects` | gauge | Totals for the frame. |
+| `Engine.visible_*`, `Engine.shadow_*` | gauge | The same three counts split into the visible and shadow passes of the main viewport. |
+
+Gauges are unitless per-frame counts with their own `gauge` rows in `samples.csv`, a `gauges_by_segment` block in `summary.json`, a `gauges_json` column in `spike_frames.csv`, and an "Engine frame measurements" table in `summary.md`. They are never mixed into millisecond tables. Once a second the workload rows add video, texture and buffer memory, object, node, orphan-node and resource counts, and `engine_process_max_ms_last_second` (the engine publishes its process time as the slowest frame of the last second, not per frame).
+
+Engine timings overlap Main spans and must not be added to them. A frame that is slow while `Main.update_ms`, render CPU and render GPU are all small was waiting outside the game (driver, compositor, another program). Frame intervals shifted by a factor of two between otherwise identical captures on 2026-11-11 for that reason; compare Main spans and take A/B captures back to back.
+
+`Mesh.apply_ms` has sub-spans `Mesh.apply.prepare_ms`, `scene_ms`, `cache_store_ms` and `neighbor_deps_ms`.
+
+## Scripted Capture
+
+`tools/perf_capture.gd` is a workload runner for the recorder (ADR-013). It loads a copy of a saved world or creates one, runs fixed phases (idle, fast pan, level steps, zoomed out) with one recording per phase, and writes `result.json` with frame percentiles, the largest Main spans, engine timings, gauges and mesh counters per phase. It needs a game window for render numbers; `--headless` gives script timings only. Always point `APPDATA` at a scratch folder first: the tool refuses the player's save slot, but diagnostics would otherwise land in the real user folder.
+
+```
+godot --path <repo> --script res://tools/perf_capture.gd --resolution 1920x1080 -- --copy-save-from=<saved world dir> --label=baseline
+```
+
+Options are listed at the top of the script. `--mesh-threads=N` overrides the mesh worker count for comparisons.
+
 ## Reading Measurements
 
 Frame interval is monotonic elapsed time between frame boundaries. Simulation delta is the value passed into the game update. Main update time measures Main's synchronous work, excluding recorder bookkeeping. These are different measurements: an update timer is not GPU time, and a long frame interval can include waiting outside Main's update.

@@ -3,9 +3,13 @@ extends RefCounted
 # SEE-ADR-013: Record observations, never drive or pause the simulation.
 
 const RecorderScript = preload("res://scripts/diagnostics/passive_performance_recorder.gd")
+const EngineMetrics = preload("res://scripts/diagnostics/engine_metrics.gd")
 
 var recorder = RecorderScript.new()
 var capture_root := "user://diagnostics/gameplay"
+## Scripted captures run in a window nobody is looking at; keep their frames in
+## the gameplay segment when that window is not focused.
+var ignore_focus := false
 var main
 var indicator: Label
 var _world: World
@@ -71,14 +75,9 @@ func handle_unhandled_input(event: InputEvent) -> bool:
 			_show_status("Moment marked", 3.0)
 		return true
 	if recorder.enabled:
-		_set_mesh_capture(false)
-		recorder.stop("manual")
-		_show_status("Capture saved: %s" % recorder.output_path, 8.0)
+		_show_status("Capture saved: %s" % stop_capture("manual"), 8.0)
 	elif main.world_started and main.world != null:
-		if recorder.start(_metadata(), -1, capture_root):
-			_set_mesh_capture(true)
-			sync_segment()
-			_last_diagnostics = _diagnostics()
+		if start_capture():
 			_show_status("F12 stop | Shift+F12 mark", 3.0)
 		else:
 			_show_status("Capture failed: %s" % recorder.last_error, 8.0)
@@ -86,6 +85,44 @@ func handle_unhandled_input(event: InputEvent) -> bool:
 		_show_status("Start a world before recording", 3.0)
 	_update_indicator(true)
 	return true
+
+
+## Shared by F12 and scripted workload runners (SEE-ADR-013): a runner asks for
+## a capture, it never owns the measurement.
+func start_capture() -> bool:
+	if recorder.enabled or not main.world_started or main.world == null:
+		return false
+	if not recorder.start(_metadata(), -1, capture_root):
+		return false
+	EngineMetrics.set_measuring(_viewport_rid(), true)
+	_set_mesh_capture(true)
+	sync_segment()
+	_last_diagnostics = _diagnostics()
+	return true
+
+
+## Returns the capture directory, or an empty string when nothing was recording.
+func stop_capture(reason: String = "manual") -> String:
+	if not recorder.enabled:
+		return ""
+	_set_mesh_capture(false)
+	recorder.stop(reason)
+	EngineMetrics.set_measuring(_viewport_rid(), false)
+	return recorder.output_path
+
+
+func _viewport_rid() -> RID:
+	return main.get_viewport().get_viewport_rid() if main != null and main.is_inside_tree() else RID()
+
+
+func _sample_engine_frame() -> void:
+	var viewport := _viewport_rid()
+	var timings: Dictionary = EngineMetrics.frame_timings(viewport)
+	for label: String in timings:
+		recorder.add_timing(label, timings[label])
+	var gauges: Dictionary = EngineMetrics.frame_gauges(viewport)
+	for label: String in gauges:
+		recorder.add_gauge(label, gauges[label])
 
 
 func begin_frame(dt: float) -> void:
@@ -102,6 +139,7 @@ func end_frame(main_update_ms: float) -> void:
 		if recorder.wants_workload_sample():
 			var values: Dictionary = main.world.get_performance_snapshot() if main.world != null else {}
 			values["render_level"] = main.world.top_render_y if main.world != null else null
+			values.merge(EngineMetrics.memory_snapshot())
 			if main.camera != null:
 				values["camera_x"] = main.camera.position.x
 				values["camera_y"] = main.camera.position.y
@@ -112,10 +150,13 @@ func end_frame(main_update_ms: float) -> void:
 			if diagnostics != _last_diagnostics:
 				recorder.mark_event("diagnostics_changed", diagnostics)
 				_last_diagnostics = diagnostics
+		_sample_engine_frame()
 		recorder.end_frame(main_update_ms)
 		recorder.pump_output()
 	if not recorder.enabled:
 		_set_mesh_capture(false)
+		# The recorder can stop itself (size limit, output error).
+		EngineMetrics.set_measuring(_viewport_rid(), false)
 	_update_indicator()
 
 
@@ -135,7 +176,7 @@ func sync_segment() -> void:
 
 
 func set_focused(focused: bool) -> void:
-	_focused = focused
+	_focused = focused or ignore_focus
 	sync_segment()
 
 
@@ -164,6 +205,7 @@ func world_replaced(reason: String) -> void:
 func shutdown() -> void:
 	_set_mesh_capture(false)
 	recorder.stop("quit")
+	EngineMetrics.set_measuring(_viewport_rid(), false)
 	if is_instance_valid(_world):
 		if _world.render_level_changed.is_connected(_on_render_level_changed):
 			_world.render_level_changed.disconnect(_on_render_level_changed)
