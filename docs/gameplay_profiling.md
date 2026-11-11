@@ -54,6 +54,8 @@ Engine timings overlap Main spans and must not be added to them. A frame that is
 godot --path <repo> --script res://tools/perf_capture.gd --resolution 1920x1080 -- --copy-save-from=<saved world dir> --label=baseline
 ```
 
+Each phase also reports `visibility_latency_ms`, the request-to-shown age of the visibility view. The optional `panvoid` phase repeats the pan with the renderer's void meter on and reports how many samples had on-screen chunks with geometry that were still hidden; the meter's own sampling costs frame time, so read frame timings from the plain `pan` phase. `--pan-speed=N` sets blocks per second.
+
 Options are listed at the top of the script. `--mesh-threads=N` overrides the mesh worker count for comparisons.
 
 ## Reading Measurements

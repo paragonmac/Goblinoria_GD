@@ -14,7 +14,10 @@ extends SceneTree
 ##   --slot=NAME             save slot to use, default perf_capture (never "world")
 ##   --copy-save-from=DIR    copy a saved world directory into the slot, then load it
 ##   --new-world=256|512|128 create a world instead (128 is the on-demand test size)
-##   --phases=a,b,...        default idle,pan,levels,zoom
+##   --phases=a,b,...        default idle,pan,levels,zoom; panvoid repeats the pan with
+##                           the renderer's void meter on (its sampling costs frame
+##                           time, so it is a separate phase from the timed pan)
+##   --pan-speed=N           blocks per second for pan phases, default 60
 ##   --seconds=N             length of each timed phase, default 10
 ##   --level-steps=N         levels to step down and back up, default 16
 ##   --mesh-threads=N        override the mesh worker thread count for comparisons
@@ -30,9 +33,10 @@ const TOP_SPAN_COUNT := 10
 var main
 var options := {
 	"slot": "perf_capture", "copy-save-from": "", "new-world": "", "phases": "idle,pan,levels,zoom",
-	"seconds": "10", "level-steps": "16", "label": "", "out": "", "mesh-threads": "",
+	"seconds": "10", "level-steps": "16", "label": "", "out": "", "mesh-threads": "", "pan-speed": "",
 }
 var result := {"format_version": 1, "phases": [], "errors": []}
+var _void_stats := {}
 
 
 func _init() -> void:
@@ -117,7 +121,7 @@ func _run() -> void:
 	result["conditions"] = main.performance_controller._metadata()
 	var seconds := maxf(1.0, float(str(options.seconds)))
 	for phase: String in str(options.phases).split(",", false):
-		if not ["idle", "pan", "levels", "zoom"].has(phase):
+		if not ["idle", "pan", "panvoid", "levels", "zoom"].has(phase):
 			result.errors.append("unknown phase %s" % phase)
 			continue
 		if not main.performance_controller.start_capture():
@@ -129,12 +133,16 @@ func _run() -> void:
 				await _wait(seconds)
 			"pan":
 				await _phase_pan(seconds)
+			"panvoid":
+				await _phase_pan(seconds, true)
 			"levels":
 				await _phase_levels(int(str(options["level-steps"])))
 			"zoom":
 				await _phase_zoom(seconds)
 		var capture_dir: String = main.performance_controller.stop_capture("perf_capture")
 		var entry := _summarise(phase, capture_dir)
+		if phase == "panvoid":
+			entry["void"] = _void_stats.duplicate()
 		entry["wall_sec"] = float(Time.get_ticks_usec() - phase_started) / 1000000.0
 		result.phases.append(entry)
 		_print_phase(entry)
@@ -158,7 +166,15 @@ func _settle() -> float:
 	return float(Time.get_ticks_usec() - started) / 1000000.0
 
 
-func _phase_pan(seconds: float) -> void:
+## measure_void turns on the renderer's void meter for the pan: on-screen chunks
+## of the top two layers that have geometry but are not shown yet.
+func _phase_pan(seconds: float, measure_void: bool = false) -> void:
+	var renderer = main.world.renderer
+	var speed := PAN_SPEED if str(options["pan-speed"]).is_empty() else float(str(options["pan-speed"]))
+	var meter_was: bool = renderer.void_meter_enabled
+	renderer.void_meter_enabled = measure_void or meter_was
+	_void_stats = {"samples": 0, "samples_with_void": 0, "hidden_max": 0, "hidden_sum": 0, "checked_sum": 0, "longest_void_ms": 0.0}
+	var last_sample_usec: int = renderer._void_last_usec
 	var legs := [Vector3(1, 0, 0), Vector3(0, 0, 1), Vector3(-1, 0, 0), Vector3(0, 0, -1)]
 	var leg_usec := int(seconds * 1000000.0 / legs.size())
 	for direction: Vector3 in legs:
@@ -167,8 +183,19 @@ func _phase_pan(seconds: float) -> void:
 		while Time.get_ticks_usec() - leg_started < leg_usec:
 			await process_frame
 			var now := Time.get_ticks_usec()
-			main.camera.position += direction * PAN_SPEED * float(now - previous) / 1000000.0
+			main.camera.position += direction * speed * float(now - previous) / 1000000.0
 			previous = now
+			if measure_void and renderer._void_last_usec != last_sample_usec:
+				last_sample_usec = renderer._void_last_usec
+				var meter: Dictionary = renderer.void_meter
+				_void_stats.samples += 1
+				_void_stats.hidden_sum += int(meter.get("hidden", 0))
+				_void_stats.checked_sum += int(meter.get("checked", 0))
+				_void_stats.hidden_max = maxi(_void_stats.hidden_max, int(meter.get("hidden", 0)))
+				_void_stats.longest_void_ms = maxf(_void_stats.longest_void_ms, float(meter.get("void_ms", 0.0)))
+				if int(meter.get("hidden", 0)) > 0:
+					_void_stats.samples_with_void += 1
+	renderer.void_meter_enabled = meter_was
 
 
 func _phase_levels(steps: int) -> void:
@@ -221,6 +248,9 @@ func _summarise(phase: String, capture_dir: String) -> Dictionary:
 			engine[label] = {"mean": row.mean_ms, "max": row.max_ms}
 		elif label.contains(".completed.") or label.begins_with("Mesh.scheduler."):
 			async_jobs[label] = row
+		elif label == "RenderZone.result_age_ms":
+			# Request-to-shown latency of the visibility view, not CPU work.
+			entry["visibility_latency_ms"] = {"samples": row.samples, "mean": row.mean_ms, "max": row.max_ms}
 		elif not ["frame_interval_ms", "simulation_delta_ms", "RenderZone.result_age_ms"].has(label):
 			spans.append(row)
 	spans.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a.total_ms) > float(b.total_ms))
