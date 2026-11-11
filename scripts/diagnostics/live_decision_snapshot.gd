@@ -21,6 +21,8 @@ static func worker_snapshot(worker) -> Dictionary:
 		"position": worker.position,
 		"block_coord": worker.get_block_coord() if worker.position.is_finite() else null,
 		"fall_target_y": worker.fall_target_y,
+		"fall_origin": worker.fall_origin,
+		"last_displacement": worker.last_displacement.duplicate(),
 		"target_pos": worker.target_pos,
 		"movement_intent": worker.movement_intent,
 		"path_length": worker.path.size(),

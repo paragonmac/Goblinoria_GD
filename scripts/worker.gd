@@ -38,6 +38,10 @@ const WAITING_REPATH_INTERVAL := 2.5
 const FALL_SPEED := 14.0
 const FALL_TARGET_EPSILON := 0.01
 const RESCUE_MIN_WALKABLE_Y := Pathfinder.MIN_WALKABLE_Y
+## Returned by _find_fall_target_y when no open drop ends on a floor.
+const NO_FALL_TARGET_Y := 0.0
+## Cube radii, in cells, searched in turn for the nearest footing during a rescue.
+const RESCUE_SEARCH_RADII: Array[int] = [2, 8]
 const DIG_OCCUPIED_RETRY_INTERVAL := 0.25
 const FAILED_TASK_SEARCH_INTERVAL := 2.5
 const ASSIST_WAIT_RETRY_INTERVAL := 0.25
@@ -59,6 +63,11 @@ var wander_wait := 0.0
 var task_search_timer := 0.0
 var waiting_repath_timer := 0.0
 var fall_target_y := 0.0
+var fall_origin := Vector3i.ZERO
+## Why the last fall scan found no landing; empty when it found one.
+var fall_block_reason := ""
+## Last involuntary move (fall or rescue). Diagnostics only, never saved.
+var last_displacement: Dictionary = {}
 var rng := RandomNumberGenerator.new()
 var worker_id := 0
 var role_id: int = WorkerRolesScript.Role.MINER
@@ -195,17 +204,35 @@ func _update_falling(dt: float, world, task_queue) -> bool:
 		return false
 	if state != WorkerState.FALLING and _has_supported_path_segment(world):
 		return false
+	var landing_y := _find_fall_target_y(world)
+	if landing_y < float(RESCUE_MIN_WALKABLE_Y):
+		# No open drop ends on a floor: the worker is inside a block, on a cell it
+		# cannot stand in, or over a bottomless column. Put it back on the nearest
+		# footing; the surface is the last resort.
+		if _recover_to_nearest_support(world, task_queue, fall_block_reason) \
+				or _recover_to_surface(world, task_queue, fall_block_reason):
+			return false
 	if state != WorkerState.FALLING:
-		_trace(world, "fall_started", _current_task(task_queue))
-		_report_anomaly(world, "worker_fall", {"from": get_block_coord()})
+		var from := get_block_coord()
+		var landing := Vector3i(from.x, int(floor(landing_y)), from.z)
+		_trace(world, "fall_started", _current_task(task_queue), "landing=%s drop_cells=%d" % [landing, from.y - landing.y])
+		if _anomalies_enabled(world):
+			_report_anomaly(world, "worker_fall", {
+				"from": from,
+				"landing": landing,
+				"drop_cells": from.y - landing.y,
+				"task_id": current_task_id,
+				"support": support_status(world),
+			})
 		_begin_fall(world, task_queue)
-	fall_target_y = _find_fall_target_y(world)
-	if fall_target_y < float(RESCUE_MIN_WALKABLE_Y) and _recover_to_surface(world, task_queue, "fall_target_below_walkable_floor"):
-		return false
+	fall_target_y = landing_y
 	if position.y <= fall_target_y + FALL_TARGET_EPSILON:
 		position.y = fall_target_y
 		_finish_fall(world)
-		_trace(world, "fall_completed", null, "landed_y=%d" % get_block_coord().y)
+		var landed := get_block_coord()
+		last_displacement = {"kind": "fall", "from": fall_origin, "to": landed}
+		_trace(world, "fall_completed", null, "landed_y=%d from=%s" % [landed.y, fall_origin])
+		_report_anomaly(world, "worker_landed", {"from": fall_origin, "to": landed, "drop_cells": fall_origin.y - landed.y})
 		return false
 	position.y = maxf(fall_target_y, position.y - FALL_SPEED * dt)
 	_ensure_anim_playing_while_moving()
@@ -213,6 +240,7 @@ func _update_falling(dt: float, world, task_queue) -> bool:
 
 
 func _begin_fall(world, task_queue) -> void:
+	fall_origin = get_block_coord()
 	_interrupt_current_task(task_queue, world)
 	if task_queue != null:
 		task_queue.clear_assist_waiter(self)
@@ -240,13 +268,62 @@ func _finish_fall(world = null) -> void:
 	set_state(WorkerState.IDLE, world)
 
 
+## SEE issue #27: recovery stays local so a worker in a mine is not sent to the
+## surface, where the view level hides it.
+func _recover_to_nearest_support(world, task_queue, reason: String) -> bool:
+	if world == null:
+		return false
+	var cell: Variant = _find_nearest_standing_cell(world)
+	if cell == null:
+		return false
+	var footing: Vector3i = cell
+	_relocate_for_rescue(world, task_queue, reason, "nearest_support",
+		Vector3(footing.x, _standing_y_for_coord(world, footing.x, footing.y, footing.z), footing.z))
+	return true
+
+
+## Nearest cell the worker can stand in, measured from where it actually is, so a
+## worker stopped between two path nodes returns to the closer one. Equal
+## distances prefer its own level, which keeps it from being lifted onto a block
+## that was just built in its cell.
+func _find_nearest_standing_cell(world) -> Variant:
+	var origin := get_block_coord()
+	# Terrain that is not loaded reads as air; do not search it for a floor.
+	if world.has_method("_is_loaded_generated_cell") and not world._is_loaded_generated_cell(origin):
+		return null
+	var checks_obstruction: bool = world.has_method("is_cell_obstructed")
+	for radius: int in RESCUE_SEARCH_RADII:
+		var best: Variant = null
+		var best_distance := INF
+		var best_level_gap := 0
+		for dy in range(-radius, radius + 1):
+			var y := origin.y + dy
+			if y < RESCUE_MIN_WALKABLE_Y:
+				continue
+			for dx in range(-radius, radius + 1):
+				for dz in range(-radius, radius + 1):
+					var x := origin.x + dx
+					var z := origin.z + dz
+					if not _can_stand_at(world, x, y, z):
+						continue
+					if checks_obstruction and world.is_cell_obstructed(Vector3i(x, y, z)):
+						continue
+					var distance := position.distance_squared_to(Vector3(x, _standing_y_for_coord(world, x, y, z), z))
+					var level_gap := absi(dy)
+					if distance < best_distance - 0.0001 \
+							or (distance <= best_distance + 0.0001 and level_gap < best_level_gap):
+						best = Vector3i(x, y, z)
+						best_distance = distance
+						best_level_gap = level_gap
+		if best != null:
+			return best
+	return null
+
+
 func _recover_to_surface(world, task_queue, reason: String) -> bool:
 	if world == null or not world.has_method("find_surface_y"):
 		return false
 	var old_coord := get_block_coord()
-	_interrupt_current_task(task_queue, world)
-	if task_queue != null:
-		task_queue.clear_assist_waiter(self)
 	var safe_x: int = old_coord.x
 	var safe_z: int = old_coord.z
 	if world.has_method("is_block_xz_valid") \
@@ -256,7 +333,20 @@ func _recover_to_surface(world, task_queue, reason: String) -> bool:
 		safe_x = int(clamped.x)
 		safe_z = int(clamped.z)
 	var surface_y: int = int(world.find_surface_y(safe_x, safe_z))
-	position = Vector3(float(safe_x), float(surface_y) + 1.0, float(safe_z))
+	_relocate_for_rescue(world, task_queue, reason, "surface",
+		Vector3(float(safe_x), float(surface_y) + 1.0, float(safe_z)))
+	return true
+
+
+func _relocate_for_rescue(world, task_queue, reason: String, method: String, destination: Vector3) -> void:
+	var old_coord := get_block_coord()
+	var record := {"reason": reason, "method": method, "from": old_coord, "task_id": current_task_id, "state_before": state}
+	if _anomalies_enabled(world):
+		record["support"] = support_status(world)
+	_interrupt_current_task(task_queue, world)
+	if task_queue != null:
+		task_queue.clear_assist_waiter(self)
+	position = destination
 	path.clear()
 	path_index = 0
 	path_segment_validated = false
@@ -268,13 +358,15 @@ func _recover_to_surface(world, task_queue, reason: String) -> bool:
 	waiting_repath_timer = 0.0
 	idle_timer = IDLE_PAUSE
 	set_state(WorkerState.IDLE, world)
-	_trace(world, "worker_rescued", null, "reason=%s from=%s to=%s" % [
+	record["to"] = get_block_coord()
+	last_displacement = {"kind": "rescue", "reason": reason, "method": method, "from": old_coord, "to": record.to}
+	_trace(world, "worker_rescued", null, "reason=%s method=%s from=%s to=%s" % [
 		reason,
+		method,
 		old_coord,
-		get_block_coord(),
+		record.to,
 	])
-	_report_anomaly(world, "worker_rescued", {"reason": reason, "from": old_coord, "to": get_block_coord()})
-	return true
+	_report_anomaly(world, "worker_rescued", record)
 
 
 func _interrupt_current_task(task_queue, world = null) -> void:
@@ -330,13 +422,42 @@ func _has_supported_path_segment(world) -> bool:
 	return world.pathfinder.can_traverse(world, from_node, to_node)
 
 
+## Standing height of the first floor reached by dropping through open cells, or
+## NO_FALL_TARGET_Y with fall_block_reason set. SEE issue #27: the scan stops at
+## the first solid block. It used to continue through rock to whatever cavity lay
+## below and carried workers out of the colony.
 func _find_fall_target_y(world) -> float:
 	var coord: Vector3i = get_block_coord()
 	var start_y: int = clampi(coord.y, 0, world.world_size_y - 1)
+	fall_block_reason = ""
 	for y in range(start_y, 0, -1):
 		if _can_stand_at(world, coord.x, y, coord.z):
 			return _standing_y_for_coord(world, coord.x, y, coord.z)
-	return 0.0
+		if _is_worker_blocking(world, world.get_block_no_generate(coord.x, y, coord.z)):
+			fall_block_reason = "inside_solid_block"
+			return NO_FALL_TARGET_Y
+		if _is_worker_blocking(world, world.get_block_no_generate(coord.x, y - 1, coord.z)):
+			# Solid floor directly below, yet the cell itself is unusable (for
+			# example an orphaned stair half).
+			fall_block_reason = "cell_not_standable"
+			return NO_FALL_TARGET_Y
+	fall_block_reason = "no_floor_below"
+	return NO_FALL_TARGET_Y
+
+
+## Floor status for diagnostics: what the worker's cell and the cell under it
+## hold, and which support rule currently holds the worker up.
+func support_status(world) -> Dictionary:
+	var coord := get_block_coord()
+	var cell_block: int = world.get_block_no_generate(coord.x, coord.y, coord.z)
+	return {
+		"cell": coord,
+		"cell_block_id": cell_block,
+		"below_block_id": world.get_block_no_generate(coord.x, coord.y - 1, coord.z),
+		"in_solid": _is_worker_blocking(world, cell_block),
+		"standing_support": _has_standing_support(world),
+		"path_segment_support": _has_supported_path_segment(world),
+	}
 
 
 func _can_stand_at(world, x: int, y: int, z: int) -> bool:
@@ -1371,6 +1492,11 @@ func _report_anomaly(world, check: String, details: Dictionary) -> void:
 	var watchdog = world.get("anomaly_watchdog") if world != null else null
 	if watchdog != null:
 		watchdog.report_event(check, "worker:%d" % worker_id, details, self)
+
+
+func _anomalies_enabled(world) -> bool:
+	var watchdog = world.get("anomaly_watchdog") if world != null else null
+	return watchdog != null and watchdog.enabled
 
 
 func _diagnostics_enabled(world) -> bool:

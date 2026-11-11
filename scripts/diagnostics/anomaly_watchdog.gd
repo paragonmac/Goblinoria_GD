@@ -141,8 +141,12 @@ func _check_workers() -> void:
 		var coord: Vector3i = worker.get_block_coord()
 		var falling: bool = worker.state == Worker.WorkerState.FALLING
 		_condition("worker_out_of_tree", subject, not worker.is_inside_tree(), worker)
-		_condition("worker_in_solid", subject, not falling and _is_solid_cell(coord), worker)
-		_condition("worker_unsupported", subject, not falling and not _worker_supported(worker), worker)
+		var in_solid: bool = not falling and _is_solid_cell(coord)
+		var unsupported: bool = not falling and not _worker_supported(worker)
+		# Floor status is read only for a worker that is already suspect.
+		var floor_status := {"support": worker.support_status(world)} if in_solid or unsupported else {}
+		_condition("worker_in_solid", subject, in_solid, worker, null, floor_status)
+		_condition("worker_unsupported", subject, unsupported, worker, null, floor_status)
 		_track_progress(worker, subject, coord)
 		_condition("worker_task_missing", subject,
 			worker.current_task_id >= 0 and world.task_queue.get_task(worker.current_task_id) == null, worker)
@@ -152,7 +156,8 @@ func _check_workers() -> void:
 			_known_workers.erase(worker_id)
 	for worker in world.workers:
 		if is_instance_valid(worker):
-			_known_workers[worker.worker_id] = {"pos": Data.plain(worker.get_block_coord()), "role_id": worker.role_id}
+			_known_workers[worker.worker_id] = {"pos": Data.plain(worker.get_block_coord()), "role_id": worker.role_id,
+				"state": worker.state, "task_id": worker.current_task_id, "visible": worker.visible}
 
 
 func _track_progress(worker, subject: String, coord: Vector3i) -> void:
