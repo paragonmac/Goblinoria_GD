@@ -140,7 +140,7 @@ func _build() -> void:
 	_freeze_check.text = "Freeze culling"
 	_freeze_check.toggled.connect(_on_freeze_toggled)
 	body.add_child(_freeze_check)
-	for entry: Array in [["darkness", "Darkness"], ["fog", "Fog of war"], ["light_view", "Light view (levels)"]]:
+	for entry: Array in [["pan_limit", "Limit pan to shown terrain"], ["view_meshes", "View requests its meshes first"], ["darkness", "Darkness"], ["fog", "Fog of war"], ["light_view", "Light view (levels)"]]:
 		var check := CheckBox.new()
 		check.text = entry[1]
 		var key: String = entry[0]

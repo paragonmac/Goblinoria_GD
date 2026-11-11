@@ -40,6 +40,24 @@ var last_application_mode := "full"
 var delta_applications := 0
 var full_applications := 0
 var last_requested_bounds: Dictionary = {}
+# Pan limiter (SEE-ADR-015, 2026-11-11). Camera origin of each view that has
+# been requested and can still be adopted, of the view being applied, and of
+# the last view fully applied.
+const PAN_LIMIT_SAFETY_BLOCKS := 1.0
+var pan_limited_count := 0
+var pan_withheld_blocks := 0.0
+var _request_origins: Dictionary = {}
+var _batch_origin_valid := false
+var _batch_origin := Vector3.ZERO
+var _applied_origin_valid := false
+var _applied_origin := Vector3.ZERO
+# Set by the renderer: asks for the meshes an adopted view needs. The last view
+# it reported fully meshed is a pan anchor too, so the camera cannot outrun
+# terrain that has a mesh. Null in fixtures without a renderer.
+var mesh_requester
+var _adopted_origins: Dictionary = {}
+var _meshed_origin_valid := false
+var _meshed_origin := Vector3.ZERO
 
 func configure(owner) -> void:
 	renderer = owner
@@ -71,6 +89,12 @@ func invalidate() -> void:
 	requested_key = []
 	_phase = 0
 	_index = 0
+	# The applied origin stays: what is shown has not changed yet.
+	_request_origins.clear()
+	_batch_origin_valid = false
+	_adopted_origins.clear()
+	if mesh_requester != null:
+		mesh_requester.clear_view()
 
 func _hard_view(camera: Camera3D) -> Array:
 	var key: Array = [renderer.world.top_render_y]
@@ -105,6 +129,8 @@ func request(min_coord: Vector3i, max_coord: Vector3i, camera: Camera3D, key: Ar
 	requested_sequence += 1
 	requested_epoch = epoch
 	requested_key = key
+	if camera != null and not planes.is_empty():
+		_request_origins[requested_sequence] = camera.global_transform.origin
 	var now := Time.get_ticks_usec()
 	var lead: Vector3 = renderer.motion_lead_offset.limit_length(renderer.RENDER_FRUSTUM_MAX_LEAD_DISTANCE)
 	var lead_planes: Array = _translated_planes(planes, lead) if not planes.is_empty() and lead.length_squared() > 0.25 else []
@@ -173,6 +199,16 @@ func _adopt(result: Dictionary) -> void:
 		_mark_eligible_dirty()
 	_batch = result
 	accepted_sequence = int(result.request_id)
+	_batch_origin_valid = _request_origins.has(accepted_sequence)
+	if _batch_origin_valid:
+		_batch_origin = _request_origins[accepted_sequence]
+	for request_id: int in _request_origins.keys():
+		if request_id <= accepted_sequence:
+			_request_origins.erase(request_id)
+	if mesh_requester != null:
+		if _batch_origin_valid:
+			_adopted_origins[accepted_sequence] = _batch_origin
+		mesh_requester.begin_view(result)
 	if not bool(result.get("fallback", false)):
 		scheduler.note_adopted(accepted_sequence, epoch)
 	accepted_epoch = epoch
@@ -223,7 +259,10 @@ func _step() -> bool:
 	if _phase == 0:
 		var coords: Array = _batch.accepted_coords
 		if _index < coords.size():
-			var coord: Vector3i = coords[_index]
+			# Top layers first (SEE-ADR-015, 2026-11-11): the kernel lists coordinates
+			# bottom layer up, and the player sees the top of the slice. Under the
+			# per-frame budget the old order showed those chunks last.
+			var coord: Vector3i = coords[coords.size() - 1 - _index]
 			_index += 1
 			var entering: bool = not eligible.members.has(coord) or reconcile.has(coord)
 			eligible.add(coord)
@@ -260,7 +299,8 @@ func _step_delta() -> bool:
 	if _phase == 0:
 		var entering: Array = _batch.entering_coords
 		if _index < entering.size():
-			var coord: Vector3i = entering[_index]
+			# Top layers first, as in the full scan.
+			var coord: Vector3i = entering[entering.size() - 1 - _index]
 			_index += 1
 			eligible.add(coord)
 			renderer._set_chunk_visibility(coord, true)
@@ -294,6 +334,9 @@ func _finish() -> void:
 	applied_key = _batch.view_key
 	applied_usec = int(_batch.submitted_usec)
 	last_application_mode = _batch_mode
+	_applied_origin_valid = _batch_origin_valid
+	_applied_origin = _batch_origin
+	_batch_origin_valid = false
 	if _batch_mode == "delta":
 		delta_applications += 1
 	else:
@@ -338,6 +381,75 @@ func snapshot() -> Dictionary:
 		"accepted_result_age_ms": float(Time.get_ticks_usec() - accepted_usec) / 1000.0 if accepted_usec > 0 else null,
 		"requested_bounds": last_requested_bounds}, true)
 	return state
+
+## The mesh requester finished a view: every chunk of it that can show something
+## has a mesh. Its camera origin becomes the meshed anchor of the pan limiter.
+func note_view_meshed(request_id: int) -> void:
+	if _adopted_origins.has(request_id):
+		_meshed_origin = _adopted_origins[request_id]
+		_meshed_origin_valid = true
+	for adopted_id: int in _adopted_origins.keys():
+		if adopted_id <= request_id:
+			_adopted_origins.erase(adopted_id)
+
+
+func forget_meshed_view() -> void:
+	_meshed_origin_valid = false
+	_adopted_origins.clear()
+
+
+## Limits a pan from `from` to `to` (camera origins) so the camera cannot outrun
+## what is shown. A view accepts every chunk within `padding` of its frustum, so
+## while the camera is within that padding of the view's origin on each axis,
+## every chunk on screen was accepted by it. The views that matter are the one
+## applied (what is shown now), those being applied or still to be adopted
+## (their removals will hide what they did not accept), and the last view whose
+## chunks all have a mesh.
+func limit_pan(from: Vector3, to: Vector3, padding: float) -> Vector3:
+	var anchors: Array[Vector3] = []
+	if _applied_origin_valid:
+		anchors.append(_applied_origin)
+	if _batch_origin_valid and not _batch.is_empty():
+		anchors.append(_batch_origin)
+	# Shown is not enough on ground that was never meshed: stay within reach of
+	# the last view whose needed chunks all have a mesh.
+	if _meshed_origin_valid and mesh_requester != null:
+		anchors.append(_meshed_origin)
+	for request_id: int in scheduler.in_play_request_ids():
+		if request_id >= 0 and _request_origins.has(request_id):
+			anchors.append(_request_origins[request_id])
+	var limited := clamp_pan(from, to, anchors, padding - PAN_LIMIT_SAFETY_BLOCKS)
+	if not limited.is_equal_approx(to):
+		pan_limited_count += 1
+		pan_withheld_blocks += limited.distance_to(to)
+	return limited
+
+
+## Pure rule behind limit_pan. Each anchor allows `margin` on every axis; the
+## camera may move anywhere inside all of them. It is never pulled back: outside
+## the allowed interval it may only move toward it. An axis is left alone when
+## the anchors disagree by more than they can jointly allow, or the camera is
+## already more than `margin` outside (a jump or stale views, where holding the
+## camera would guarantee nothing).
+static func clamp_pan(from: Vector3, to: Vector3, anchors: Array[Vector3], margin: float) -> Vector3:
+	if anchors.is_empty() or margin <= 0.0:
+		return to
+	var low := anchors[0]
+	var high := anchors[0]
+	for anchor: Vector3 in anchors:
+		low = low.max(anchor)
+		high = high.min(anchor)
+	# low is now the largest anchor coordinate and high the smallest, per axis.
+	var result := to
+	for axis in 3:
+		var allowed_min: float = low[axis] - margin
+		var allowed_max: float = high[axis] + margin
+		var start: float = from[axis]
+		if allowed_min > allowed_max or start < allowed_min - margin or start > allowed_max + margin:
+			continue
+		result[axis] = clampf(to[axis], minf(allowed_min, start), maxf(allowed_max, start))
+	return result
+
 
 func _can_apply_delta(result: Dictionary) -> bool:
 	# The worker diffs against the most recently adopted result, which is the

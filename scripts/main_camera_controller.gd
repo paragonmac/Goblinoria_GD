@@ -293,7 +293,24 @@ func _apply_camera_pan(delta: Vector2) -> void:
 	var right := _get_camera_right_flat()
 	var forward := _get_camera_forward_flat()
 	var pan := (right * -delta.x + forward * delta.y) * units_per_pixel * cam_pan_speed
-	camera.position += pan
+	pan_by(pan)
+
+
+## Every pan (keys, mouse drag, scripted) moves the camera through here. The
+## renderer may shorten the move so the view never runs past terrain that is
+## already shown (SEE-ADR-015). Jumps and zoom do not use this.
+func pan_by(offset: Vector3) -> void:
+	if camera == null:
+		return
+	var in_tree := camera.is_inside_tree()
+	var from := camera.global_position if in_tree else camera.position
+	var to := from + offset
+	if world_ref != null and world_ref.renderer != null:
+		to = world_ref.renderer.limit_camera_pan(from, to)
+	if in_tree:
+		camera.global_position = to
+	else:
+		camera.position = to
 
 
 func _update_camera_keyboard_movement(dt: float) -> void:
@@ -306,7 +323,7 @@ func _update_camera_keyboard_movement(dt: float) -> void:
 	var speed := cam_speed
 	if input_state.is_key_pressed(KEY_SHIFT):
 		speed *= cam_fast_multiplier
-	camera.position += move_dir.normalized() * speed * dt
+	pan_by(move_dir.normalized() * speed * dt)
 
 
 func _clamp_camera_to_world() -> void:

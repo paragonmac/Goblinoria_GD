@@ -28,6 +28,11 @@ func is_chunk_in_view(planes: Array, coord: Vector3i, chunk_size: int, padding: 
 		var pad := Vector3(padding, padding, padding)
 		min_corner -= pad
 		max_corner += pad
+	return is_box_in_view(planes, min_corner, max_corner)
+
+
+## The plane test behind is_chunk_in_view, for any axis-aligned box.
+func is_box_in_view(planes: Array, min_corner: Vector3, max_corner: Vector3) -> bool:
 	for entry in planes:
 		var p: Plane = entry["plane"]
 		var inside_positive: bool = entry["inside_positive"]

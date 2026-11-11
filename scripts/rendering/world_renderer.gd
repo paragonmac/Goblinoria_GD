@@ -66,6 +66,8 @@ var render_debug := {
 	"look_ahead_sec": RENDER_FRUSTUM_MOTION_LEAD_SEC,
 	"refresh_every_frame": true, # while moving; otherwise the 50 ms cadence
 	"freeze": false, # stop visibility requests; shown chunks stay as they are
+	"pan_limit": true, # pans cannot outrun what is shown and meshed (SEE-ADR-015)
+	"view_meshes": true, # the adopted view requests its own meshes first (SEE-ADR-015)
 	"darkness": true, # SEE-ADR-021: light and fog in the terrain shader
 	"fog": true, # unexplored cells black
 	"light_view": false, # greyscale light levels
@@ -95,6 +97,10 @@ var mesh_job_builder = ChunkMeshJobBuilderScript.new()
 var mesh_cache_store = WorldRendererMeshCacheStoreScript.new()
 var use_async_meshing: bool = true
 var visibility_state = VisibilityScript.new()
+# Asks for the meshes the adopted view needs, ahead of the streaming queue (SEE-ADR-015).
+const ViewMeshRequesterScript = preload("res://scripts/rendering/view_mesh_requester.gd")
+const VIEW_MESH_PUMP_USEC := 700
+var view_meshes = ViewMeshRequesterScript.new()
 var visibility_scheduler = visibility_state.scheduler
 var render_zone_visible: Dictionary = visibility_state.eligible.members
 var diagnostics_render_bounds: Dictionary = {}
@@ -111,6 +117,8 @@ var neighbor_remesh_queued_total: int = 0
 func initialize(world_ref: World) -> void:
 	world = world_ref
 	visibility_state.configure(self)
+	view_meshes.configure(self)
+	visibility_state.mesh_requester = view_meshes
 	if chunk_cache.get_parent() == null:
 		add_child(chunk_cache)
 	if overlay_renderer.get_parent() == null:
@@ -157,6 +165,7 @@ func clear_chunks() -> void:
 	_slice_cap_coords.clear()
 	_slice_cap_checked.clear()
 	visibility_state.clear()
+	view_meshes.reset()
 	diagnostics_render_bounds = {}
 	chunk_cache.clear()
 	_clear_all_chunk_render_stats()
@@ -869,6 +878,8 @@ func update_render_height_anchor(anchor: Vector3) -> void:
 #region Mesh Cache
 func invalidate_chunk_mesh_cache(coord: Vector3i) -> void:
 	mesh_cache_store.erase(coord)
+	# The terrain here changed, so what the column can show may have too.
+	view_meshes.forget_column(coord.x, coord.z)
 
 
 func reset_mesh_cache_metrics() -> void:
@@ -1033,6 +1044,18 @@ func needs_render_zone_update(min_cx: int, max_cx: int, min_cz: int, max_cz: int
 	return visibility_state.needs_request(_render_zone_key(min_cx, max_cx, min_cz, max_cz, _debug_min_cy(min_cy), max_cy, _key_camera(camera)))
 
 
+## Called by the camera for every pan step. Returns `to`, or a position short of
+## it when going all the way would bring chunks on screen that are not shown yet.
+## Only applies while the camera frustum decides what is shown.
+func limit_camera_pan(from: Vector3, to: Vector3) -> Vector3:
+	if not bool(render_debug.pan_limit) or bool(render_debug.freeze) or str(render_debug.visibility_mode) != "async":
+		return to
+	var limited: Vector3 = visibility_state.limit_pan(from, to, RENDER_FRUSTUM_PADDING_CHUNKS * World.CHUNK_SIZE)
+	if limited != to and _performance_recording():
+		world.performance_recorder.add_counter("Camera.pan_limited")
+	return limited
+
+
 func invalidate_render_zone() -> void:
 	visibility_state.invalidate()
 
@@ -1064,10 +1087,25 @@ func update_render_zone(
 
 func pump_visibility(max_ms: float = 1.0, max_steps: int = 256) -> int:
 	var steps: int = visibility_state.pump(max_ms, max_steps)
+	_pump_view_meshes()
 	if void_meter_enabled:
 		_tick_void_meter()
 	pump_light()
 	return steps
+
+
+## Requests the meshes the newest adopted view needs and tells the visibility
+## state when a view is fully meshed (the pan limiter anchors on it).
+func _pump_view_meshes() -> void:
+	if world == null or not bool(render_debug.view_meshes):
+		return
+	var started: int = world.begin_performance_timing()
+	var before: int = view_meshes.requested_total
+	if view_meshes.pump(VIEW_MESH_PUMP_USEC):
+		visibility_state.note_view_meshed(view_meshes.meshed_view_id)
+	world.end_performance_timing("ViewMesh.pump_ms", started)
+	if _performance_recording() and view_meshes.requested_total > before:
+		world.performance_recorder.add_counter("ViewMesh.requested", view_meshes.requested_total - before)
 
 
 #region Darkness (SEE-ADR-021)
@@ -1139,6 +1177,7 @@ func get_visibility_snapshot() -> Dictionary:
 	var state: Dictionary = visibility_state.snapshot()
 	state["render_debug"] = render_debug.duplicate()
 	state["void_meter"] = void_meter.duplicate() if void_meter_enabled else {"enabled": false}
+	state["view_meshes"] = view_meshes.snapshot()
 	return state
 
 
@@ -1311,6 +1350,10 @@ func set_render_debug(key: String, value: Variant) -> bool:
 		motion_lead_offset = Vector3.ZERO
 	if key in ["darkness", "fog", "light_view"]:
 		_apply_light_switches()
+	if key == "view_meshes" and not value:
+		# Nothing reports meshed views any more, so the limiter must not wait for one.
+		view_meshes.clear_view()
+		visibility_state.forget_meshed_view()
 	# Mode/depth changes and unfreezing need a fresh full view; epoch bump drops
 	# in-flight work for the old settings.
 	if key in ["visibility_mode", "depth_layers"] or (key == "freeze" and not value):
@@ -1374,6 +1417,21 @@ func _key_camera(camera: Camera3D) -> Camera3D:
 	return null if render_debug.visibility_mode == "area" else camera
 
 
+## Is any part of this chunk that can be drawn inside the view? The terrain
+## shader discards blocks above the cut (block y > top_render_y), so the top
+## layer's box stops one block above it. Testing the whole chunk box counted
+## top-layer chunks at the near screen edge that reach the view only above the
+## cut, where nothing is drawn, as missing terrain.
+func is_drawn_part_in_view(planes: Array, coord: Vector3i) -> bool:
+	var size := float(World.CHUNK_SIZE)
+	var min_corner := Vector3(coord) * size
+	var max_corner := min_corner + Vector3(size, size, size)
+	max_corner.y = minf(max_corner.y, float(world.top_render_y) + 1.0)
+	if max_corner.y <= min_corner.y:
+		return false
+	return frustum_culler.is_box_in_view(planes, min_corner, max_corner)
+
+
 ## Void = on-screen chunks in the top two render chunk layers that have geometry
 ## but are hidden: visibility lag the player sees as missing terrain.
 func _tick_void_meter() -> void:
@@ -1393,7 +1451,7 @@ func _tick_void_meter() -> void:
 		for cx in range(maxi(args[0], world.WORLD_MIN_CHUNK_X), mini(args[1], world.WORLD_MAX_CHUNK_X) + 1):
 			for cz in range(maxi(args[2], world.WORLD_MIN_CHUNK_Z), mini(args[3], world.WORLD_MAX_CHUNK_Z) + 1):
 				var coord := Vector3i(cx, cy, cz)
-				if not frustum_culler.is_chunk_in_view(planes, coord, World.CHUNK_SIZE, 0.0):
+				if not is_drawn_part_in_view(planes, coord):
 					continue
 				var node: MeshInstance3D = chunk_cache.get_chunk(coord)
 				if node == null or ((node.mesh == null or node.mesh.get_surface_count() == 0) and not has_slice_cap(coord)):

@@ -295,6 +295,20 @@ func submit(job: Dictionary) -> void:
 	retired_pending = {}
 
 
+## Main thread: request ids of the views that can still be adopted, in the order
+## they would be: the published result, the running job, the pending request.
+## -1 where there is none. Jobs are immutable, so reading their id is safe.
+func in_play_request_ids() -> PackedInt64Array:
+	_state.mutex.lock()
+	var ids := PackedInt64Array([
+		int(_state.result.get("request_id", -1)),
+		int(_state.kernel.job.get("request_id", -1)) if _state.kernel != null else -1,
+		int(_state.pending.get("request_id", -1)),
+	])
+	_state.mutex.unlock()
+	return ids
+
+
 func take_result() -> Dictionary:
 	_state.mutex.lock()
 	var result := _state.result
