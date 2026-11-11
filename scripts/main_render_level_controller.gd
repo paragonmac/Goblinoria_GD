@@ -140,7 +140,10 @@ func handle_render_layer_change(delta: int) -> void:
 	if target_y == from_y:
 		return
 	var snapshot_before: Dictionary = y_transition_profiler.capture_snapshot()
-	var mesh_targets: Array[Vector3i] = _build_reveal_chunk_targets(target_y)
+	# Judge readiness on the chunks that will actually be meshed. Counting the
+	# deep layers a wide world never meshes made every level step on a 512 world
+	# take the loading-screen path, about 195 ms each.
+	var mesh_targets: Array[Vector3i] = _meshable_reveal_targets(target_y).targets
 	var mesh_ready_before: int = _count_ready_startup_chunks(mesh_targets)
 	if mesh_targets.is_empty() or mesh_ready_before < mesh_targets.size():
 		_change_render_layer_with_loading(delta, from_y, target_y, snapshot_before, mesh_targets, mesh_ready_before)
@@ -240,14 +243,10 @@ func prepare_world_for_reveal(status_prefix: String) -> void:
 
 func _ensure_render_y_ready(render_y: int, status_prefix: String) -> Dictionary:
 	var startup_start_usec: int = Time.get_ticks_usec()
-	var mesh_targets: Array[Vector3i] = _build_reveal_chunk_targets(render_y)
-	var reveal_min_cy: int = 0
-	var lowest_surface_y: int = -1
-	if _is_wide_world():
-		lowest_surface_y = _find_lowest_surface_in_initial_view(render_y)
-		if lowest_surface_y >= 0:
-			reveal_min_cy = maxi(0, floori(float(maxi(lowest_surface_y - World.CHUNK_SIZE, 0)) / float(World.CHUNK_SIZE)))
-			mesh_targets = _filter_targets_from_min_chunk_y(mesh_targets, reveal_min_cy)
+	var reveal: Dictionary = _meshable_reveal_targets(render_y)
+	var mesh_targets: Array[Vector3i] = reveal.targets
+	var reveal_min_cy: int = reveal.min_chunk_y
+	var lowest_surface_y: int = reveal.lowest_surface_y
 	var profile := {
 		"target_chunk_y": _chunk_y_for_render_y(render_y),
 		"reveal_min_chunk_y": reveal_min_cy,
@@ -328,6 +327,21 @@ func _ensure_render_y_ready(render_y: int, status_prefix: String) -> Dictionary:
 	}
 	last_render_y_ready_profile = profile
 	return profile
+
+
+## Reveal targets a level needs before it can be shown. Wide worlds mesh on
+## demand and skip chunk layers below the lowest surface in view (ADR-022 phase
+## 3b). Returns {targets, min_chunk_y, lowest_surface_y}.
+func _meshable_reveal_targets(render_y: int) -> Dictionary:
+	var targets: Array[Vector3i] = _build_reveal_chunk_targets(render_y)
+	var min_chunk_y: int = 0
+	var lowest_surface_y: int = -1
+	if _is_wide_world():
+		lowest_surface_y = _find_lowest_surface_in_initial_view(render_y)
+		if lowest_surface_y >= 0:
+			min_chunk_y = maxi(0, floori(float(maxi(lowest_surface_y - World.CHUNK_SIZE, 0)) / float(World.CHUNK_SIZE)))
+			targets = _filter_targets_from_min_chunk_y(targets, min_chunk_y)
+	return {"targets": targets, "min_chunk_y": min_chunk_y, "lowest_surface_y": lowest_surface_y}
 
 
 func _filter_targets_from_min_chunk_y(targets: Array[Vector3i], min_cy: int) -> Array[Vector3i]:

@@ -117,6 +117,22 @@ func _run(world: World) -> void:
 	renderer.chunk_cache.remove_chunk(buried)
 	_check(recycled.get_node_or_null(renderer.SLICE_CAP_NODE) == null, "A pooled chunk node drops its cap")
 
+	# A level change caps only the slice layer's on-screen footprint (plus the
+	# one-chunk streaming margin), not every column of the wider render zone.
+	world.streaming.render_band_chunk_bounds = {slice_cy: Rect2i(-1, -1, 2, 2)}
+	renderer.update_render_zone(-4, 3, -4, 3, 0, 28)
+	renderer.refresh_slice_caps()
+	var inside_footprint := true
+	for cap_coord: Vector3i in renderer._slice_cap_coords:
+		inside_footprint = inside_footprint and cap_coord.x >= -2 and cap_coord.x <= 1 and cap_coord.z >= -2 and cap_coord.z <= 1
+	_check(renderer._slice_cap_coords.size() == 16 and inside_footprint,
+		"Level change caps the slice footprint only (%d caps in an 8x8 zone)" % renderer._slice_cap_coords.size())
+	# Panning moves the footprint; the next zone update caps the new columns.
+	world.streaming.render_band_chunk_bounds = {slice_cy: Rect2i(1, -1, 2, 2)}
+	renderer.update_render_zone(-4, 3, -4, 3, 0, 28)
+	_check(renderer.has_slice_cap(Vector3i(3, slice_cy, 0)), "Columns entering the slice footprint get caps")
+	world.streaming.render_band_chunk_bounds = {}
+
 	# Clearing chunks forgets caps; above all terrain there is nothing to cap.
 	renderer.clear_chunks()
 	_check(renderer._slice_cap_coords.is_empty(), "clear_chunks forgets caps")

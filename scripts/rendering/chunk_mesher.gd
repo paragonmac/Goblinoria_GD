@@ -18,12 +18,24 @@ const GREEDY_UV2_FLAG := 2.0
 const COVERED_FROM_ABOVE_FLAG := 256.0
 const SEAM_OVERLAP := 0.002
 const DEBUG_FACE_BUCKET_COUNT := 16
+const FACE_TABLE_SIZE := 256
 #endregion
 
 #region State
 var block_solid_table := PackedByteArray()
 var block_color_table := PackedColorArray()
 var block_ramp_table := PackedByteArray()
+# Face-pass lookup tables, see _ensure_face_tables.
+var _face_tables_air := -1
+var _face_tables_solid_source := PackedByteArray()
+var _face_tables_ramp_source := PackedByteArray()
+var _cube_ids := PackedByteArray()
+var _solid_ids := PackedByteArray()
+var _shape_ids := PackedByteArray()
+var _occludes_back := PackedByteArray()
+var _occludes_forward := PackedByteArray()
+var _occludes_right := PackedByteArray()
+var _occludes_left := PackedByteArray()
 var padded_buffer: RefCounted = ChunkMesherPaddedBufferScript.new()
 var uv_helper: RefCounted = ChunkMesherUvScript.new()
 var visuals: RefCounted = ChunkMesherVisualsScript.new()
@@ -150,6 +162,16 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 	var ramp_visible_faces := 0
 	var ramp_occluded_faces := 0
 
+	# A chunk of nothing but air has no faces of its own, whatever surrounds it.
+	# Roughly half the world is sky, so skip its seven passes outright.
+	if blocks.count(air_id) == blocks.size():
+		return {
+			"vertices": vertices, "normals": normals, "colors": colors, "uv": uvs, "uv2": uv2s,
+			"visible_faces": 0, "occluded_faces": 0, "vertex_count": 0, "triangle_count": 0,
+			"greedy_visible_faces": 0, "greedy_occluded_faces": 0, "greedy_source_visible_faces": 0,
+			"ramp_visible_faces": 0, "ramp_occluded_faces": 0, "has_geometry": false,
+		}
+
 	var greedy_counts := add_greedy_cube_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, air_id, solid_table, ramp_table, color_table, tile_count, tile_scale)
 	greedy_visible_faces = int(greedy_counts.get("visible", 0))
 	greedy_occluded_faces = int(greedy_counts.get("occluded", 0))
@@ -157,15 +179,19 @@ func build_chunk_arrays_from_data(job: Dictionary) -> Dictionary:
 	visible_faces += greedy_visible_faces
 	occluded_faces += greedy_occluded_faces
 
+	# Ramps, slopes and stair flights. Most cells are plain cubes or air and are
+	# skipped with one table read.
+	_ensure_face_tables(solid_table, ramp_table, air_id)
+	var shape_ids := _shape_ids
 	for lx in range(chunk_size):
 		var wx := cx * chunk_size + lx
 		for ly in range(chunk_size):
 			var wy := cy * chunk_size + ly
 			for lz in range(chunk_size):
-				var wz := cz * chunk_size + lz
-				var block_id := padded_block(padded_blocks, padded_size, lx + 1, ly + 1, lz + 1, air_id)
-				if block_id == air_id:
+				var block_id: int = padded_blocks[((lz + 1) * padded_size + ly + 1) * padded_size + lx + 1]
+				if shape_ids[block_id] == 0:
 					continue
+				var wz := cz * chunk_size + lz
 				if is_flight_id(block_id):
 					var flight_base := Vector3(lx, ly, lz)
 					var flight_color := block_color_from_table(color_table, block_id, wx, wy, wz)
@@ -536,6 +562,36 @@ func _planar_uv(vertex: Vector3, base: Vector3, normal: Vector3) -> Vector2:
 func _atlas_uv(local_uv: Vector2, tile_offset: Vector2, tile_scale: Vector2) -> Vector2:
 	return uv_helper.atlas_uv(local_uv, tile_offset, tile_scale)
 
+## Per-block-id lookup tables for the face passes. Block ids are bytes, so 256
+## entries cover every id. Rebuilt only when the block tables or air id change;
+## each mesher instance belongs to one thread.
+func _ensure_face_tables(solid_table: PackedByteArray, ramp_table: PackedByteArray, air_id: int) -> void:
+	if _face_tables_air == air_id and _face_tables_solid_source == solid_table and _face_tables_ramp_source == ramp_table:
+		return
+	_face_tables_air = air_id
+	_face_tables_solid_source = solid_table.duplicate()
+	_face_tables_ramp_source = ramp_table.duplicate()
+	for table: PackedByteArray in [_cube_ids, _solid_ids, _shape_ids, _occludes_back, _occludes_forward, _occludes_right, _occludes_left]:
+		table.resize(FACE_TABLE_SIZE)
+	for block_id in range(FACE_TABLE_SIZE):
+		_cube_ids[block_id] = 1 if _is_greedy_cube_block(block_id, air_id, ramp_table) else 0
+		_solid_ids[block_id] = 1 if is_solid_id(block_id, solid_table) else 0
+		_shape_ids[block_id] = 1 if block_id != air_id and (is_flight_id(block_id) or is_ramp_id(block_id, ramp_table)) else 0
+		_occludes_back[block_id] = 1 if is_face_occluding(block_id, solid_table, ramp_table, Vector3.BACK) else 0
+		_occludes_forward[block_id] = 1 if is_face_occluding(block_id, solid_table, ramp_table, Vector3.FORWARD) else 0
+		_occludes_right[block_id] = 1 if is_face_occluding(block_id, solid_table, ramp_table, Vector3.RIGHT) else 0
+		_occludes_left[block_id] = 1 if is_face_occluding(block_id, solid_table, ramp_table, Vector3.LEFT) else 0
+
+
+## Emits the cube faces of a chunk. Faces merge when they share a block id and
+## the same "covered from above" state: top and bottom faces into rectangles,
+## side faces into runs along one axis.
+##
+## The inner loops read the padded buffer directly, at (pz * ps + py) * ps + px,
+## and keep each face as an integer code, (block_id << 1 | covered) + 1 with 0
+## for no face. They used to build a Dictionary with a formatted string key per
+## cell, which made a build take about 12 ms and made mesh threads fight over
+## the allocator. tools/validate_mesher_golden.gd pins the output.
 func add_greedy_cube_faces(
 	vertices: PackedVector3Array,
 	normals: PackedVector3Array,
@@ -555,20 +611,29 @@ func add_greedy_cube_faces(
 	tile_count: int,
 	tile_scale: Vector2
 ) -> Dictionary:
-	var counts := {"visible": 0, "occluded": 0, "source_visible": 0}
-	_merge_counts(counts, _add_greedy_top_bottom_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, air_id, solid_table, ramp_table, color_table, tile_count, tile_scale, true))
-	_merge_counts(counts, _add_greedy_top_bottom_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, air_id, solid_table, ramp_table, color_table, tile_count, tile_scale, false))
-	_merge_counts(counts, _add_greedy_z_side_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, air_id, solid_table, ramp_table, color_table, tile_count, tile_scale, true))
-	_merge_counts(counts, _add_greedy_z_side_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, air_id, solid_table, ramp_table, color_table, tile_count, tile_scale, false))
-	_merge_counts(counts, _add_greedy_x_side_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, air_id, solid_table, ramp_table, color_table, tile_count, tile_scale, true))
-	_merge_counts(counts, _add_greedy_x_side_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, air_id, solid_table, ramp_table, color_table, tile_count, tile_scale, false))
-	return counts
+	# visible, occluded, source_visible
+	var counts := PackedInt32Array([0, 0, 0])
+	if padded_size == chunk_size + 2 and padded_blocks.size() == padded_size * padded_size * padded_size:
+		_ensure_face_tables(solid_table, ramp_table, air_id)
+		_add_greedy_top_bottom_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, color_table, tile_count, tile_scale, true, counts)
+		_add_greedy_top_bottom_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, color_table, tile_count, tile_scale, false, counts)
+		_add_greedy_z_side_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, color_table, tile_count, tile_scale, true, counts)
+		_add_greedy_z_side_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, color_table, tile_count, tile_scale, false, counts)
+		_add_greedy_x_side_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, color_table, tile_count, tile_scale, true, counts)
+		_add_greedy_x_side_faces(vertices, normals, colors, uvs, uv2s, padded_blocks, padded_size, chunk_size, cx, cy, cz, color_table, tile_count, tile_scale, false, counts)
+	return {"visible": counts[0], "occluded": counts[1], "source_visible": counts[2]}
 
 
-func _merge_counts(target: Dictionary, source: Dictionary) -> void:
-	target["visible"] = int(target.get("visible", 0)) + int(source.get("visible", 0))
-	target["occluded"] = int(target.get("occluded", 0)) + int(source.get("occluded", 0))
-	target["source_visible"] = int(target.get("source_visible", 0)) + int(source.get("source_visible", 0))
+## The cell record the face emitters read, for the first cell of a merged face.
+func _greedy_cell(code: int, wx: int, wy: int, wz: int) -> Dictionary:
+	return {
+		"block_id": (code - 1) >> 1,
+		"sample_x": wx,
+		"sample_y": wy,
+		"sample_z": wz,
+		"top_flag": 0.0,
+		"covered_from_above": ((code - 1) & 1) == 1,
+	}
 
 
 func _add_greedy_top_bottom_faces(
@@ -578,93 +643,73 @@ func _add_greedy_top_bottom_faces(
 	uvs: PackedVector2Array,
 	uv2s: PackedVector2Array,
 	padded_blocks: PackedByteArray,
-	padded_size: int,
-	chunk_size: int,
+	ps: int,
+	n: int,
 	cx: int,
 	cy: int,
 	cz: int,
-	air_id: int,
-	solid_table: PackedByteArray,
-	ramp_table: PackedByteArray,
 	color_table: PackedColorArray,
 	tile_count: int,
 	tile_scale: Vector2,
-	is_top: bool
-) -> Dictionary:
-	var counts := {"visible": 0, "occluded": 0, "source_visible": 0}
-	for ly in range(chunk_size):
-		var mask := []
-		mask.resize(chunk_size * chunk_size)
-		for lx in range(chunk_size):
-			for lz in range(chunk_size):
-				var block_id := padded_block(padded_blocks, padded_size, lx + 1, ly + 1, lz + 1, air_id)
-				if not _is_greedy_cube_block(block_id, air_id, ramp_table):
-					continue
-				var above_id := padded_block(padded_blocks, padded_size, lx + 1, ly + 2, lz + 1, air_id)
-				var covered_from_above := is_solid_id(above_id, solid_table)
-				var neighbor_id: int
-				if is_top:
-					neighbor_id = above_id
-				else:
-					neighbor_id = padded_block(padded_blocks, padded_size, lx + 1, ly, lz + 1, air_id)
-				var neighbor_occluding := is_solid_id(neighbor_id, solid_table)
-				if is_top:
-					# Covered tops are cut faces, visible only at the render level (SEE-ADR-020);
-					# the renderer draws them as a per-level slice cap instead of a
-					# sheet for every block layer (90% of chunk quads before).
-					if neighbor_occluding:
-						counts["occluded"] = int(counts["occluded"]) + 1
-						continue
-					mask[lz * chunk_size + lx] = _make_greedy_cell(block_id, lx, ly, lz, cx, cy, cz, chunk_size, 0.0, true, covered_from_above)
-				elif neighbor_occluding:
-					counts["occluded"] = int(counts["occluded"]) + 1
-				else:
-					mask[lz * chunk_size + lx] = _make_greedy_cell(block_id, lx, ly, lz, cx, cy, cz, chunk_size, 0.0, true, covered_from_above)
-		_merge_counts(counts, _emit_greedy_xz_mask(vertices, normals, colors, uvs, uv2s, mask, chunk_size, ly, is_top, color_table, tile_count, tile_scale))
-	return counts
-
-
-func _emit_greedy_xz_mask(
-	vertices: PackedVector3Array,
-	normals: PackedVector3Array,
-	colors: PackedColorArray,
-	uvs: PackedVector2Array,
-	uv2s: PackedVector2Array,
-	mask: Array,
-	chunk_size: int,
-	ly: int,
 	is_top: bool,
-	color_table: PackedColorArray,
-	tile_count: int,
-	tile_scale: Vector2
-) -> Dictionary:
-	var counts := {"visible": 0, "occluded": 0, "source_visible": 0}
-	for z in range(chunk_size):
-		for x in range(chunk_size):
-			var index: int = z * chunk_size + x
-			var cell = mask[index]
-			if typeof(cell) != TYPE_DICTIONARY:
-				continue
-			var width := 1
-			while x + width < chunk_size and _same_greedy_cell(cell, mask[z * chunk_size + x + width]):
-				width += 1
-			var depth := 1
-			var can_grow := true
-			while z + depth < chunk_size and can_grow:
-				for dx in range(width):
-					if not _same_greedy_cell(cell, mask[(z + depth) * chunk_size + x + dx]):
-						can_grow = false
-						break
-				if can_grow:
-					depth += 1
-			for dz in range(depth):
-				for dx in range(width):
-					mask[(z + dz) * chunk_size + x + dx] = null
-			_emit_greedy_xz_face(vertices, normals, colors, uvs, uv2s, x, z, width, depth, ly, is_top, cell, color_table, tile_count, tile_scale)
-			if bool(cell.get("visible_counted", true)):
-				counts["visible"] = int(counts["visible"]) + 1
-				counts["source_visible"] = int(counts["source_visible"]) + width * depth
-	return counts
+	counts: PackedInt32Array
+) -> void:
+	var cube := _cube_ids
+	var solid := _solid_ids
+	var mask := PackedInt32Array()
+	mask.resize(n * n)
+	var neighbor_step := ps if is_top else -ps
+	var visible := 0
+	var occluded := 0
+	var source_visible := 0
+	for ly in range(n):
+		var any := false
+		for lz in range(n):
+			var row := ((lz + 1) * ps + ly + 1) * ps + 1
+			var mask_row := lz * n
+			for lx in range(n):
+				var idx := row + lx
+				var block_id: int = padded_blocks[idx]
+				if cube[block_id] == 0:
+					continue
+				# Covered tops are cut faces, visible only at the render level (SEE-ADR-020);
+				# the renderer draws them as a per-level slice cap instead of a
+				# sheet for every block layer (90% of chunk quads before).
+				if solid[padded_blocks[idx + neighbor_step]] != 0:
+					occluded += 1
+					continue
+				mask[mask_row + lx] = ((block_id << 1) | solid[padded_blocks[idx + ps]]) + 1
+				any = true
+		if not any:
+			continue
+		# Every used cell is cleared below, so the mask is empty again afterwards.
+		for z in range(n):
+			for x in range(n):
+				var code: int = mask[z * n + x]
+				if code == 0:
+					continue
+				var width := 1
+				while x + width < n and mask[z * n + x + width] == code:
+					width += 1
+				var depth := 1
+				var can_grow := true
+				while z + depth < n and can_grow:
+					for dx in range(width):
+						if mask[(z + depth) * n + x + dx] != code:
+							can_grow = false
+							break
+					if can_grow:
+						depth += 1
+				for dz in range(depth):
+					for dx in range(width):
+						mask[(z + dz) * n + x + dx] = 0
+				_emit_greedy_xz_face(vertices, normals, colors, uvs, uv2s, x, z, width, depth, ly, is_top,
+					_greedy_cell(code, cx * n + x, cy * n + ly, cz * n + z), color_table, tile_count, tile_scale)
+				visible += 1
+				source_visible += width * depth
+	counts[0] += visible
+	counts[1] += occluded
+	counts[2] += source_visible
 
 
 func _add_greedy_z_side_faces(
@@ -674,53 +719,53 @@ func _add_greedy_z_side_faces(
 	uvs: PackedVector2Array,
 	uv2s: PackedVector2Array,
 	padded_blocks: PackedByteArray,
-	padded_size: int,
-	chunk_size: int,
+	ps: int,
+	n: int,
 	cx: int,
 	cy: int,
 	cz: int,
-	air_id: int,
-	solid_table: PackedByteArray,
-	ramp_table: PackedByteArray,
 	color_table: PackedColorArray,
 	tile_count: int,
 	tile_scale: Vector2,
-	is_forward: bool
-) -> Dictionary:
-	var counts := {"visible": 0, "occluded": 0, "source_visible": 0}
-	for ly in range(chunk_size):
-		for lz in range(chunk_size):
+	is_forward: bool,
+	counts: PackedInt32Array
+) -> void:
+	var cube := _cube_ids
+	var solid := _solid_ids
+	# The neighbour is seen through the face that points back at this block.
+	var occludes := _occludes_back if is_forward else _occludes_forward
+	var neighbor_step := ps * ps if is_forward else -ps * ps
+	var visible := 0
+	var occluded := 0
+	var source_visible := 0
+	for ly in range(n):
+		for lz in range(n):
+			var row := ((lz + 1) * ps + ly + 1) * ps + 1
 			var run_start := -1
-			var run_cell: Variant = null
-			for lx in range(chunk_size + 1):
-				var cell: Variant = null
-				if lx < chunk_size:
-					var block_id := padded_block(padded_blocks, padded_size, lx + 1, ly + 1, lz + 1, air_id)
-					if _is_greedy_cube_block(block_id, air_id, ramp_table):
-						var above_id := padded_block(padded_blocks, padded_size, lx + 1, ly + 2, lz + 1, air_id)
-						var covered_from_above := is_solid_id(above_id, solid_table)
-						var neighbor_id: int
-						var neighbor_face: Vector3
-						if is_forward:
-							neighbor_id = padded_block(padded_blocks, padded_size, lx + 1, ly + 1, lz + 2, air_id)
-							neighbor_face = Vector3.BACK
+			var run_code := 0
+			for lx in range(n + 1):
+				var code := 0
+				if lx < n:
+					var idx := row + lx
+					var block_id: int = padded_blocks[idx]
+					if cube[block_id] != 0:
+						if occludes[padded_blocks[idx + neighbor_step]] != 0:
+							occluded += 1
 						else:
-							neighbor_id = padded_block(padded_blocks, padded_size, lx + 1, ly + 1, lz, air_id)
-							neighbor_face = Vector3.FORWARD
-						if is_face_occluding(neighbor_id, solid_table, ramp_table, neighbor_face):
-							counts["occluded"] = int(counts["occluded"]) + 1
-						else:
-							cell = _make_greedy_cell(block_id, lx, ly, lz, cx, cy, cz, chunk_size, 0.0, true, covered_from_above)
-				if run_start >= 0 and not _same_greedy_cell(run_cell, cell):
-					_emit_greedy_z_face(vertices, normals, colors, uvs, uv2s, run_start, lx - run_start, ly, lz, is_forward, run_cell, color_table, tile_count, tile_scale)
-					counts["visible"] = int(counts["visible"]) + 1
-					counts["source_visible"] = int(counts["source_visible"]) + lx - run_start
+							code = ((block_id << 1) | solid[padded_blocks[idx + ps]]) + 1
+				if run_start >= 0 and code != run_code:
+					_emit_greedy_z_face(vertices, normals, colors, uvs, uv2s, run_start, lx - run_start, ly, lz, is_forward,
+						_greedy_cell(run_code, cx * n + run_start, cy * n + ly, cz * n + lz), color_table, tile_count, tile_scale)
+					visible += 1
+					source_visible += lx - run_start
 					run_start = -1
-					run_cell = null
-				if run_start < 0 and typeof(cell) == TYPE_DICTIONARY:
+					run_code = 0
+				if run_start < 0 and code != 0:
 					run_start = lx
-					run_cell = cell
-	return counts
+					run_code = code
+	counts[0] += visible
+	counts[1] += occluded
+	counts[2] += source_visible
 
 
 func _add_greedy_x_side_faces(
@@ -730,79 +775,57 @@ func _add_greedy_x_side_faces(
 	uvs: PackedVector2Array,
 	uv2s: PackedVector2Array,
 	padded_blocks: PackedByteArray,
-	padded_size: int,
-	chunk_size: int,
+	ps: int,
+	n: int,
 	cx: int,
 	cy: int,
 	cz: int,
-	air_id: int,
-	solid_table: PackedByteArray,
-	ramp_table: PackedByteArray,
 	color_table: PackedColorArray,
 	tile_count: int,
 	tile_scale: Vector2,
-	is_right: bool
-) -> Dictionary:
-	var counts := {"visible": 0, "occluded": 0, "source_visible": 0}
-	for ly in range(chunk_size):
-		for lx in range(chunk_size):
+	is_right: bool,
+	counts: PackedInt32Array
+) -> void:
+	var cube := _cube_ids
+	var solid := _solid_ids
+	var occludes := _occludes_left if is_right else _occludes_right
+	var neighbor_step := 1 if is_right else -1
+	var layer := ps * ps
+	var visible := 0
+	var occluded := 0
+	var source_visible := 0
+	for ly in range(n):
+		for lx in range(n):
+			var column := (ps + ly + 1) * ps + lx + 1
 			var run_start := -1
-			var run_cell: Variant = null
-			for lz in range(chunk_size + 1):
-				var cell: Variant = null
-				if lz < chunk_size:
-					var block_id := padded_block(padded_blocks, padded_size, lx + 1, ly + 1, lz + 1, air_id)
-					if _is_greedy_cube_block(block_id, air_id, ramp_table):
-						var above_id := padded_block(padded_blocks, padded_size, lx + 1, ly + 2, lz + 1, air_id)
-						var covered_from_above := is_solid_id(above_id, solid_table)
-						var neighbor_id: int
-						var neighbor_face: Vector3
-						if is_right:
-							neighbor_id = padded_block(padded_blocks, padded_size, lx + 2, ly + 1, lz + 1, air_id)
-							neighbor_face = Vector3.LEFT
+			var run_code := 0
+			for lz in range(n + 1):
+				var code := 0
+				if lz < n:
+					var idx := column + lz * layer
+					var block_id: int = padded_blocks[idx]
+					if cube[block_id] != 0:
+						if occludes[padded_blocks[idx + neighbor_step]] != 0:
+							occluded += 1
 						else:
-							neighbor_id = padded_block(padded_blocks, padded_size, lx, ly + 1, lz + 1, air_id)
-							neighbor_face = Vector3.RIGHT
-						if is_face_occluding(neighbor_id, solid_table, ramp_table, neighbor_face):
-							counts["occluded"] = int(counts["occluded"]) + 1
-						else:
-							cell = _make_greedy_cell(block_id, lx, ly, lz, cx, cy, cz, chunk_size, 0.0, true, covered_from_above)
-				if run_start >= 0 and not _same_greedy_cell(run_cell, cell):
-					_emit_greedy_x_face(vertices, normals, colors, uvs, uv2s, lx, ly, run_start, lz - run_start, is_right, run_cell, color_table, tile_count, tile_scale)
-					counts["visible"] = int(counts["visible"]) + 1
-					counts["source_visible"] = int(counts["source_visible"]) + lz - run_start
+							code = ((block_id << 1) | solid[padded_blocks[idx + ps]]) + 1
+				if run_start >= 0 and code != run_code:
+					_emit_greedy_x_face(vertices, normals, colors, uvs, uv2s, lx, ly, run_start, lz - run_start, is_right,
+						_greedy_cell(run_code, cx * n + lx, cy * n + ly, cz * n + run_start), color_table, tile_count, tile_scale)
+					visible += 1
+					source_visible += lz - run_start
 					run_start = -1
-					run_cell = null
-				if run_start < 0 and typeof(cell) == TYPE_DICTIONARY:
+					run_code = 0
+				if run_start < 0 and code != 0:
 					run_start = lz
-					run_cell = cell
-	return counts
+					run_code = code
+	counts[0] += visible
+	counts[1] += occluded
+	counts[2] += source_visible
 
 
 func _is_greedy_cube_block(block_id: int, air_id: int, ramp_table: PackedByteArray) -> bool:
 	return block_id != air_id and not is_ramp_id(block_id, ramp_table) and not is_flight_id(block_id)
-
-
-func _make_greedy_cell(block_id: int, lx: int, ly: int, lz: int, cx: int, cy: int, cz: int, chunk_size: int, top_flag: float, visible_counted: bool, covered_from_above: bool) -> Dictionary:
-	var top_key := 1 if top_flag > 0.5 else 0
-	var visible_key := 1 if visible_counted else 0
-	var covered_key := 1 if covered_from_above else 0
-	return {
-		"key": "%d:%d:%d:%d" % [block_id, top_key, visible_key, covered_key],
-		"block_id": block_id,
-		"sample_x": cx * chunk_size + lx,
-		"sample_y": cy * chunk_size + ly,
-		"sample_z": cz * chunk_size + lz,
-		"top_flag": top_flag,
-		"visible_counted": visible_counted,
-		"covered_from_above": covered_from_above,
-	}
-
-
-func _same_greedy_cell(a: Variant, b: Variant) -> bool:
-	if typeof(a) != TYPE_DICTIONARY or typeof(b) != TYPE_DICTIONARY:
-		return false
-	return String(a.get("key", "")) == String(b.get("key", ""))
 
 
 func _debug_face_alpha(face_start_vertex: int) -> float:

@@ -26,8 +26,9 @@ const MESH_APPLY_BUDGET := 8
 const MESH_WORK_BUDGET_MS := 40.0
 const MESH_RESULT_BACKLOG_MAX := 32
 ## Upper bound on mesh worker threads. GDScript meshing threads contend with each
-## other: measured on a 24-thread CPU, 1/2/3/4/6/8 workers built 84/122/166/173/
-## 143/67 chunks a second, so more than three buys almost nothing.
+## other, so gains shrink: measured on a 24-thread CPU, 1/2/3/4/6 workers built
+## 399/701/935/1080/1188 chunks a second. Three leaves cores for generation,
+## culling and path searches.
 const MESH_WORKER_THREADS_MAX := 3
 const MESH_RESULT_BACKLOG_SLEEP_USEC := 500
 const MESH_CACHE_RADIUS := 0
@@ -1183,8 +1184,23 @@ func _fill_slice_caps_in_zone() -> void:
 	var args: Array = _last_zone_args
 	if slice_cy < int(args[4]) or slice_cy > int(args[5]):
 		return
-	for cx in range(maxi(args[0], world.WORLD_MIN_CHUNK_X), mini(args[1], world.WORLD_MAX_CHUNK_X) + 1):
-		for cz in range(maxi(args[2], world.WORLD_MIN_CHUNK_Z), mini(args[3], world.WORLD_MAX_CHUNK_Z) + 1):
+	var min_cx: int = maxi(args[0], world.WORLD_MIN_CHUNK_X)
+	var max_cx: int = mini(args[1], world.WORLD_MAX_CHUNK_X)
+	var min_cz: int = maxi(args[2], world.WORLD_MIN_CHUNK_Z)
+	var max_cz: int = mini(args[3], world.WORLD_MAX_CHUNK_Z)
+	# A cap is only seen where the slice layer itself is on screen. The zone box
+	# also spans the shifted footprints of every deeper layer: on a 512 world it
+	# held about 1,280 columns against roughly 120 for the slice layer, and
+	# building them all made each level step a 145 ms hitch. Use the slice
+	# layer's footprint (with the one-chunk margin streaming uses) when known.
+	var footprint: Variant = world.streaming.render_band_chunk_bounds.get(slice_cy) if world.streaming != null else null
+	if footprint is Rect2i and footprint.has_area():
+		min_cx = maxi(min_cx, footprint.position.x - 1)
+		max_cx = mini(max_cx, footprint.end.x)
+		min_cz = maxi(min_cz, footprint.position.y - 1)
+		max_cz = mini(max_cz, footprint.end.y)
+	for cx in range(min_cx, max_cx + 1):
+		for cz in range(min_cz, max_cz + 1):
 			var coord := Vector3i(cx, slice_cy, cz)
 			if _slice_cap_checked.has(coord):
 				continue

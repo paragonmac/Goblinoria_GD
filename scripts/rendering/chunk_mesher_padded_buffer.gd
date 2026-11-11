@@ -2,45 +2,61 @@ extends RefCounted
 class_name ChunkMesherPaddedBuffer
 
 
+## Copies a chunk and the facing layer of each present neighbour into a buffer
+## padded by one cell on every side. Runs for every mesh job, on the main thread.
+## Rows along X are contiguous in both layouts, so 8-cell rows move as one
+## 64-bit value; other chunk sizes copy cell by cell.
 func build_padded_block_buffer(chunk_size: int, blocks: PackedByteArray, neighbors: Dictionary, air_id: int) -> PackedByteArray:
-	var padded_size: int = chunk_size + 2
+	var n := chunk_size
+	var ps: int = n + 2
 	var padded := PackedByteArray()
-	padded.resize(padded_size * padded_size * padded_size)
+	padded.resize(ps * ps * ps)
 	padded.fill(air_id)
-	for lx in range(chunk_size):
-		for ly in range(chunk_size):
-			for lz in range(chunk_size):
-				padded[padded_index(padded_size, lx + 1, ly + 1, lz + 1)] = blocks[chunk_index(chunk_size, lx, ly, lz)]
-	_copy_neighbor_face_into_padded(padded, padded_size, chunk_size, neighbors.get("x_neg", null), "x_neg")
-	_copy_neighbor_face_into_padded(padded, padded_size, chunk_size, neighbors.get("x_pos", null), "x_pos")
-	_copy_neighbor_face_into_padded(padded, padded_size, chunk_size, neighbors.get("y_neg", null), "y_neg")
-	_copy_neighbor_face_into_padded(padded, padded_size, chunk_size, neighbors.get("y_pos", null), "y_pos")
-	_copy_neighbor_face_into_padded(padded, padded_size, chunk_size, neighbors.get("z_neg", null), "z_neg")
-	_copy_neighbor_face_into_padded(padded, padded_size, chunk_size, neighbors.get("z_pos", null), "z_pos")
+	var wide_rows := n == 8
+	for lz in range(n):
+		for ly in range(n):
+			var source := (lz * n + ly) * n
+			var target := ((lz + 1) * ps + ly + 1) * ps + 1
+			if wide_rows:
+				padded.encode_s64(target, blocks.decode_s64(source))
+			else:
+				for lx in range(n):
+					padded[target + lx] = blocks[source + lx]
+	var cell_count := n * n * n
+	for side: String in ["x_neg", "x_pos", "y_neg", "y_pos", "z_neg", "z_pos"]:
+		var value: Variant = neighbors.get(side, null)
+		if typeof(value) != TYPE_PACKED_BYTE_ARRAY:
+			continue
+		var other: PackedByteArray = value
+		if other.size() != cell_count:
+			continue
+		match side:
+			"x_neg", "x_pos":
+				# One cell per row: the neighbour's far or near X column.
+				var source_x := n - 1 if side == "x_neg" else 0
+				var target_x := 0 if side == "x_neg" else n + 1
+				for lz in range(n):
+					for ly in range(n):
+						padded[((lz + 1) * ps + ly + 1) * ps + target_x] = other[(lz * n + ly) * n + source_x]
+			"y_neg", "y_pos":
+				var source_y := n - 1 if side == "y_neg" else 0
+				var target_y := 0 if side == "y_neg" else n + 1
+				for lz in range(n):
+					_copy_row(padded, ((lz + 1) * ps + target_y) * ps + 1, other, (lz * n + source_y) * n, n, wide_rows)
+			_:
+				var source_z := n - 1 if side == "z_neg" else 0
+				var target_z := 0 if side == "z_neg" else n + 1
+				for ly in range(n):
+					_copy_row(padded, (target_z * ps + ly + 1) * ps + 1, other, (source_z * n + ly) * n, n, wide_rows)
 	return padded
 
 
-func _copy_neighbor_face_into_padded(padded: PackedByteArray, padded_size: int, chunk_size: int, neighbor_blocks: Variant, side: String) -> void:
-	if typeof(neighbor_blocks) != TYPE_PACKED_BYTE_ARRAY:
+func _copy_row(padded: PackedByteArray, target: int, source_blocks: PackedByteArray, source: int, n: int, wide_rows: bool) -> void:
+	if wide_rows:
+		padded.encode_s64(target, source_blocks.decode_s64(source))
 		return
-	var blocks: PackedByteArray = PackedByteArray(neighbor_blocks)
-	if blocks.size() != chunk_size * chunk_size * chunk_size:
-		return
-	for a in range(chunk_size):
-		for b in range(chunk_size):
-			match side:
-				"x_neg":
-					padded[padded_index(padded_size, 0, a + 1, b + 1)] = blocks[chunk_index(chunk_size, chunk_size - 1, a, b)]
-				"x_pos":
-					padded[padded_index(padded_size, chunk_size + 1, a + 1, b + 1)] = blocks[chunk_index(chunk_size, 0, a, b)]
-				"y_neg":
-					padded[padded_index(padded_size, a + 1, 0, b + 1)] = blocks[chunk_index(chunk_size, a, chunk_size - 1, b)]
-				"y_pos":
-					padded[padded_index(padded_size, a + 1, chunk_size + 1, b + 1)] = blocks[chunk_index(chunk_size, a, 0, b)]
-				"z_neg":
-					padded[padded_index(padded_size, a + 1, b + 1, 0)] = blocks[chunk_index(chunk_size, a, b, chunk_size - 1)]
-				"z_pos":
-					padded[padded_index(padded_size, a + 1, b + 1, chunk_size + 1)] = blocks[chunk_index(chunk_size, a, b, 0)]
+	for lx in range(n):
+		padded[target + lx] = source_blocks[source + lx]
 
 
 func chunk_index(chunk_size: int, lx: int, ly: int, lz: int) -> int:
